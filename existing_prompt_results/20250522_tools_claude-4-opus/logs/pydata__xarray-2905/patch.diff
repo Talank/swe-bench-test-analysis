@@ -1,0 +1,350 @@
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 00000000..026036d7
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,65 @@
++"""Final comprehensive test of the fix."""
++
++import xarray as xr
++import pandas as pd
++import numpy as np
++
++
++def test_objects_with_values_property():
++    """Test that objects with .values property are preserved."""
++    
++    # Test case from the issue
++    good_indexed, bad_indexed = xr.DataArray([None]), xr.DataArray([None])
++
++    class HasValues(object):
++        values = 5
++        
++    good_indexed.loc[{'dim_0': 0}] = set()
++    bad_indexed.loc[{'dim_0': 0}] = HasValues()
++
++    # Check that set is preserved
++    assert isinstance(good_indexed.values[0], set)
++    print("✓ Set object preserved correctly")
++    
++    # Check that HasValues object is preserved (this was the bug)
++    assert isinstance(bad_indexed.values[0], HasValues)
++    assert bad_indexed.values[0].values == 5
++    print("✓ Object with .values property preserved correctly")
++    
++    # Test with more complex objects
++    class ModelResult:
++        """Simulating lmfit ModelResult or similar."""
++        def __init__(self, params, values):
++            self.params = params
++            self.values = values
++            self.success = True
++    
++    da = xr.DataArray(np.empty((3, 3), dtype=object), dims=['x', 'y'])
++    result = ModelResult({'a': 1, 'b': 2}, np.array([1, 2, 3]))
++    
++    # Assign to a single location
++    da.loc[{'x': 0, 'y': 0}] = result
++    assert isinstance(da.values[0, 0], ModelResult)
++    assert da.values[0, 0].params == {'a': 1, 'b': 2}
++    assert np.array_equal(da.values[0, 0].values, [1, 2, 3])
++    print("✓ Complex object with .values preserved correctly")
++    
++    # Test that pandas objects still work correctly
++    series = pd.Series([1, 2, 3])
++    da2 = xr.DataArray([0, 0, 0], dims=['x'])
++    da2.loc[{'x': 0}] = series.iloc[0]  # Assign a scalar from series
++    assert da2.values[0] == 1
++    print("✓ Pandas Series values still extracted correctly")
++    
++    # Test with DataFrame
++    df = pd.DataFrame({'a': [10, 20, 30]})
++    da3 = xr.DataArray(np.zeros((3, 1)), dims=['x', 'y'])
++    da3.loc[:] = df.values
++    assert np.array_equal(da3.values, df.values)
++    print("✓ Pandas DataFrame values still extracted correctly")
++    
++    print("\nAll tests passed! The fix works correctly.")
++
++
++if __name__ == "__main__":
++    test_objects_with_values_property()
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..93e93c25
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,28 @@
++import xarray as xr
++import numpy as np
++
++# Create test DataArrays
++good_indexed, bad_indexed = xr.DataArray([None]), xr.DataArray([None])
++
++class HasValues(object):
++    values = 5
++    
++# Test assignments
++good_indexed.loc[{'dim_0': 0}] = set()
++bad_indexed.loc[{'dim_0': 0}] = HasValues()
++
++print("Good indexed (set):")
++print(f"  values: {good_indexed.values}")
++print(f"  dtype: {good_indexed.dtype}")
++print(f"  actual content: {good_indexed.values[0]}")
++print(f"  type: {type(good_indexed.values[0])}")
++
++print("\nBad indexed (HasValues object):")
++print(f"  values: {bad_indexed.values}")
++print(f"  dtype: {bad_indexed.dtype}")
++print(f"  actual content: {bad_indexed.values[0]}")
++print(f"  type: {type(bad_indexed.values[0])}")
++
++# Expected: bad_indexed.values[0] should be a HasValues instance
++# Actual: bad_indexed.values[0] is array(5)
++print(f"\nIs bad_indexed.values[0] a HasValues instance? {isinstance(bad_indexed.values[0], HasValues)}")
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 00000000..d54d7d23
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,22 @@
++import numpy as np
++from xarray.core.variable import as_compatible_data
++
++class HasValues:
++    def __init__(self, values):
++        self.values = values
++
++obj = HasValues(5)
++result = as_compatible_data(obj)
++
++print(f"Type of result: {type(result)}")
++print(f"Is ndarray: {isinstance(result, np.ndarray)}")
++print(f"Result: {result}")
++
++# Try the assertion
++try:
++    assert isinstance(result, np.ndarray)
++    print("Assertion passed!")
++except AssertionError:
++    print("Assertion failed!")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_object_values_property.py b/test_object_values_property.py
+new file mode 100644
+index 00000000..ee6bbff3
+--- /dev/null
++++ b/test_object_values_property.py
+@@ -0,0 +1,77 @@
++"""Test to be added to xarray/tests/test_variable.py"""
++
++import numpy as np
++import pandas as pd
++import xarray as xr
++from xarray.core.variable import as_compatible_data
++
++
++def test_as_compatible_data_preserves_objects_with_values():
++    """Test that as_compatible_data doesn't extract .values from arbitrary objects."""
++    
++    class HasValues:
++        """Test class with a values property."""
++        def __init__(self, values):
++            self.values = values
++    
++    # Test that objects with .values are preserved
++    obj = HasValues(5)
++    result = as_compatible_data(obj)
++    # as_compatible_data wraps scalars in 0-d arrays
++    assert isinstance(result, np.ndarray)
++    assert result.shape == ()
++    assert result.dtype == object
++    # The object itself should be preserved
++    assert result.item() is obj
++    assert result.item().values == 5
++    
++    # Test that pandas objects still have .values extracted
++    series = pd.Series([1, 2, 3])
++    result = as_compatible_data(series)
++    assert isinstance(result, np.ndarray)
++    assert np.array_equal(result, [1, 2, 3])
++    
++    df = pd.DataFrame({'a': [1, 2, 3]})
++    result = as_compatible_data(df)
++    assert isinstance(result, np.ndarray)
++    assert result.shape == (3, 1)
++    
++    # pd.Index is handled specially and wrapped in PandasIndexAdapter
++    index = pd.Index([1, 2, 3])
++    result = as_compatible_data(index)
++    # pd.Index objects are wrapped in adapters, not converted to plain arrays
++    from xarray.core.indexing import PandasIndexAdapter
++    assert isinstance(result, PandasIndexAdapter)
++
++
++def test_variable_setitem_preserves_objects_with_values():
++    """Test that Variable.__setitem__ preserves objects with .values property."""
++    
++    class HasValues:
++        """Test class with a values property."""
++        def __init__(self, values):
++            self.values = values
++            self._id = id(self)
++    
++    # Test scalar assignment
++    var = xr.Variable('x', [None])
++    obj = HasValues(5)
++    var[0] = obj
++    
++    assert isinstance(var.values[0], HasValues)
++    assert var.values[0].values == 5
++    assert var.values[0]._id == obj._id
++    
++    # Test with DataArray (higher-level API)
++    da = xr.DataArray([None, None], dims=['x'])
++    obj2 = HasValues([1, 2, 3])
++    da.loc[{'x': 0}] = obj2
++    
++    assert isinstance(da.values[0], HasValues)
++    assert da.values[0].values == [1, 2, 3]
++
++
++if __name__ == "__main__":
++    test_as_compatible_data_preserves_objects_with_values()
++    test_variable_setitem_preserves_objects_with_values()
++    print("All tests passed!")
+diff --git a/test_values_property.py b/test_values_property.py
+new file mode 100644
+index 00000000..ade4e905
+--- /dev/null
++++ b/test_values_property.py
+@@ -0,0 +1,76 @@
++import xarray as xr
++import numpy as np
++import pytest
++
++
++class HasValues:
++    """Test class with a values property."""
++    def __init__(self, value):
++        self.values = value
++        self._id = id(self)  # To track identity
++    
++    def __repr__(self):
++        return f"HasValues({self.values})"
++
++
++def test_setitem_preserves_objects_with_values_property():
++    """Test that objects with a .values property are not coerced."""
++    # Create a DataArray with object dtype
++    da = xr.DataArray([None], dims=['x'])
++    
++    # Create an instance of our test class
++    obj = HasValues(5)
++    
++    # Assign the object to the DataArray
++    da.loc[{'x': 0}] = obj
++    
++    # The object should be stored as-is, not have its .values extracted
++    assert isinstance(da.values[0], HasValues), f"Expected HasValues instance, got {type(da.values[0])}"
++    assert da.values[0]._id == obj._id, "Object identity should be preserved"
++    
++    # Test with broadcasting
++    da2 = xr.DataArray([None, None], dims=['x'])
++    obj2 = HasValues([1, 2, 3])
++    da2.loc[{'x': 0}] = obj2
++    assert isinstance(da2.values[0], HasValues), "Object should be preserved even with list values"
++
++
++def test_setitem_with_numpy_like_objects():
++    """Test that numpy-like objects (arrays, etc.) are still handled correctly."""
++    da = xr.DataArray([1, 2, 3], dims=['x'])
++    
++    # Assigning numpy arrays should work as before
++    da.loc[{'x': 0}] = np.array(10)
++    assert da.values[0] == 10
++    
++    # Assigning scalars should work as before
++    da.loc[{'x': 1}] = 20
++    assert da.values[1] == 20
++
++
++def test_setitem_preserves_non_values_objects():
++    """Test that objects without a .values property work correctly."""
++    da = xr.DataArray([None], dims=['x'])
++    
++    # Test with set
++    da.loc[{'x': 0}] = set([1, 2, 3])
++    assert isinstance(da.values[0], set)
++    assert da.values[0] == {1, 2, 3}
++    
++    # Test with custom object without values
++    class NoValues:
++        def __init__(self, data):
++            self.data = data
++    
++    obj = NoValues(42)
++    da2 = xr.DataArray([None], dims=['x'])
++    da2.loc[{'x': 0}] = obj
++    assert isinstance(da2.values[0], NoValues)
++    assert da2.values[0].data == 42
++
++
++if __name__ == "__main__":
++    test_setitem_preserves_objects_with_values_property()
++    test_setitem_with_numpy_like_objects()
++    test_setitem_preserves_non_values_objects()
++    print("All tests passed!")
+diff --git a/xarray/core/variable.py b/xarray/core/variable.py
+index 45553eb9..c8951c5e 100644
+--- a/xarray/core/variable.py
++++ b/xarray/core/variable.py
+@@ -218,7 +218,9 @@ def as_compatible_data(data, fastpath=False):
+         data = np.timedelta64(getattr(data, "value", data), "ns")
+ 
+     # we don't want nested self-described arrays
+-    data = getattr(data, "values", data)
++    # but only extract .values from pandas objects, not arbitrary objects
++    if isinstance(data, (pd.Series, pd.DataFrame, pd.Index)):
++        data = data.values
+ 
+     if isinstance(data, np.ma.MaskedArray):
+         mask = np.ma.getmaskarray(data)
+diff --git a/xarray/tests/test_variable.py b/xarray/tests/test_variable.py
+index e1ae3e1f..ff2dd2ae 100644
+--- a/xarray/tests/test_variable.py
++++ b/xarray/tests/test_variable.py
+@@ -2308,6 +2308,32 @@ class TestAsCompatibleData:
+         orig = Variable(dims=("x"), data=array, attrs={"foo": "bar"})
+         assert isinstance(orig._data, CustomIndexable)
+ 
++    def test_preserve_objects_with_values_attribute(self):
++        """Test that objects with a .values attribute are preserved, not coerced."""
++        # Regression test for GH issue - objects with .values should not have
++        # that attribute extracted unless they are pandas objects
++        class HasValues:
++            """Test object with a .values attribute."""
++            def __init__(self, values):
++                self.values = values
++                self._id = id(self)
++        
++        # Test with as_compatible_data
++        obj = HasValues(5)
++        result = as_compatible_data(obj)
++        assert isinstance(result, np.ndarray)
++        assert result.shape == ()
++        assert result.dtype == object
++        assert result.item() is obj
++        assert result.item().values == 5
++        
++        # Test with Variable.__setitem__
++        var = Variable('x', [None])
++        var[0] = obj
++        assert isinstance(var.values[0], HasValues)
++        assert var.values[0].values == 5
++        assert var.values[0]._id == obj._id
++
+ 
+ def test_raise_no_warning_for_nan_in_binary_ops():
+     with pytest.warns(None) as record:

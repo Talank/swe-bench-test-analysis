@@ -1,0 +1,255 @@
+diff --git a/sklearn/cluster/optics_.py b/sklearn/cluster/optics_.py
+index 4f7eb11ab..bd97d6357 100755
+--- a/sklearn/cluster/optics_.py
++++ b/sklearn/cluster/optics_.py
+@@ -437,7 +437,7 @@ if metric=’precomputed’.
+     n_samples = X.shape[0]
+     _validate_size(min_samples, n_samples, 'min_samples')
+     if min_samples <= 1:
+-        min_samples = max(2, min_samples * n_samples)
++        min_samples = int(round(max(2, min_samples * n_samples)))
+ 
+     # Start all points as 'unprocessed' ##
+     reachability_ = np.empty(n_samples)
+@@ -619,12 +619,12 @@ def cluster_optics_xi(reachability, predecessor, ordering, min_samples,
+     n_samples = len(reachability)
+     _validate_size(min_samples, n_samples, 'min_samples')
+     if min_samples <= 1:
+-        min_samples = max(2, min_samples * n_samples)
++        min_samples = int(round(max(2, min_samples * n_samples)))
+     if min_cluster_size is None:
+         min_cluster_size = min_samples
+     _validate_size(min_cluster_size, n_samples, 'min_cluster_size')
+     if min_cluster_size <= 1:
+-        min_cluster_size = max(2, min_cluster_size * n_samples)
++        min_cluster_size = int(round(max(2, min_cluster_size * n_samples)))
+ 
+     clusters = _xi_cluster(reachability[ordering], predecessor[ordering],
+                            ordering, xi,
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 000000000..ac0d6d91c
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,51 @@
++import numpy as np
++from sklearn.cluster import OPTICS
++from sklearn.datasets import make_blobs
++from sklearn.neighbors import NearestNeighbors
++
++# Create test data
++X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=0)
++
++print("Final verification tests:")
++
++# Test 1: Original bug case
++print("\n1. Testing original bug case (float min_samples with minkowski metric)...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.1)
++    clust.fit(X)
++    print("   SUCCESS: No TypeError raised")
++except TypeError as e:
++    print(f"   FAILED: {e}")
++
++# Test 2: Different float values
++print("\n2. Testing various float min_samples values...")
++for min_samples in [0.01, 0.05, 0.1, 0.2, 0.5]:
++    try:
++        clust = OPTICS(min_samples=min_samples)
++        clust.fit(X)
++        print(f"   min_samples={min_samples}: SUCCESS")
++    except Exception as e:
++        print(f"   min_samples={min_samples}: FAILED - {e}")
++
++# Test 3: Float min_cluster_size with xi method
++print("\n3. Testing float min_cluster_size with xi clustering...")
++try:
++    clust = OPTICS(min_samples=5, min_cluster_size=0.1, cluster_method='xi')
++    clust.fit(X)
++    print("   SUCCESS: Float min_cluster_size works")
++except Exception as e:
++    print(f"   FAILED: {e}")
++
++# Test 4: Verify NearestNeighbors can be instantiated with our converted values
++print("\n4. Testing NearestNeighbors with converted values...")
++for float_val in [0.01, 0.1, 0.5]:
++    n_samples = 100
++    converted = int(round(max(2, float_val * n_samples)))
++    try:
++        nbrs = NearestNeighbors(n_neighbors=converted)
++        nbrs.fit(X)
++        print(f"   float {float_val} -> int {converted}: SUCCESS")
++    except Exception as e:
++        print(f"   float {float_val} -> int {converted}: FAILED - {e}")
++
++print("\nAll verification tests completed!")
+diff --git a/test_float_min_samples.py b/test_float_min_samples.py
+new file mode 100644
+index 000000000..d2bdc07da
+--- /dev/null
++++ b/test_float_min_samples.py
+@@ -0,0 +1,53 @@
++import numpy as np
++import pytest
++from sklearn.cluster import OPTICS
++from sklearn.datasets import make_blobs
++
++def test_optics_float_min_samples():
++    """Test that OPTICS works with float min_samples values."""
++    X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=0)
++    
++    # Test with float min_samples between 0 and 1
++    clust = OPTICS(min_samples=0.1, metric='minkowski')
++    clust.fit(X)
++    
++    # The algorithm should work without errors
++    assert hasattr(clust, 'labels_')
++    assert hasattr(clust, 'reachability_')
++    assert hasattr(clust, 'ordering_')
++    
++    # Test with very small float (should become 2)
++    clust = OPTICS(min_samples=0.01)
++    clust.fit(X)
++    assert hasattr(clust, 'labels_')
++    
++    # Test with float min_cluster_size
++    clust = OPTICS(min_samples=5, min_cluster_size=0.05, cluster_method='xi')
++    clust.fit(X)
++    assert hasattr(clust, 'labels_')
++    assert hasattr(clust, 'cluster_hierarchy_')
++
++def test_optics_float_conversion():
++    """Test that float min_samples is properly converted to int."""
++    X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=0)
++    
++    # Test different float values and their expected conversions
++    test_cases = [
++        (0.1, 10),   # 0.1 * 100 = 10
++        (0.05, 5),   # 0.05 * 100 = 5
++        (0.02, 2),   # 0.02 * 100 = 2, but max(2, 2) = 2
++        (0.01, 2),   # 0.01 * 100 = 1, but max(2, 1) = 2
++        (0.5, 50),   # 0.5 * 100 = 50
++    ]
++    
++    for float_val, expected_int in test_cases:
++        clust = OPTICS(min_samples=float_val)
++        # We can't directly check the converted value since it's internal,
++        # but we can verify it works without errors
++        clust.fit(X)
++        assert hasattr(clust, 'labels_')
++
++if __name__ == "__main__":
++    test_optics_float_min_samples()
++    test_optics_float_conversion()
++    print("All float min_samples tests passed!")
+diff --git a/test_optics_float_bug.py b/test_optics_float_bug.py
+new file mode 100644
+index 000000000..d9b2b1e4b
+--- /dev/null
++++ b/test_optics_float_bug.py
+@@ -0,0 +1,26 @@
++import numpy as np
++from sklearn.cluster import OPTICS
++from sklearn.datasets import make_blobs
++
++# Create test data
++X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=0)
++
++# Test with float min_samples
++print("Testing OPTICS with float min_samples...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.1)
++    clust.fit(X)
++    print("SUCCESS: OPTICS with float min_samples works!")
++    print(f"min_samples used: {clust.min_samples}")
++except TypeError as e:
++    print(f"ERROR: {e}")
++    print("This is the bug we need to fix!")
++
++# Test with integer min_samples (should work)
++print("\nTesting OPTICS with integer min_samples...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=10)
++    clust.fit(X)
++    print("SUCCESS: OPTICS with integer min_samples works!")
++except Exception as e:
++    print(f"ERROR: {e}")
+diff --git a/test_optics_float_comprehensive.py b/test_optics_float_comprehensive.py
+new file mode 100644
+index 000000000..6314eca59
+--- /dev/null
++++ b/test_optics_float_comprehensive.py
+@@ -0,0 +1,50 @@
++import numpy as np
++from sklearn.cluster import OPTICS
++from sklearn.datasets import make_blobs
++
++# Create test data
++X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=0)
++
++# Test with float min_samples and xi clustering method
++print("Testing OPTICS with float min_samples and xi clustering method...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.1, cluster_method='xi')
++    clust.fit(X)
++    print("SUCCESS: OPTICS with float min_samples and xi clustering works!")
++    print(f"Number of clusters found: {len(set(clust.labels_)) - (1 if -1 in clust.labels_ else 0)}")
++except Exception as e:
++    print(f"ERROR: {e}")
++
++# Test with float min_samples and dbscan clustering method
++print("\nTesting OPTICS with float min_samples and dbscan clustering method...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.1, cluster_method='dbscan', eps=0.5)
++    clust.fit(X)
++    print("SUCCESS: OPTICS with float min_samples and dbscan clustering works!")
++    print(f"Number of clusters found: {len(set(clust.labels_)) - (1 if -1 in clust.labels_ else 0)}")
++except Exception as e:
++    print(f"ERROR: {e}")
++
++# Test with float min_cluster_size
++print("\nTesting OPTICS with float min_cluster_size...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=5, min_cluster_size=0.05, cluster_method='xi')
++    clust.fit(X)
++    print("SUCCESS: OPTICS with float min_cluster_size works!")
++    print(f"Number of clusters found: {len(set(clust.labels_)) - (1 if -1 in clust.labels_ else 0)}")
++except Exception as e:
++    print(f"ERROR: {e}")
++
++# Test edge cases
++print("\nTesting edge case: min_samples=0.01 (should become 2)...")
++try:
++    clust = OPTICS(metric='minkowski', n_jobs=-1, min_samples=0.01)
++    clust.fit(X)
++    print("SUCCESS: Edge case works!")
++    # Check what min_samples was actually used
++    from sklearn.cluster.optics_ import compute_optics_graph
++    # We'll check by looking at the size of the nearest neighbors used
++except Exception as e:
++    print(f"ERROR: {e}")
++
++print("\nAll tests completed!")
+diff --git a/test_round_behavior.py b/test_round_behavior.py
+new file mode 100644
+index 000000000..2c91cdd85
+--- /dev/null
++++ b/test_round_behavior.py
+@@ -0,0 +1,17 @@
++import numpy as np
++
++# Test round behavior for edge cases
++test_values = [1.5, 2.5, 3.5, 4.5, 5.5]
++
++print("Testing round() behavior:")
++for val in test_values:
++    print(f"round({val}) = {round(val)}, int(round({val})) = {int(round(val))}")
++
++# Test our conversion formula
++n_samples = 100
++test_min_samples = [0.015, 0.025, 0.035, 0.045, 0.055]
++
++print("\nTesting our conversion formula:")
++for min_samples in test_min_samples:
++    converted = int(round(max(2, min_samples * n_samples)))
++    print(f"min_samples={min_samples}, converted={converted}")

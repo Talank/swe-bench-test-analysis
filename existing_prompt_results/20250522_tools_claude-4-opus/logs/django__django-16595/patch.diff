@@ -1,0 +1,341 @@
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..e2682aeac0 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -264,6 +264,10 @@ class AlterField(FieldOperation):
+                     field=self.field,
+                 ),
+             ]
++        elif isinstance(operation, AlterField) and self.is_same_field_operation(
++            operation
++        ):
++            return [operation]
+         return super().reduce(operation, app_label)
+ 
+ 
+diff --git a/test_alterfield_comprehensive.py b/test_alterfield_comprehensive.py
+new file mode 100644
+index 0000000000..a4460c55ff
+--- /dev/null
++++ b/test_alterfield_comprehensive.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++"""Comprehensive test for AlterField optimization"""
++
++import os
++import sys
++import django
++from django.db import models
++from django.db.migrations import operations
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++django.setup()
++
++def test_alterfield_scenarios():
++    """Test various AlterField optimization scenarios"""
++    
++    optimizer = MigrationOptimizer()
++    
++    # Test 1: Multiple AlterField on same field should reduce to last one
++    print("Test 1: Multiple AlterField on same field")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.AlterField("Book", "title", models.CharField(max_length=200)),
++        operations.AlterField("Book", "title", models.CharField(max_length=300)),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 1
++    assert isinstance(result[0], operations.AlterField)
++    assert result[0].field.max_length == 300
++    print("✅ PASSED")
++    
++    # Test 2: AlterField on different fields should not be optimized
++    print("\nTest 2: AlterField on different fields")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.AlterField("Book", "author", models.CharField(max_length=200)),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 2
++    print("✅ PASSED")
++    
++    # Test 3: AlterField on different models should not be optimized
++    print("\nTest 3: AlterField on different models")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.AlterField("Author", "title", models.CharField(max_length=200)),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 2
++    print("✅ PASSED")
++    
++    # Test 4: AlterField with intervening non-optimizable operation
++    print("\nTest 4: AlterField with intervening RunSQL")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.RunSQL("SELECT 1"),
++        operations.AlterField("Book", "title", models.CharField(max_length=200)),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 3  # Should not optimize across RunSQL
++    print("✅ PASSED")
++    
++    # Test 5: AlterField followed by RemoveField
++    print("\nTest 5: AlterField followed by RemoveField")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.RemoveField("Book", "title"),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 1
++    assert isinstance(result[0], operations.RemoveField)
++    print("✅ PASSED")
++    
++    # Test 6: Complex field attributes
++    print("\nTest 6: Complex field attributes")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100)),
++        operations.AlterField("Book", "title", models.CharField(max_length=100, null=True)),
++        operations.AlterField("Book", "title", models.CharField(max_length=100, null=True, blank=True)),
++        operations.AlterField("Book", "title", models.CharField(max_length=100, null=True, blank=True, db_index=True)),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 1
++    assert result[0].field.null is True
++    assert result[0].field.blank is True
++    assert result[0].field.db_index is True
++    print("✅ PASSED")
++    
++    # Test 7: preserve_default parameter
++    print("\nTest 7: preserve_default parameter")
++    ops = [
++        operations.AlterField("Book", "title", models.CharField(max_length=100), preserve_default=True),
++        operations.AlterField("Book", "title", models.CharField(max_length=200), preserve_default=False),
++    ]
++    result = optimizer.optimize(ops, "books")
++    assert len(result) == 1
++    assert result[0].preserve_default is False
++    print("✅ PASSED")
++    
++    print("\n✅ All tests passed!")
++
++if __name__ == "__main__":
++    test_alterfield_scenarios()
+diff --git a/test_alterfield_optimization.py b/test_alterfield_optimization.py
+new file mode 100644
+index 0000000000..26561dde08
+--- /dev/null
++++ b/test_alterfield_optimization.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python
++"""Test script to reproduce the AlterField optimization issue"""
++
++import os
++import sys
++import django
++from django.db import models
++from django.db.migrations import operations
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++django.setup()
++
++def test_multiple_alterfield_optimization():
++    """Test that multiple AlterField operations on the same field are optimized"""
++    
++    # Test case 1: AlterField operations without AddField
++    operations_list = [
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True),
++        ),
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help"),
++        ),
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help", default=None),
++        ),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations_list, "books")
++    
++    print("Test case 1: Multiple AlterField operations")
++    print(f"Original operations: {len(operations_list)}")
++    print(f"Optimized operations: {len(result)}")
++    for i, op in enumerate(result):
++        print(f"  {i+1}. {op.__class__.__name__} - {op.name}")
++    
++    # Expected: Should reduce to a single AlterField with the final field definition
++    expected_count = 1
++    if len(result) != expected_count:
++        print(f"❌ FAILED: Expected {expected_count} operation, got {len(result)}")
++    else:
++        print(f"✅ PASSED: Correctly optimized to {expected_count} operation")
++    
++    # Test case 2: With AddField followed by AlterField operations
++    operations_with_add = [
++        operations.AddField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=256, null=True),
++        ),
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True),
++        ),
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help"),
++        ),
++        operations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help", default=None),
++        ),
++    ]
++    
++    result2 = optimizer.optimize(operations_with_add, "books")
++    
++    print("\nTest case 2: AddField followed by multiple AlterField operations")
++    print(f"Original operations: {len(operations_with_add)}")
++    print(f"Optimized operations: {len(result2)}")
++    for i, op in enumerate(result2):
++        print(f"  {i+1}. {op.__class__.__name__} - {op.name}")
++    
++    # Expected: Should reduce to a single AddField with the final field definition
++    expected_count2 = 1
++    if len(result2) != expected_count2:
++        print(f"❌ FAILED: Expected {expected_count2} operation, got {len(result2)}")
++    else:
++        print(f"✅ PASSED: Correctly optimized to {expected_count2} operation")
++
++if __name__ == "__main__":
++    test_multiple_alterfield_optimization()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..9c23b04433
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python
++"""Test the exact scenario from the problem statement"""
++
++import os
++import sys
++import django
++from django.db import models
++from django.db.migrations import operations as migrations
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++django.setup()
++
++def test_problem_statement():
++    """Test the exact scenario from the problem statement"""
++    
++    # Define the operations from the problem statement
++    operations = [
++        migrations.AddField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=256, null=True),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help"),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help", default=None),
++        ),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    
++    # Test 1: All operations together (should optimize to single AddField)
++    print("Test 1: All operations together")
++    result = optimizer.optimize(operations, "books")
++    print(f"Result: {len(result)} operation(s)")
++    assert len(result) == 1
++    assert isinstance(result[0], migrations.AddField)
++    print("✅ PASSED: Optimized to single AddField")
++    
++    # Test 2: Only AlterField operations (the issue from problem statement)
++    print("\nTest 2: Only AlterField operations (without AddField)")
++    result = optimizer.optimize(operations[1:], "books")
++    print(f"Result: {len(result)} operation(s)")
++    for i, op in enumerate(result):
++        print(f"  {i+1}. {op.__class__.__name__}")
++    
++    # Before fix: would return 3 operations
++    # After fix: should return 1 operation
++    assert len(result) == 1
++    assert isinstance(result[0], migrations.AlterField)
++    assert result[0].field.max_length == 128
++    assert result[0].field.help_text == "help"
++    assert result[0].field.default is None
++    print("✅ PASSED: Optimized to single AlterField with final field definition")
++    
++    print("\n✅ All tests passed! The issue has been fixed.")
++
++if __name__ == "__main__":
++    test_problem_statement()
+diff --git a/tests/migrations/test_optimizer.py b/tests/migrations/test_optimizer.py
+index 6485009eb4..8b2954cabf 100644
+--- a/tests/migrations/test_optimizer.py
++++ b/tests/migrations/test_optimizer.py
+@@ -822,6 +822,32 @@ class OptimizerTests(SimpleTestCase):
+             ],
+         )
+ 
++    def test_alter_field_alter_field(self):
++        """
++        Multiple AlterField operations on the same field should reduce to the last one.
++        """
++        self.assertOptimizesTo(
++            [
++                migrations.AlterField("Foo", "age", models.IntegerField()),
++                migrations.AlterField("Foo", "age", models.IntegerField(help_text="help")),
++                migrations.AlterField("Foo", "age", models.IntegerField(help_text="help", default=1)),
++            ],
++            [
++                migrations.AlterField("Foo", "age", models.IntegerField(help_text="help", default=1)),
++            ],
++        )
++
++    def test_alter_field_alter_field_different_fields(self):
++        """
++        AlterField operations on different fields should not be optimized.
++        """
++        self.assertDoesNotOptimize(
++            [
++                migrations.AlterField("Foo", "age", models.IntegerField()),
++                migrations.AlterField("Foo", "name", models.CharField(max_length=255)),
++            ],
++        )
++
+     def _test_create_alter_foo_field(self, alter):
+         """
+         CreateModel, AlterFooTogether/AlterOrderWithRespectTo followed by an

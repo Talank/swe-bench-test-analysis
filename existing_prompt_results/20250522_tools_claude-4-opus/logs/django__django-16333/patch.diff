@@ -1,0 +1,277 @@
+diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py
+index d73d1c8495..63420af94e 100644
+--- a/django/contrib/auth/forms.py
++++ b/django/contrib/auth/forms.py
+@@ -141,6 +141,8 @@ class UserCreationForm(forms.ModelForm):
+         user.set_password(self.cleaned_data["password1"])
+         if commit:
+             user.save()
++            if hasattr(self, "save_m2m"):
++                self.save_m2m()
+         return user
+ 
+ 
+diff --git a/test_m2m_issue.py b/test_m2m_issue.py
+new file mode 100644
+index 0000000000..f4ad69f35a
+--- /dev/null
++++ b/test_m2m_issue.py
+@@ -0,0 +1,83 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++sys.path.insert(0, '/testbed')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++            'tests.auth_tests',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.contrib.auth.forms import UserCreationForm
++from django.test import TestCase
++from django.core.management import call_command
++from tests.auth_tests.models.with_many_to_many import CustomUserWithM2M, Organization
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++# Create a custom UserCreationForm that includes the ManyToMany field
++class CustomUserCreationForm(UserCreationForm):
++    orgs = forms.ModelMultipleChoiceField(
++        queryset=Organization.objects.all(),
++        required=False,
++        widget=forms.CheckboxSelectMultiple
++    )
++    
++    class Meta(UserCreationForm.Meta):
++        model = CustomUserWithM2M
++        fields = ('username', 'orgs')
++
++# Test the issue
++def test_m2m_not_saved():
++    # Create some organizations
++    org1 = Organization.objects.create(name="Org 1")
++    org2 = Organization.objects.create(name="Org 2")
++    
++    # Create form data with organizations selected
++    form_data = {
++        'username': 'testuser',
++        'password1': 'testpass123',
++        'password2': 'testpass123',
++        'orgs': [org1.pk, org2.pk]
++    }
++    
++    # Create and save the form
++    form = CustomUserCreationForm(data=form_data)
++    
++    if form.is_valid():
++        user = form.save()
++        
++        # Check if organizations were saved
++        saved_orgs = list(user.orgs.all())
++        print(f"Form data orgs: {form_data['orgs']}")
++        print(f"Saved orgs: {saved_orgs}")
++        print(f"Number of saved orgs: {len(saved_orgs)}")
++        
++        if len(saved_orgs) == 0:
++            print("\nISSUE CONFIRMED: ManyToMany fields are not being saved!")
++        else:
++            print("\nManyToMany fields were saved correctly.")
++    else:
++        print(f"Form errors: {form.errors}")
++
++if __name__ == "__main__":
++    test_m2m_not_saved()
+diff --git a/tests/auth_tests/test_forms.py b/tests/auth_tests/test_forms.py
+index 78078316e8..2e4cfeb05c 100644
+--- a/tests/auth_tests/test_forms.py
++++ b/tests/auth_tests/test_forms.py
+@@ -334,6 +334,82 @@ class UserCreationFormTest(TestDataMixin, TestCase):
+                     form.fields[field_name].widget.attrs["autocomplete"], autocomplete
+                 )
+ 
++    def test_save_m2m_fields(self):
++        """Test that UserCreationForm saves ManyToMany fields."""
++        from .models.with_many_to_many import CustomUserWithM2M, Organization
++        
++        # Create test organizations
++        org1 = Organization.objects.create(name="Org 1")
++        org2 = Organization.objects.create(name="Org 2")
++        
++        # Create a custom form that includes the M2M field
++        class CustomUserCreationForm(UserCreationForm):
++            class Meta(UserCreationForm.Meta):
++                model = CustomUserWithM2M
++                fields = ("username", "orgs")
++        
++        # Test data with organizations selected
++        data = {
++            "username": "testuser",
++            "password1": "testpass123!",
++            "password2": "testpass123!",
++            "orgs": [org1.pk, org2.pk],
++        }
++        
++        form = CustomUserCreationForm(data)
++        self.assertTrue(form.is_valid())
++        
++        # Save the user
++        user = form.save()
++        
++        # Check that the organizations were saved
++        saved_orgs = list(user.orgs.all())
++        self.assertEqual(len(saved_orgs), 2)
++        self.assertIn(org1, saved_orgs)
++        self.assertIn(org2, saved_orgs)
++
++    def test_save_m2m_fields_with_commit_false(self):
++        """Test that UserCreationForm handles save_m2m when commit=False."""
++        from .models.with_many_to_many import CustomUserWithM2M, Organization
++        
++        # Create test organizations
++        org1 = Organization.objects.create(name="Org 1")
++        org2 = Organization.objects.create(name="Org 2")
++        
++        # Create a custom form that includes the M2M field
++        class CustomUserCreationForm(UserCreationForm):
++            class Meta(UserCreationForm.Meta):
++                model = CustomUserWithM2M
++                fields = ("username", "orgs")
++        
++        # Test data with organizations selected
++        data = {
++            "username": "testuser2",
++            "password1": "testpass123!",
++            "password2": "testpass123!",
++            "orgs": [org1.pk, org2.pk],
++        }
++        
++        form = CustomUserCreationForm(data)
++        self.assertTrue(form.is_valid())
++        
++        # Save the user with commit=False
++        user = form.save(commit=False)
++        
++        # M2M should not be saved yet
++        user.save()  # Need to save the user first
++        saved_orgs = list(user.orgs.all())
++        self.assertEqual(len(saved_orgs), 0)
++        
++        # Now save M2M
++        form.save_m2m()
++        
++        # Check that the organizations were saved
++        saved_orgs = list(user.orgs.all())
++        self.assertEqual(len(saved_orgs), 2)
++        self.assertIn(org1, saved_orgs)
++        self.assertIn(org2, saved_orgs)
++
+ 
+ # To verify that the login form rejects inactive users, use an authentication
+ # backend that allows them.
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 0000000000..38cf527edd
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python
++"""
++Verify that UserCreationForm properly saves ManyToMany fields.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.auth_tests.settings'
++django.setup()
++
++from django import forms
++from django.contrib.auth.forms import UserCreationForm
++from tests.auth_tests.models.with_many_to_many import CustomUserWithM2M, Organization
++
++# Create a custom UserCreationForm with M2M field
++class CustomUserCreationForm(UserCreationForm):
++    orgs = forms.ModelMultipleChoiceField(
++        queryset=Organization.objects.all(),
++        required=False,
++        widget=forms.CheckboxSelectMultiple
++    )
++    
++    class Meta(UserCreationForm.Meta):
++        model = CustomUserWithM2M
++        fields = ('username', 'orgs')
++
++def main():
++    print("Testing UserCreationForm with ManyToMany fields...")
++    
++    # Create test organizations
++    org1 = Organization.objects.create(name="Organization 1")
++    org2 = Organization.objects.create(name="Organization 2")
++    print(f"Created organizations: {org1.name}, {org2.name}")
++    
++    # Test case 1: commit=True (default)
++    print("\n--- Test Case 1: save(commit=True) ---")
++    form_data = {
++        'username': 'testuser1',
++        'password1': 'testpass123!',
++        'password2': 'testpass123!',
++        'orgs': [org1.pk, org2.pk]
++    }
++    
++    form = CustomUserCreationForm(data=form_data)
++    if form.is_valid():
++        user = form.save()  # commit=True by default
++        saved_orgs = list(user.orgs.all())
++        print(f"User created: {user.username}")
++        print(f"Organizations saved: {[org.name for org in saved_orgs]}")
++        print(f"✓ Test passed: {len(saved_orgs)} organizations saved")
++    else:
++        print(f"✗ Form validation failed: {form.errors}")
++    
++    # Test case 2: commit=False
++    print("\n--- Test Case 2: save(commit=False) ---")
++    form_data['username'] = 'testuser2'  # Different username
++    
++    form = CustomUserCreationForm(data=form_data)
++    if form.is_valid():
++        user = form.save(commit=False)
++        user.save()  # Must save user first
++        
++        # Check M2M before save_m2m
++        orgs_before = list(user.orgs.all())
++        print(f"Organizations before save_m2m(): {len(orgs_before)}")
++        
++        # Now save M2M
++        form.save_m2m()
++        orgs_after = list(user.orgs.all())
++        print(f"Organizations after save_m2m(): {[org.name for org in orgs_after]}")
++        print(f"✓ Test passed: save_m2m() works correctly")
++    else:
++        print(f"✗ Form validation failed: {form.errors}")
++    
++    print("\n✓ All tests passed! UserCreationForm now properly handles ManyToMany fields.")
++
++if __name__ == "__main__":
++    main()

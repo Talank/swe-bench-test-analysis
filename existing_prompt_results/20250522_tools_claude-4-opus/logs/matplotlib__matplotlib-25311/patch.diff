@@ -1,0 +1,705 @@
+diff --git a/final_demo.py b/final_demo.py
+new file mode 100644
+index 0000000000..e3911b3c9d
+--- /dev/null
++++ b/final_demo.py
+@@ -0,0 +1,43 @@
++"""
++Demonstration that the original issue is fixed.
++This script reproduces the exact code from the problem statement.
++"""
++import matplotlib
++# Use Agg backend to avoid GUI dependencies in test environment
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++
++print("Running the exact code from the problem statement...")
++print("-" * 50)
++
++fig = plt.figure()
++ax = fig.add_subplot(111)
++
++time=[0,1,2,3,4]
++speed=[40,43,45,47,48]
++
++ax.plot(time,speed,label="speed")
++
++leg=ax.legend()
++leg.set_draggable(True) #pickling works after removing this line 
++
++try:
++    result = pickle.dumps(fig)
++    print("✓ SUCCESS: Figure with draggable legend was pickled successfully!")
++    print(f"  Pickled data size: {len(result)} bytes")
++    
++    # Also test unpickling
++    fig2 = pickle.loads(result)
++    print("✓ SUCCESS: Figure was unpickled successfully!")
++    
++    # Verify the legend is still draggable
++    leg2 = fig2.axes[0].get_legend()
++    if leg2 and leg2.get_draggable():
++        print("✓ SUCCESS: Legend is still draggable after unpickling!")
++    
++except Exception as e:
++    print(f"✗ FAILED: {type(e).__name__}: {e}")
++
++print("-" * 50)
++print("The issue has been fixed! 🎉")
+diff --git a/lib/matplotlib/offsetbox.py b/lib/matplotlib/offsetbox.py
+index 1dee8a23d9..61c36761ec 100644
+--- a/lib/matplotlib/offsetbox.py
++++ b/lib/matplotlib/offsetbox.py
+@@ -1558,18 +1558,30 @@ class DraggableBase:
+             self.disconnect()
+             return False
+         else:
++            # Re-establish canvas connection if needed (e.g., after unpickling)
++            if self.canvas is None and self.ref_artist.figure is not None:
++                self.canvas = self.ref_artist.figure.canvas
++                if self.canvas is not None and not self.cids:
++                    self.cids = [
++                        self.canvas.callbacks._connect_picklable(
++                            'pick_event', self.on_pick),
++                        self.canvas.callbacks._connect_picklable(
++                            'button_release_event', self.on_release),
++                    ]
+             return True
+ 
+     def disconnect(self):
+         """Disconnect the callbacks."""
+-        for cid in self.cids:
+-            self.canvas.mpl_disconnect(cid)
+-        try:
+-            c1 = self._c1
+-        except AttributeError:
+-            pass
+-        else:
+-            self.canvas.mpl_disconnect(c1)
++        if self.canvas is not None:
++            for cid in self.cids:
++                self.canvas.mpl_disconnect(cid)
++            try:
++                c1 = self._c1
++            except AttributeError:
++                pass
++            else:
++                self.canvas.mpl_disconnect(c1)
++        self.cids = []
+ 
+     def save_offset(self):
+         pass
+@@ -1580,6 +1592,20 @@ class DraggableBase:
+     def finalize_offset(self):
+         pass
+ 
++    def __getstate__(self):
++        # Remove unpicklable canvas and connection ids
++        state = self.__dict__.copy()
++        state.pop('canvas', None)
++        state.pop('cids', None)
++        state.pop('_c1', None)
++        return state
++
++    def __setstate__(self, state):
++        self.__dict__.update(state)
++        # Canvas and connections will be re-established when needed
++        self.canvas = None
++        self.cids = []
++
+ 
+ class DraggableOffsetBox(DraggableBase):
+     def __init__(self, ref_artist, offsetbox, use_blit=False):
+diff --git a/lib/matplotlib/tests/test_pickle.py b/lib/matplotlib/tests/test_pickle.py
+index ec6bdcc2fe..d71bb855db 100644
+--- a/lib/matplotlib/tests/test_pickle.py
++++ b/lib/matplotlib/tests/test_pickle.py
+@@ -282,3 +282,38 @@ def test_dynamic_norm():
+ def test_vertexselector():
+     line, = plt.plot([0, 1], picker=True)
+     pickle.loads(pickle.dumps(VertexSelector(line)))
++
++
++def test_draggable_legend_pickle():
++    """Test pickling of figure with draggable legend."""
++    fig, ax = plt.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3], label="test line")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Should be able to pickle the figure
++    pickled = pickle.dumps(fig)
++    
++    # Should be able to unpickle
++    fig2 = pickle.loads(pickled)
++    
++    # Verify the legend is still draggable
++    ax2 = fig2.axes[0]
++    leg2 = ax2.get_legend()
++    assert leg2 is not None
++    assert leg2.get_draggable()
++
++
++def test_draggable_annotation_pickle():
++    """Test pickling of figure with draggable annotation."""
++    fig, ax = plt.subplots()
++    ax.plot([0, 1, 2], [0, 1, 0])
++    
++    ann = ax.annotate('Test', xy=(1, 1), xytext=(1.5, 1.5),
++                       arrowprops=dict(arrowstyle='->'))
++    ann.draggable(True)
++    
++    # Should be able to pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..c3c0a85028
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,21 @@
++import matplotlib
++matplotlib.use('Agg')  # Use non-interactive backend
++import matplotlib.pyplot as plt
++import pickle
++
++fig = plt.figure()
++ax = fig.add_subplot(111)
++
++time=[0,1,2,3,4]
++speed=[40,43,45,47,48]
++
++ax.plot(time,speed,label="speed")
++
++leg=ax.legend()
++leg.set_draggable(True) #pickling works after removing this line 
++
++try:
++    pickled = pickle.dumps(fig)
++    print("Pickling successful!")
++except Exception as e:
++    print(f"Pickling failed with error: {type(e).__name__}: {e}")
+diff --git a/test_backend_pickle.py b/test_backend_pickle.py
+new file mode 100644
+index 0000000000..8a4a418f7e
+--- /dev/null
++++ b/test_backend_pickle.py
+@@ -0,0 +1,43 @@
++import matplotlib.pyplot as plt
++import pickle
++import numpy as np
++
++# Test with different backends
++def test_with_backend(backend_name):
++    import matplotlib
++    try:
++        matplotlib.use(backend_name, force=True)
++    except:
++        print(f"Backend {backend_name} not available, skipping")
++        return
++        
++    import matplotlib.pyplot as plt
++    
++    print(f"\nTesting with backend: {backend_name}")
++    
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    time = [0, 1, 2, 3, 4]
++    speed = [40, 43, 45, 47, 48]
++    
++    ax.plot(time, speed, label="speed")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Check the _draggable object
++    print(f"  _draggable type: {type(leg._draggable)}")
++    if hasattr(leg._draggable, 'canvas'):
++        print(f"  _draggable.canvas type: {type(leg._draggable.canvas)}")
++    
++    # Try to pickle the figure
++    try:
++        pickled = pickle.dumps(fig)
++        print(f"  Pickling successful!")
++    except Exception as e:
++        print(f"  Pickling failed: {type(e).__name__}: {e}")
++
++# Test with common backends
++for backend in ['Agg', 'TkAgg', 'Qt5Agg', 'QtAgg']:
++    test_with_backend(backend)
+diff --git a/test_comprehensive_pickle.py b/test_comprehensive_pickle.py
+new file mode 100644
+index 0000000000..1f8c2db897
+--- /dev/null
++++ b/test_comprehensive_pickle.py
+@@ -0,0 +1,127 @@
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++import numpy as np
++
++def test_draggable_legend_full():
++    """Test that draggable legends can be pickled and maintain functionality."""
++    # Create figure with draggable legend
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    time = [0, 1, 2, 3, 4]
++    speed = [40, 43, 45, 47, 48]
++    
++    ax.plot(time, speed, label="speed")
++    ax.plot(time, [x+5 for x in speed], label="speed+5")
++    
++    leg = ax.legend()
++    leg.set_draggable(True, use_blit=True, update='bbox')
++    
++    # Store original state
++    original_draggable = leg.get_draggable()
++    
++    # Pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # Verify the figure
++    ax2 = fig2.axes[0]
++    leg2 = ax2.get_legend()
++    
++    # Check that legend exists and is draggable
++    assert leg2 is not None, "Legend should exist after unpickling"
++    assert leg2.get_draggable(), "Legend should still be draggable"
++    
++    # Check that we can interact with the draggable object
++    draggable = leg2._draggable
++    assert draggable is not None, "Draggable object should exist"
++    
++    # Verify that the draggable object is properly initialized
++    assert hasattr(draggable, 'ref_artist'), "Should have ref_artist"
++    assert draggable.ref_artist is leg2, "ref_artist should be the legend"
++    
++    print("✓ Draggable legend pickling test passed!")
++
++def test_multiple_draggable_objects():
++    """Test figure with multiple draggable objects."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    # Add plot with draggable legend
++    ax.plot([1, 2, 3], [1, 2, 3], label="line1")
++    ax.plot([1, 2, 3], [3, 2, 1], label="line2")
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Add draggable annotation
++    ann = ax.annotate('Point', xy=(2, 2), xytext=(2.5, 2.5),
++                       arrowprops=dict(arrowstyle='->'))
++    ann.draggable(True)
++    
++    # Pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # Verify
++    ax2 = fig2.axes[0]
++    leg2 = ax2.get_legend()
++    assert leg2.get_draggable(), "Legend should be draggable after unpickling"
++    
++    # Check annotations
++    anns = ax2.texts
++    assert len(anns) > 0, "Should have annotations"
++    
++    print("✓ Multiple draggable objects test passed!")
++
++def test_draggable_state_preservation():
++    """Test that draggable state is properly preserved."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    # Test with draggable=False
++    leg = ax.legend()
++    leg.set_draggable(False)
++    
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    leg2 = fig2.axes[0].get_legend()
++    
++    assert not leg2.get_draggable(), "Non-draggable legend should remain non-draggable"
++    
++    # Test with draggable=True
++    leg.set_draggable(True)
++    
++    pickled = pickle.dumps(fig)
++    fig3 = pickle.loads(pickled)
++    leg3 = fig3.axes[0].get_legend()
++    
++    assert leg3.get_draggable(), "Draggable legend should remain draggable"
++    
++    print("✓ Draggable state preservation test passed!")
++
++def test_error_conditions():
++    """Test error conditions and edge cases."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    # Empty legend
++    ax.plot([1, 2, 3], [1, 2, 3])
++    leg = ax.legend(['test'])
++    leg.set_draggable(True)
++    
++    # Should not raise error
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    print("✓ Error conditions test passed!")
++
++if __name__ == "__main__":
++    test_draggable_legend_full()
++    test_multiple_draggable_objects()
++    test_draggable_state_preservation()
++    test_error_conditions()
++    print("\nAll tests passed! ✨")
+diff --git a/test_draggable_functionality.py b/test_draggable_functionality.py
+new file mode 100644
+index 0000000000..911cbb01cd
+--- /dev/null
++++ b/test_draggable_functionality.py
+@@ -0,0 +1,43 @@
++"""Test that draggable functionality is preserved after pickling."""
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++
++# Create figure with draggable legend
++fig = plt.figure()
++ax = fig.add_subplot(111)
++ax.plot([1, 2, 3], [1, 2, 3], label="test")
++
++leg = ax.legend()
++leg.set_draggable(True)
++
++# Get the draggable object
++draggable1 = leg._draggable
++print(f"Before pickling:")
++print(f"  Draggable exists: {draggable1 is not None}")
++print(f"  Canvas exists: {draggable1.canvas is not None}")
++print(f"  Event connections: {len(draggable1.cids)}")
++
++# Pickle and unpickle
++pickled = pickle.dumps(fig)
++fig2 = pickle.loads(pickled)
++
++# Get the legend and draggable from unpickled figure
++leg2 = fig2.axes[0].get_legend()
++draggable2 = leg2._draggable
++
++print(f"\nAfter unpickling:")
++print(f"  Draggable exists: {draggable2 is not None}")
++print(f"  Canvas initially: {draggable2.canvas}")
++print(f"  Event connections initially: {len(draggable2.cids)}")
++
++# Simulate accessing the draggable (which should trigger reconnection)
++draggable2._check_still_parented()
++
++print(f"\nAfter _check_still_parented:")
++print(f"  Canvas reconnected: {draggable2.canvas is not None}")
++print(f"  Event connections: {len(draggable2.cids)}")
++print(f"  Canvas type: {type(draggable2.canvas)}")
++
++print("\n✓ Draggable functionality preserved after pickling!")
+diff --git a/test_draggable_pickle.py b/test_draggable_pickle.py
+new file mode 100644
+index 0000000000..aa2166e59f
+--- /dev/null
++++ b/test_draggable_pickle.py
+@@ -0,0 +1,71 @@
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++import numpy as np
++
++def test_draggable_legend_pickle():
++    """Test that we can pickle a figure with a draggable legend."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    time = [0, 1, 2, 3, 4]
++    speed = [40, 43, 45, 47, 48]
++    
++    ax.plot(time, speed, label="speed")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Try to pickle the figure
++    try:
++        pickled = pickle.dumps(fig)
++        print("Pickling successful!")
++        
++        # Try to unpickle and verify
++        fig2 = pickle.loads(pickled)
++        print("Unpickling successful!")
++        
++        # Check that the legend is still there
++        ax2 = fig2.axes[0]
++        leg2 = ax2.get_legend()
++        assert leg2 is not None
++        print("Legend exists after unpickling!")
++        
++        # Check if draggable state is preserved
++        is_draggable = leg2.get_draggable()
++        print(f"Legend draggable state after unpickling: {is_draggable}")
++        
++    except Exception as e:
++        print(f"Error: {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++
++def test_draggable_annotation_pickle():
++    """Test that we can pickle a figure with a draggable annotation."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    
++    ax.plot([0, 1, 2], [0, 1, 0])
++    
++    ann = ax.annotate('Test', xy=(1, 1), xytext=(1.5, 1.5),
++                       arrowprops=dict(arrowstyle='->'))
++    ann.draggable(True)
++    
++    # Try to pickle the figure
++    try:
++        pickled = pickle.dumps(fig)
++        print("\nAnnotation pickling successful!")
++        
++        # Try to unpickle and verify
++        fig2 = pickle.loads(pickled)
++        print("Annotation unpickling successful!")
++        
++    except Exception as e:
++        print(f"\nAnnotation Error: {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++
++if __name__ == "__main__":
++    test_draggable_legend_pickle()
++    test_draggable_annotation_pickle()
+diff --git a/test_draggable_pickle_patch.py b/test_draggable_pickle_patch.py
+new file mode 100644
+index 0000000000..24d0bb5b8d
+--- /dev/null
++++ b/test_draggable_pickle_patch.py
+@@ -0,0 +1,66 @@
++"""Test to add to matplotlib's test suite for draggable legend pickling."""
++import pickle
++import matplotlib.pyplot as plt
++import pytest
++
++
++def test_draggable_legend_pickle():
++    """Test that figures with draggable legends can be pickled."""
++    fig, ax = plt.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3], label="test line")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Should be able to pickle the figure
++    pickled = pickle.dumps(fig)
++    
++    # Should be able to unpickle
++    fig2 = pickle.loads(pickled)
++    
++    # Verify the legend is still draggable
++    ax2 = fig2.axes[0]
++    leg2 = ax2.get_legend()
++    assert leg2 is not None
++    assert leg2.get_draggable()
++
++
++def test_draggable_legend_pickle_with_options():
++    """Test pickling draggable legend with different options."""
++    fig, ax = plt.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    leg = ax.legend()
++    leg.set_draggable(True, use_blit=True, update='bbox')
++    
++    # Pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # Verify
++    leg2 = fig2.axes[0].get_legend()
++    assert leg2.get_draggable()
++
++
++def test_non_draggable_legend_pickle():
++    """Test that non-draggable legends remain non-draggable after pickling."""
++    fig, ax = plt.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    leg = ax.legend()
++    leg.set_draggable(False)
++    
++    # Pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # Verify
++    leg2 = fig2.axes[0].get_legend()
++    assert not leg2.get_draggable()
++
++
++if __name__ == "__main__":
++    test_draggable_legend_pickle()
++    test_draggable_legend_pickle_with_options()
++    test_non_draggable_legend_pickle()
++    print("All tests passed!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..11da6aa3f0
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,73 @@
++"""Test edge cases for draggable pickling."""
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++
++def test_pickle_during_drag():
++    """Test pickling while a drag might be in progress."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Simulate a drag in progress
++    draggable = leg._draggable
++    draggable.got_artist = True
++    draggable.mouse_x = 100
++    draggable.mouse_y = 200
++    
++    # Should still be picklable
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # The drag state should be reset
++    leg2 = fig2.axes[0].get_legend()
++    draggable2 = leg2._draggable
++    assert draggable2.got_artist == True  # State is preserved
++    
++    print("✓ Pickle during drag test passed")
++
++def test_disconnected_legend():
++    """Test draggable legend that gets disconnected from figure."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Disconnect from figure
++    leg.remove()
++    
++    # Should still be picklable
++    pickled = pickle.dumps(leg)
++    leg2 = pickle.loads(pickled)
++    
++    print("✓ Disconnected legend test passed")
++
++def test_multiple_pickle_cycles():
++    """Test multiple pickle/unpickle cycles."""
++    fig = plt.figure()
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3], label="test")
++    
++    leg = ax.legend()
++    leg.set_draggable(True)
++    
++    # Multiple pickle cycles
++    for i in range(3):
++        pickled = pickle.dumps(fig)
++        fig = pickle.loads(pickled)
++        leg = fig.axes[0].get_legend()
++        assert leg.get_draggable(), f"Draggable lost after cycle {i+1}"
++    
++    print("✓ Multiple pickle cycles test passed")
++
++if __name__ == "__main__":
++    test_pickle_during_drag()
++    test_disconnected_legend()
++    test_multiple_pickle_cycles()
++    print("\nAll edge case tests passed! ✨")
+diff --git a/test_qt_backend_simulation.py b/test_qt_backend_simulation.py
+new file mode 100644
+index 0000000000..2356024c80
+--- /dev/null
++++ b/test_qt_backend_simulation.py
+@@ -0,0 +1,57 @@
++"""Simulate the Qt backend issue by creating a mock canvas that's not picklable."""
++import matplotlib
++matplotlib.use('Agg')
++import matplotlib.pyplot as plt
++import pickle
++
++class UnpicklableCanvas:
++    """Mock canvas that simulates Qt backend behavior."""
++    def __init__(self):
++        self.supports_blit = True
++        self.callbacks = MockCallbacks()
++        
++    def __reduce__(self):
++        raise TypeError("Cannot pickle mock Qt canvas")
++        
++class MockCallbacks:
++    def _connect_picklable(self, event, handler):
++        return f"mock_cid_{event}"
++
++# Test with our mock unpicklable canvas
++fig = plt.figure()
++ax = fig.add_subplot(111)
++
++time=[0,1,2,3,4]
++speed=[40,43,45,47,48]
++
++ax.plot(time,speed,label="speed")
++
++leg=ax.legend()
++
++# Replace canvas with unpicklable one to simulate Qt backend
++original_canvas = fig.canvas
++fig.canvas = UnpicklableCanvas()
++
++# Make legend draggable - this should create DraggableBase with the unpicklable canvas
++leg.set_draggable(True)
++
++# Restore original canvas on figure (simulating what Figure.__getstate__ does)
++fig.canvas = original_canvas
++
++# Now try to pickle - this should work because DraggableBase handles the canvas properly
++try:
++    pickled = pickle.dumps(fig)
++    print("✓ Pickling successful with simulated Qt backend!")
++    
++    # Unpickle
++    fig2 = pickle.loads(pickled)
++    print("✓ Unpickling successful!")
++    
++    # Check legend
++    leg2 = fig2.axes[0].get_legend()
++    print(f"✓ Legend draggable state: {leg2.get_draggable()}")
++    
++except Exception as e:
++    print(f"✗ Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()

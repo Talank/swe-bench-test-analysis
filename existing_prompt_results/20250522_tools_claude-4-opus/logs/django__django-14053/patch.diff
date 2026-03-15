@@ -1,0 +1,942 @@
+diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py
+index 494890cc23..b9c8c80783 100644
+--- a/django/contrib/staticfiles/storage.py
++++ b/django/contrib/staticfiles/storage.py
+@@ -226,22 +226,43 @@ class HashedFilesMixin:
+             path for path in paths
+             if matches_patterns(path, self._patterns)
+         ]
++        
++        # Track files that have already been yielded to avoid duplicates
++        yielded_files = {}
++        
+         # Do a single pass first. Post-process all files once, then repeat for
+         # adjustable files.
+         for name, hashed_name, processed, _ in self._post_process(paths, adjustable_paths, hashed_files):
+-            yield name, hashed_name, processed
++            if isinstance(processed, Exception):
++                # Yield errors immediately
++                yield name, hashed_name, processed
++            elif name not in adjustable_paths:
++                # Non-adjustable files are yielded immediately
++                yield name, hashed_name, processed
++            else:
++                # Store adjustable files to yield only their final version
++                yielded_files[name] = (hashed_name, processed)
+ 
+         paths = {path: paths[path] for path in adjustable_paths}
+ 
+         for i in range(self.max_post_process_passes):
+             substitutions = False
+             for name, hashed_name, processed, subst in self._post_process(paths, adjustable_paths, hashed_files):
+-                yield name, hashed_name, processed
+-                substitutions = substitutions or subst
++                if isinstance(processed, Exception):
++                    # Yield errors immediately
++                    yield name, hashed_name, processed
++                else:
++                    # Update the yielded files with the latest version
++                    yielded_files[name] = (hashed_name, processed)
++                    substitutions = substitutions or subst
+ 
+             if not substitutions:
+                 break
+ 
++        # Yield adjustable files only once with their final state
++        for name, (hashed_name, processed) in yielded_files.items():
++            yield name, hashed_name, processed
++
+         if substitutions:
+             yield 'All', None, RuntimeError('Max post-process passes exceeded.')
+ 
+diff --git a/test_admin_files.py b/test_admin_files.py
+new file mode 100644
+index 0000000000..47ecfb18f9
+--- /dev/null
++++ b/test_admin_files.py
+@@ -0,0 +1,100 @@
++#!/usr/bin/env python
++"""Test with actual admin files to verify the fix for the reported issue."""
++
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth', 
++    'django.contrib.admin',
++    'django.contrib.staticfiles',
++]
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++STATIC_URL = '/static/'
++STATIC_ROOT = '%s'
++STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
++"""
++
++def test_admin_base_css():
++    """Test that admin/css/base.css is only post-processed once."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    
++    os.makedirs(static_root)
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content % static_root)
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.core.management import call_command
++        from io import StringIO
++        
++        # Capture output
++        out = StringIO()
++        
++        # Run collectstatic
++        call_command('collectstatic', '--noinput', stdout=out, verbosity=2)
++        
++        output = out.getvalue()
++        
++        # Count occurrences of base.css and dashboard.css post-processing
++        base_css_lines = [line for line in output.split('\n') if "Post-processed 'admin/css/base.css'" in line]
++        dashboard_css_lines = [line for line in output.split('\n') if "Post-processed 'admin/css/dashboard.css'" in line]
++        
++        print(f"admin/css/base.css post-processed {len(base_css_lines)} times")
++        print(f"admin/css/dashboard.css post-processed {len(dashboard_css_lines)} times")
++        
++        if base_css_lines:
++            print("\nbase.css post-processing lines:")
++            for line in base_css_lines:
++                print(f"  {line}")
++                
++        if dashboard_css_lines:
++            print("\ndashboard.css post-processing lines:")
++            for line in dashboard_css_lines:
++                print(f"  {line}")
++        
++        # The fix should ensure each file is only post-processed once
++        if len(base_css_lines) == 1 and len(dashboard_css_lines) == 1:
++            print("\nSUCCESS: Each file was post-processed exactly once!")
++            return True
++        else:
++            print("\nERROR: Files were post-processed multiple times!")
++            return False
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    success = test_admin_base_css()
++    sys.exit(0 if success else 1)
+diff --git a/test_collectstatic_simulation.py b/test_collectstatic_simulation.py
+new file mode 100644
+index 0000000000..9b572c7d26
+--- /dev/null
++++ b/test_collectstatic_simulation.py
+@@ -0,0 +1,128 @@
++#!/usr/bin/env python
++"""Test that simulates what collectstatic does to verify the fix."""
++
++import os
++import sys
++import tempfile
++import shutil
++from io import StringIO
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATIC_URL = '/static/'
++STATIC_ROOT = '{static_root}'
++STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
++STATICFILES_DIRS = ['{static_dir}']
++"""
++
++def setup_test_environment():
++    """Set up a temporary test environment."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    static_dir = os.path.join(temp_dir, 'static')
++    
++    os.makedirs(static_root)
++    os.makedirs(os.path.join(static_dir, 'css'))
++    
++    # Create some test CSS files
++    with open(os.path.join(static_dir, 'css', 'base.css'), 'w') as f:
++        f.write('@import url("fonts.css");\nbody { background: url("img/bg.png"); }')
++    
++    with open(os.path.join(static_dir, 'css', 'fonts.css'), 'w') as f:
++        f.write('@font-face { src: url("fonts/myfont.woff2"); }')
++        
++    with open(os.path.join(static_dir, 'css', 'simple.css'), 'w') as f:
++        f.write('body { color: red; }')
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content.format(static_root=static_root, static_dir=static_dir))
++    
++    return temp_dir, static_root
++
++def test_collectstatic_output():
++    """Test the actual collectstatic command output."""
++    temp_dir, static_root = setup_test_environment()
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.core.management import call_command
++        from io import StringIO
++        
++        # Capture output
++        out = StringIO()
++        err = StringIO()
++        
++        # Run collectstatic (allow it to fail due to missing referenced files)
++        try:
++            call_command('collectstatic', '--noinput', stdout=out, stderr=err, verbosity=2)
++        except Exception as e:
++            # This is expected due to missing referenced files
++            print(f"Expected error due to missing files: {e}")
++        
++        output = out.getvalue()
++        error = err.getvalue()
++        
++        print("STDOUT:")
++        print(output)
++        print("\nSTDERR:")
++        print(error)
++        
++        # Count occurrences of specific files
++        lines = output.split('\n')
++        
++        # Track post-processed files
++        post_processed = {}
++        for line in lines:
++            if "Post-processed" in line:
++                # Extract filename
++                parts = line.split("'")
++                if len(parts) >= 2:
++                    filename = parts[1]
++                    if filename not in post_processed:
++                        post_processed[filename] = 0
++                    post_processed[filename] += 1
++        
++        print("\nPost-processed files count:")
++        for filename, count in sorted(post_processed.items()):
++            print(f"  {filename}: {count} times")
++            
++        # Check for duplicates
++        duplicates = {f: c for f, c in post_processed.items() if c > 1}
++        
++        if duplicates:
++            print("\nERROR: Found duplicate post-processing:")
++            for f, c in duplicates.items():
++                print(f"  {f} was post-processed {c} times!")
++            return False
++        else:
++            print("\nSUCCESS: No duplicate post-processing found!")
++            return True
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    success = test_collectstatic_output()
++    sys.exit(0 if success else 1)
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..ca4d6dd0be
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,201 @@
++#!/usr/bin/env python
++"""Comprehensive test for the HashedFilesMixin fix."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATIC_URL = '/static/'
++STATIC_ROOT = '{static_root}'
++STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
++"""
++
++# Create test CSS files with various scenarios
++base_css = """
++@import url("fonts.css");
++body {
++    background: url("img/background.png");
++}
++"""
++
++fonts_css = """
++@font-face {
++    font-family: 'MyFont';
++    src: url('fonts/myfont.woff2') format('woff2');
++}
++"""
++
++dashboard_css = """
++/* Simple CSS with no references */
++body {
++    color: red;
++}
++"""
++
++# CSS that references another CSS that has references
++main_css = """
++@import url("base.css");
++.main {
++    color: blue;
++}
++"""
++
++# CSS with nested references
++nested_css = """
++@import url("main.css");
++.nested {
++    color: green;
++}
++"""
++
++def setup_test_environment():
++    """Set up a temporary test environment."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    static_dir = os.path.join(temp_dir, 'static')
++    
++    os.makedirs(static_root)
++    os.makedirs(os.path.join(static_dir, 'css'))
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content.format(static_root=static_root))
++    
++    # Write CSS files
++    with open(os.path.join(static_dir, 'css', 'base.css'), 'w') as f:
++        f.write(base_css)
++    
++    with open(os.path.join(static_dir, 'css', 'fonts.css'), 'w') as f:
++        f.write(fonts_css)
++        
++    with open(os.path.join(static_dir, 'css', 'dashboard.css'), 'w') as f:
++        f.write(dashboard_css)
++        
++    with open(os.path.join(static_dir, 'css', 'main.css'), 'w') as f:
++        f.write(main_css)
++        
++    with open(os.path.join(static_dir, 'css', 'nested.css'), 'w') as f:
++        f.write(nested_css)
++    
++    return temp_dir, static_dir, static_root
++
++def test_post_process_comprehensive():
++    """Test that post_process handles all cases correctly."""
++    temp_dir, static_dir, static_root = setup_test_environment()
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++        from django.core.files.storage import FileSystemStorage
++        
++        # Create storage instance
++        storage = ManifestStaticFilesStorage()
++        
++        # Simulate found files from collectstatic
++        found_files = {
++            'css/base.css': (FileSystemStorage(location=static_dir), 'css/base.css'),
++            'css/fonts.css': (FileSystemStorage(location=static_dir), 'css/fonts.css'),
++            'css/dashboard.css': (FileSystemStorage(location=static_dir), 'css/dashboard.css'),
++            'css/main.css': (FileSystemStorage(location=static_dir), 'css/main.css'),
++            'css/nested.css': (FileSystemStorage(location=static_dir), 'css/nested.css'),
++        }
++        
++        # Copy files to static root first
++        for path, (source_storage, source_path) in found_files.items():
++            with source_storage.open(source_path) as f:
++                storage.save(path, f)
++        
++        # Track yields
++        yields = []
++        errors = []
++        
++        # Run post_process
++        for original_path, processed_path, processed in storage.post_process(found_files):
++            if original_path == 'All':
++                # Special error case
++                errors.append((original_path, processed_path, processed))
++            elif isinstance(processed, Exception):
++                errors.append((original_path, processed_path, processed))
++                print(f"Error processing {original_path}: {processed}")
++            else:
++                yields.append((original_path, processed_path, processed))
++                print(f"Yielded: {original_path} -> {processed_path} (processed={processed})")
++        
++        # Check for duplicates
++        original_paths = [y[0] for y in yields]
++        unique_paths = set(original_paths)
++        
++        print(f"\nTotal yields: {len(yields)}")
++        print(f"Unique files: {len(unique_paths)}")
++        print(f"Errors: {len(errors)}")
++        
++        # Count duplicates
++        from collections import Counter
++        counts = Counter(original_paths)
++        duplicates = {path: count for path, count in counts.items() if count > 1}
++        
++        if duplicates:
++            print("\nDuplicate yields found:")
++            for path, count in duplicates.items():
++                print(f"  {path}: yielded {count} times")
++        else:
++            print("\nNo duplicates found!")
++            
++        # Check that all files were yielded
++        expected_files = set(found_files.keys())
++        yielded_files = set(original_paths)
++        missing_files = expected_files - yielded_files
++        
++        if missing_files:
++            print(f"\nMissing files not yielded: {missing_files}")
++        else:
++            print("\nAll files were yielded!")
++            
++        # Verify hashed files were created
++        print("\nHashed files created:")
++        for original, hashed, _ in yields:
++            if hashed and storage.exists(hashed):
++                print(f"  {original} -> {hashed} (exists)")
++            else:
++                print(f"  {original} -> {hashed} (missing!)")
++                
++        return len(yields), len(unique_paths), duplicates, errors
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    total_yields, unique_files, duplicates, errors = test_post_process_comprehensive()
++    
++    # Exit with error if duplicates found
++    if duplicates:
++        print("\nERROR: post_process() yields duplicate files!")
++        sys.exit(1)
++    else:
++        print("\nSUCCESS: No duplicate yields!")
++        sys.exit(0)
+diff --git a/test_duplicate_yields.py b/test_duplicate_yields.py
+new file mode 100644
+index 0000000000..fa6770ac82
+--- /dev/null
++++ b/test_duplicate_yields.py
+@@ -0,0 +1,151 @@
++#!/usr/bin/env python
++"""Test script to reproduce the duplicate yields issue in HashedFilesMixin."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATIC_URL = '/static/'
++STATIC_ROOT = '{static_root}'
++STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
++"""
++
++# Create test CSS files with references
++base_css = """
++@import url("fonts.css");
++body {
++    background: url("img/background.png");
++}
++"""
++
++fonts_css = """
++@font-face {
++    font-family: 'MyFont';
++    src: url('fonts/myfont.woff2') format('woff2');
++}
++"""
++
++dashboard_css = """
++/* Simple CSS with no references */
++body {
++    color: red;
++}
++"""
++
++def setup_test_environment():
++    """Set up a temporary test environment."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    static_dir = os.path.join(temp_dir, 'static')
++    
++    os.makedirs(static_root)
++    os.makedirs(os.path.join(static_dir, 'css'))
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content.format(static_root=static_root))
++    
++    # Write CSS files
++    with open(os.path.join(static_dir, 'css', 'base.css'), 'w') as f:
++        f.write(base_css)
++    
++    with open(os.path.join(static_dir, 'css', 'fonts.css'), 'w') as f:
++        f.write(fonts_css)
++        
++    with open(os.path.join(static_dir, 'css', 'dashboard.css'), 'w') as f:
++        f.write(dashboard_css)
++    
++    return temp_dir, static_dir, static_root
++
++def test_post_process_yields():
++    """Test that post_process doesn't yield duplicates."""
++    temp_dir, static_dir, static_root = setup_test_environment()
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++        from django.core.files.storage import FileSystemStorage
++        
++        # Create storage instance
++        storage = ManifestStaticFilesStorage()
++        
++        # Simulate found files from collectstatic
++        found_files = {
++            'css/base.css': (FileSystemStorage(location=static_dir), 'css/base.css'),
++            'css/fonts.css': (FileSystemStorage(location=static_dir), 'css/fonts.css'),
++            'css/dashboard.css': (FileSystemStorage(location=static_dir), 'css/dashboard.css'),
++        }
++        
++        # Copy files to static root first
++        for path, (source_storage, source_path) in found_files.items():
++            with source_storage.open(source_path) as f:
++                storage.save(path, f)
++        
++        # Track yields
++        yields = []
++        
++        # Run post_process
++        for original_path, processed_path, processed in storage.post_process(found_files):
++            if original_path != 'All':  # Skip the special error case
++                yields.append((original_path, processed_path, processed))
++                print(f"Yielded: {original_path} -> {processed_path} (processed={processed})")
++        
++        # Check for duplicates
++        original_paths = [y[0] for y in yields]
++        unique_paths = set(original_paths)
++        
++        print(f"\nTotal yields: {len(yields)}")
++        print(f"Unique files: {len(unique_paths)}")
++        
++        # Count duplicates
++        from collections import Counter
++        counts = Counter(original_paths)
++        duplicates = {path: count for path, count in counts.items() if count > 1}
++        
++        if duplicates:
++            print("\nDuplicate yields found:")
++            for path, count in duplicates.items():
++                print(f"  {path}: yielded {count} times")
++        else:
++            print("\nNo duplicates found!")
++            
++        return len(yields), len(unique_paths), duplicates
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    total_yields, unique_files, duplicates = test_post_process_yields()
++    
++    # Exit with error if duplicates found
++    if duplicates:
++        print("\nERROR: post_process() yields duplicate files!")
++        sys.exit(1)
++    else:
++        print("\nSUCCESS: No duplicate yields!")
++        sys.exit(0)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..61147933f3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python
++"""Test edge cases for the HashedFilesMixin fix."""
++
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATIC_URL = '/static/'
++STATIC_ROOT = '{static_root}'
++STATICFILES_STORAGE = 'test_edge_cases.TestStorage'
++"""
++
++# Custom storage to test edge cases
++storage_content = """
++from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++
++class TestStorage(ManifestStaticFilesStorage):
++    # Test with more passes to ensure we don't get duplicates even with many passes
++    max_post_process_passes = 10
++"""
++
++def setup_test_environment():
++    """Set up a temporary test environment."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    static_dir = os.path.join(temp_dir, 'static')
++    
++    os.makedirs(static_root)
++    os.makedirs(os.path.join(static_dir, 'css'))
++    
++    # Create deeply nested CSS references
++    with open(os.path.join(static_dir, 'css', 'level1.css'), 'w') as f:
++        f.write('@import url("level2.css");')
++    
++    with open(os.path.join(static_dir, 'css', 'level2.css'), 'w') as f:
++        f.write('@import url("level3.css");')
++        
++    with open(os.path.join(static_dir, 'css', 'level3.css'), 'w') as f:
++        f.write('@import url("level4.css");')
++        
++    with open(os.path.join(static_dir, 'css', 'level4.css'), 'w') as f:
++        f.write('body { color: red; }')
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content.format(static_root=static_root))
++        
++    # Write custom storage
++    with open(os.path.join(temp_dir, 'test_edge_cases.py'), 'w') as f:
++        f.write(storage_content)
++    
++    return temp_dir, static_dir, static_root
++
++def test_edge_cases():
++    """Test edge cases like deeply nested references."""
++    temp_dir, static_dir, static_root = setup_test_environment()
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.contrib.staticfiles.storage import staticfiles_storage
++        from django.core.files.storage import FileSystemStorage
++        
++        # Simulate found files from collectstatic
++        found_files = {
++            'css/level1.css': (FileSystemStorage(location=static_dir), 'css/level1.css'),
++            'css/level2.css': (FileSystemStorage(location=static_dir), 'css/level2.css'),
++            'css/level3.css': (FileSystemStorage(location=static_dir), 'css/level3.css'),
++            'css/level4.css': (FileSystemStorage(location=static_dir), 'css/level4.css'),
++        }
++        
++        # Copy files to static root first
++        for path, (source_storage, source_path) in found_files.items():
++            with source_storage.open(source_path) as f:
++                staticfiles_storage.save(path, f)
++        
++        # Track yields
++        yields = []
++        
++        # Run post_process
++        for original_path, processed_path, processed in staticfiles_storage.post_process(found_files):
++            if original_path != 'All' and not isinstance(processed, Exception):
++                yields.append((original_path, processed_path, processed))
++                print(f"Yielded: {original_path} -> {processed_path}")
++        
++        # Check for duplicates
++        original_paths = [y[0] for y in yields]
++        unique_paths = set(original_paths)
++        
++        print(f"\nTotal yields: {len(yields)}")
++        print(f"Unique files: {len(unique_paths)}")
++        print(f"Max passes configured: {staticfiles_storage.max_post_process_passes}")
++        
++        # Count duplicates
++        from collections import Counter
++        counts = Counter(original_paths)
++        duplicates = {path: count for path, count in counts.items() if count > 1}
++        
++        if duplicates:
++            print("\nERROR: Found duplicate yields:")
++            for path, count in duplicates.items():
++                print(f"  {path}: yielded {count} times")
++            return False
++        else:
++            print("\nSUCCESS: No duplicate yields even with deeply nested references and many passes!")
++            return True
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    success = test_edge_cases()
++    sys.exit(0 if success else 1)
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..04d855c4c5
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,139 @@
++#!/usr/bin/env python
++"""Final verification test with proper file references."""
++
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++settings_content = """
++SECRET_KEY = 'test-key'
++DEBUG = False
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATIC_URL = '/static/'
++STATIC_ROOT = '{static_root}'
++STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.ManifestStaticFilesStorage'
++STATICFILES_DIRS = ['{static_dir}']
++"""
++
++def setup_test_environment():
++    """Set up a temporary test environment."""
++    # Create temp directories
++    temp_dir = tempfile.mkdtemp()
++    static_root = os.path.join(temp_dir, 'staticfiles')
++    static_dir = os.path.join(temp_dir, 'static')
++    
++    os.makedirs(static_root)
++    os.makedirs(os.path.join(static_dir, 'css'))
++    os.makedirs(os.path.join(static_dir, 'css', 'fonts'))
++    os.makedirs(os.path.join(static_dir, 'css', 'img'))
++    
++    # Create CSS files with proper references
++    with open(os.path.join(static_dir, 'css', 'base.css'), 'w') as f:
++        f.write('@import url("fonts.css");\nbody { background: url("img/bg.png"); }')
++    
++    with open(os.path.join(static_dir, 'css', 'fonts.css'), 'w') as f:
++        f.write('@font-face { src: url("fonts/myfont.woff2"); }')
++        
++    with open(os.path.join(static_dir, 'css', 'simple.css'), 'w') as f:
++        f.write('body { color: red; }')
++        
++    # Create referenced files
++    with open(os.path.join(static_dir, 'css', 'img', 'bg.png'), 'w') as f:
++        f.write('fake png')
++        
++    with open(os.path.join(static_dir, 'css', 'fonts', 'myfont.woff2'), 'w') as f:
++        f.write('fake font')
++    
++    # Write settings
++    with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++        f.write(settings_content.format(static_root=static_root, static_dir=static_dir))
++    
++    return temp_dir, static_root
++
++def test_collectstatic_no_duplicates():
++    """Test the actual collectstatic command output."""
++    temp_dir, static_root = setup_test_environment()
++    
++    try:
++        # Add temp dir to Python path for settings
++        sys.path.insert(0, temp_dir)
++        
++        # Import Django after settings are configured
++        import django
++        django.setup()
++        
++        from django.core.management import call_command
++        from io import StringIO
++        
++        # Capture output
++        out = StringIO()
++        err = StringIO()
++        
++        # Run collectstatic
++        call_command('collectstatic', '--noinput', stdout=out, stderr=err, verbosity=2)
++        
++        output = out.getvalue()
++        error = err.getvalue()
++        
++        print("STDOUT:")
++        print(output)
++        print("\nSTDERR:")
++        print(error)
++        
++        # Count occurrences of specific files
++        lines = output.split('\n')
++        
++        # Track post-processed files
++        post_processed = {}
++        for line in lines:
++            if "Post-processed" in line and " as " in line:
++                # Extract filename
++                parts = line.split("'")
++                if len(parts) >= 2:
++                    filename = parts[1]
++                    if filename not in post_processed:
++                        post_processed[filename] = 0
++                    post_processed[filename] += 1
++        
++        print("\nPost-processed files count:")
++        for filename, count in sorted(post_processed.items()):
++            print(f"  {filename}: {count} times")
++            
++        # Check for duplicates
++        duplicates = {f: c for f, c in post_processed.items() if c > 1}
++        
++        # Also check that CSS files were post-processed
++        css_files = ['css/base.css', 'css/fonts.css', 'css/simple.css']
++        missing_css = [f for f in css_files if f not in post_processed]
++        
++        if duplicates:
++            print("\nERROR: Found duplicate post-processing:")
++            for f, c in duplicates.items():
++                print(f"  {f} was post-processed {c} times!")
++            return False
++        elif missing_css:
++            print(f"\nERROR: Some CSS files were not post-processed: {missing_css}")
++            return False
++        else:
++            print("\nSUCCESS: No duplicate post-processing found and all CSS files were processed!")
++            return True
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++        if temp_dir in sys.path:
++            sys.path.remove(temp_dir)
++
++if __name__ == '__main__':
++    success = test_collectstatic_no_duplicates()
++    sys.exit(0 if success else 1)

@@ -1,0 +1,752 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index ddfd2b365..c1ec9da85 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -2377,7 +2377,56 @@ class AttributeDocumenter(GenericAliasMixin, NewTypeMixin, SlotsMixin,  # type:
+         if more_content is None:
+             more_content = StringList()
+         self.update_content(more_content)
+-        super().add_content(more_content, no_docstring)
++        
++        # Check for attribute docstrings in the analyzer
++        no_docstring_found = False
++        sourcename = self.get_sourcename()
++        if self.analyzer and not no_docstring:
++            attr_docs = self.analyzer.find_attr_docs()
++            if self.objpath:
++                key = ('.'.join(self.objpath[:-1]), self.objpath[-1])
++                if key in attr_docs:
++                    no_docstring_found = True
++                    # make a copy of docstring for attributes to avoid cache
++                    # the change of autodoc-process-docstring event.
++                    docstrings = [list(attr_docs[key])]
++                    for i, line in enumerate(self.process_doc(docstrings)):
++                        self.add_line(line, sourcename, i)
++                elif self.config.autodoc_inherit_docstrings and self.parent:
++                    # Check for inherited attribute docstrings
++                    # Get the parent class
++                    if inspect.isclass(self.parent):
++                        for cls in self.parent.__mro__[1:]:  # skip the current class
++                            try:
++                                # Get the analyzer for the base class module if different
++                                if cls.__module__ != self.parent.__module__:
++                                    try:
++                                        base_analyzer = ModuleAnalyzer.for_module(cls.__module__)
++                                        base_analyzer.analyze()
++                                        base_attr_docs = base_analyzer.find_attr_docs()
++                                    except PycodeError:
++                                        base_attr_docs = {}
++                                else:
++                                    base_attr_docs = attr_docs
++                                
++                                # Try both with and without module prefix
++                                cls_namespace = cls.__qualname__
++                                base_key = (cls_namespace, self.objpath[-1])
++                                if base_key in base_attr_docs:
++                                    no_docstring_found = True
++                                    # make a copy of docstring for attributes
++                                    docstrings = [list(base_attr_docs[base_key])]
++                                    for i, line in enumerate(self.process_doc(docstrings)):
++                                        self.add_line(line, sourcename, i)
++                                    break
++                            except (AttributeError, PycodeError):
++                                # Some classes might not have __qualname__ or __module__
++                                continue
++        
++        # Only call parent's add_content if we didn't find a docstring
++        # to avoid duplicate docstring processing
++        if not no_docstring_found:
++            super().add_content(more_content, no_docstring)
+ 
+ 
+ class PropertyDocumenter(DocstringStripSignatureMixin, ClassLevelDocumenter):  # type: ignore
+diff --git a/test_comprehensive_inheritance.py b/test_comprehensive_inheritance.py
+new file mode 100644
+index 000000000..86a346710
+--- /dev/null
++++ b/test_comprehensive_inheritance.py
+@@ -0,0 +1,114 @@
++"""Comprehensive test for inherited attribute docstrings."""
++
++import tempfile
++from pathlib import Path
++import sys
++
++# Create test modules
++base1_code = '''
++"""Base module 1."""
++
++class Base1:
++    """Base1 class."""
++    
++    attr1 = "value1"
++    """Docstring for attr1 in Base1."""
++    
++    attr2 = "value2"
++    """Docstring for attr2 in Base1."""
++'''
++
++base2_code = '''
++"""Base module 2."""
++
++from base1 import Base1
++
++class Base2(Base1):
++    """Base2 class inheriting from Base1."""
++    
++    attr2 = "overridden"
++    """Overridden docstring for attr2 in Base2."""
++    
++    attr3 = "value3"
++    """Docstring for attr3 in Base2."""
++'''
++
++derived_code = '''
++"""Derived module."""
++
++from base2 import Base2
++
++class Derived(Base2):
++    """Derived class inheriting from Base2."""
++    
++    attr4 = "value4"
++    """Docstring for attr4 in Derived."""
++'''
++
++# Same module inheritance test
++same_module_code = '''
++"""Same module inheritance test."""
++
++class SameBase:
++    """Base class in same module."""
++    
++    same_attr = "same_value"
++    """Docstring for same_attr."""
++
++class SameDerived(SameBase):
++    """Derived class in same module."""
++    
++    derived_attr = "derived_value"
++    """Docstring for derived_attr."""
++'''
++
++rst = '''
++Test Inheritance
++================
++
++Cross-Module Inheritance
++------------------------
++
++.. autoclass:: derived.Derived
++   :members:
++   :inherited-members:
++   :show-inheritance:
++
++Same-Module Inheritance
++-----------------------
++
++.. autoclass:: same_module.SameDerived
++   :members:
++   :inherited-members:
++   :show-inheritance:
++'''
++
++conf = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    tmpdir = Path(tmpdir)
++    
++    # Write files
++    (tmpdir / "base1.py").write_text(base1_code)
++    (tmpdir / "base2.py").write_text(base2_code)
++    (tmpdir / "derived.py").write_text(derived_code)
++    (tmpdir / "same_module.py").write_text(same_module_code)
++    (tmpdir / "index.rst").write_text(rst)
++    (tmpdir / "conf.py").write_text(conf)
++    
++    # Add to path
++    sys.path.insert(0, str(tmpdir))
++    
++    # Build
++    from sphinx.cmd.build import main as sphinx_main
++    build_dir = tmpdir / "_build"
++    ret = sphinx_main(["-b", "text", str(tmpdir), str(build_dir)])
++    
++    # Show output
++    output_file = build_dir / "index.txt"
++    if output_file.exists():
++        print(output_file.read_text())
+diff --git a/test_debug_derived_analyzer.py b/test_debug_derived_analyzer.py
+new file mode 100644
+index 000000000..58b33e85e
+--- /dev/null
++++ b/test_debug_derived_analyzer.py
+@@ -0,0 +1,24 @@
++"""Debug script to check what the analyzer finds for Derived class."""
++
++from sphinx.pycode import ModuleAnalyzer
++from sphinx.ext.autodoc.importer import get_class_members
++import sys
++sys.path.insert(0, '/testbed/tests/roots/test-ext-autodoc')
++
++import target.typed_vars
++
++# Check analyzer
++print("Analyzer attr_docs:")
++analyzer = ModuleAnalyzer.for_module('target.typed_vars')
++analyzer.analyze()
++attr_docs = analyzer.find_attr_docs()
++for key, doc in sorted(attr_docs.items()):
++    print(f"  {key}: {doc}")
++
++# Check members
++print("\nClass members for Derived:")
++from sphinx.util.inspect import safe_getattr
++members = get_class_members(target.typed_vars.Derived, ['Derived'], safe_getattr, analyzer)
++for name, member in sorted(members.items()):
++    if name.startswith('attr') or name == 'descr4':
++        print(f"  {name}: class={member.class_}, value={member.value}, docstring={member.docstring}")
+diff --git a/test_debug_filtering.py b/test_debug_filtering.py
+new file mode 100644
+index 000000000..62f30d3ff
+--- /dev/null
++++ b/test_debug_filtering.py
+@@ -0,0 +1,93 @@
++"""Debug filtering of inherited attributes."""
++
++import tempfile
++from pathlib import Path
++import sys
++
++# Create test modules
++base_code = '''
++"""Base module."""
++
++class Base:
++    """Base class."""
++    base_attr = "value"
++    """Base attribute docstring."""
++'''
++
++derived_code = '''
++"""Derived module."""
++from base import Base
++
++class Derived(Base):
++    """Derived class."""
++    derived_attr = "derived"
++    """Derived attribute docstring."""
++'''
++
++# Patch to add debug output
++patch_code = '''
++import sphinx.ext.autodoc
++
++orig_filter = sphinx.ext.autodoc.Documenter.filter_members
++
++def debug_filter(self, members, want_all):
++    print(f"\\n=== filter_members called for {self.__class__.__name__} ===")
++    print(f"Object: {self.object}")
++    print(f"want_all: {want_all}")
++    print(f"inherited_members: {self.options.inherited_members}")
++    
++    # Show all attribute members
++    attr_members = []
++    for m in members:
++        name = m.name if hasattr(m, 'name') else m[0]
++        if 'attr' in name or name in ['base_attr', 'derived_attr']:
++            attr_members.append(name)
++    print(f"Attribute members before filtering: {attr_members}")
++    
++    result = orig_filter(self, members, want_all)
++    
++    print(f"Members after filtering: {[r[0] for r in result if 'attr' in r[0]]}")
++    return result
++
++sphinx.ext.autodoc.Documenter.filter_members = debug_filter
++'''
++
++rst = '''
++Test
++====
++
++.. autoclass:: derived.Derived
++   :members:
++   :inherited-members:
++   :undoc-members:
++'''
++
++conf = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    tmpdir = Path(tmpdir)
++    
++    # Write files
++    (tmpdir / "base.py").write_text(base_code)
++    (tmpdir / "derived.py").write_text(derived_code)
++    (tmpdir / "patch.py").write_text(patch_code)
++    (tmpdir / "index.rst").write_text(rst)
++    (tmpdir / "conf.py").write_text(conf + '\nimport patch')
++    
++    # Add to path
++    sys.path.insert(0, str(tmpdir))
++    
++    # Build
++    from sphinx.cmd.build import main as sphinx_main
++    build_dir = tmpdir / "_build"
++    ret = sphinx_main(["-b", "text", str(tmpdir), str(build_dir), "-q"])
++    
++    # Show output
++    output_file = build_dir / "index.txt"
++    if output_file.exists():
++        print("\n\nGenerated output:")
++        print(output_file.read_text())
+diff --git a/test_debug_instance_attrs.py b/test_debug_instance_attrs.py
+new file mode 100644
+index 000000000..b0359459a
+--- /dev/null
++++ b/test_debug_instance_attrs.py
+@@ -0,0 +1,12 @@
++"""Debug script to check how instance attributes are stored."""
++
++from sphinx.pycode import ModuleAnalyzer
++
++# Check how instance attributes are stored
++print("Analyzer for target.typed_vars:")
++analyzer = ModuleAnalyzer.for_module('target.typed_vars')
++analyzer.analyze()
++attr_docs = analyzer.find_attr_docs()
++
++for key, doc in sorted(attr_docs.items()):
++    print(f"  {key}: {doc}")
+diff --git a/test_debug_members.py b/test_debug_members.py
+new file mode 100644
+index 000000000..2a1de868b
+--- /dev/null
++++ b/test_debug_members.py
+@@ -0,0 +1,63 @@
++"""Debug script to check what members are found."""
++
++import sys
++from pathlib import Path
++
++# Create test modules
++base_module_content = '''
++"""Base module with documented attributes."""
++
++class BaseClass:
++    """Base class with documented attributes."""
++    
++    base_attr = "base value"
++    """This is a base class attribute."""
++'''
++
++derived_module_content = '''
++"""Derived module."""
++
++from base_module import BaseClass
++
++class DerivedClass(BaseClass):
++    """Derived class that inherits attributes."""
++    
++    derived_attr = "derived value"
++    """This is a derived class attribute."""
++'''
++
++# Write modules
++Path("base_module.py").write_text(base_module_content)
++Path("derived_module.py").write_text(derived_module_content)
++
++# Import and check
++from sphinx.ext.autodoc.importer import get_class_members
++from sphinx.pycode import ModuleAnalyzer
++
++import derived_module
++
++# Get members
++members = get_class_members(derived_module.DerivedClass, ['DerivedClass'], lambda obj, name, *defargs: getattr(obj, name, *defargs))
++
++print("Members found:")
++for name, member in members.items():
++    print(f"  {name}: {member.class_} - {member.value}")
++
++# Check analyzers
++print("\nAnalyzer for derived_module:")
++analyzer1 = ModuleAnalyzer.for_module('derived_module')
++analyzer1.analyze()
++attr_docs1 = analyzer1.find_attr_docs()
++for key, doc in attr_docs1.items():
++    print(f"  {key}: {doc}")
++
++print("\nAnalyzer for base_module:")
++analyzer2 = ModuleAnalyzer.for_module('base_module')
++analyzer2.analyze()
++attr_docs2 = analyzer2.find_attr_docs()
++for key, doc in attr_docs2.items():
++    print(f"  {key}: {doc}")
++
++# Cleanup
++Path("base_module.py").unlink()
++Path("derived_module.py").unlink()
+diff --git a/test_fix_demonstration.py b/test_fix_demonstration.py
+new file mode 100644
+index 000000000..466a32a00
+--- /dev/null
++++ b/test_fix_demonstration.py
+@@ -0,0 +1,93 @@
++"""Demonstration of the fix for inherited attribute docstrings.
++
++This test shows that autodoc now correctly displays docstrings for inherited
++class attributes when using :inherited-members: and :undoc-members: options.
++"""
++
++import tempfile
++from pathlib import Path
++import sys
++
++# Create test case as described in the issue
++base_module = '''
++"""Base module with documented attributes."""
++
++class BaseClass:
++    """A base class with documented attributes."""
++    
++    data_member = "some value"
++    """This is the docstring for data_member in BaseClass."""
++    
++    another_attr = 42
++    """This is the docstring for another_attr."""
++'''
++
++derived_module = '''
++"""Derived module."""
++
++from base import BaseClass
++
++class DerivedClass(BaseClass):
++    """A derived class that inherits attributes from BaseClass."""
++    
++    own_attr = "derived value"
++    """This is DerivedClass's own attribute."""
++'''
++
++rst_content = '''
++Inherited Attribute Documentation Test
++======================================
++
++This demonstrates that inherited attributes now show their docstrings correctly.
++
++.. autoclass:: derived.DerivedClass
++   :members:
++   :inherited-members:
++   :undoc-members:
++   :show-inheritance:
++
++The above should show:
++- data_member with its docstring from BaseClass
++- another_attr with its docstring from BaseClass  
++- own_attr with its docstring from DerivedClass
++'''
++
++conf = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++print("Testing inherited attribute docstring fix...")
++print("=" * 60)
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    tmpdir = Path(tmpdir)
++    
++    # Write files
++    (tmpdir / "base.py").write_text(base_module)
++    (tmpdir / "derived.py").write_text(derived_module)
++    (tmpdir / "index.rst").write_text(rst_content)
++    (tmpdir / "conf.py").write_text(conf)
++    
++    # Add to path
++    sys.path.insert(0, str(tmpdir))
++    
++    # Build
++    from sphinx.cmd.build import main as sphinx_main
++    build_dir = tmpdir / "_build"
++    ret = sphinx_main(["-b", "text", "-q", str(tmpdir), str(build_dir)])
++    
++    # Show output
++    output_file = build_dir / "index.txt"
++    if output_file.exists():
++        output = output_file.read_text()
++        print(output)
++        
++        # Verify the fix
++        if "This is the docstring for data_member in BaseClass." in output:
++            print("\n✓ SUCCESS: Inherited attribute docstrings are working!")
++        else:
++            print("\n✗ FAILED: Inherited attribute docstrings not found!")
++
++print("=" * 60)
+diff --git a/test_inherited_attrs.py b/test_inherited_attrs.py
+new file mode 100644
+index 000000000..afa733be1
+--- /dev/null
++++ b/test_inherited_attrs.py
+@@ -0,0 +1,87 @@
++"""Test script to reproduce the inherited attributes issue."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test module with inheritance
++test_module_content = '''
++"""Test module for inherited attributes."""
++
++class BaseClass:
++    """Base class with documented attributes."""
++    
++    base_attr = "base value"
++    """This is a base class attribute."""
++    
++    def __init__(self):
++        self.instance_attr = "instance value"
++        """This is an instance attribute."""
++
++
++class DerivedClass(BaseClass):
++    """Derived class that inherits attributes."""
++    
++    derived_attr = "derived value"
++    """This is a derived class attribute."""
++'''
++
++# Create RST content that uses autodoc with inherited-members
++rst_content = '''
++Derived Class
++=============
++
++.. autoclass:: test_module.DerivedClass
++   :members:
++   :inherited-members:
++   :undoc-members:
++   :show-inheritance:
++'''
++
++# Create a minimal conf.py
++conf_content = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++def main():
++    # Create temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Write test module
++        test_module_path = tmpdir / "test_module.py"
++        test_module_path.write_text(test_module_content)
++        
++        # Write RST file
++        index_path = tmpdir / "index.rst"
++        index_path.write_text(rst_content)
++        
++        # Write conf.py
++        conf_path = tmpdir / "conf.py"
++        conf_path.write_text(conf_content)
++        
++        # Add tmpdir to Python path
++        sys.path.insert(0, str(tmpdir))
++        
++        # Build documentation
++        from sphinx.cmd.build import main as sphinx_main
++        
++        build_dir = tmpdir / "_build"
++        ret = sphinx_main(["-b", "text", str(tmpdir), str(build_dir)])
++        
++        # Read and print the output
++        output_file = build_dir / "index.txt"
++        if output_file.exists():
++            print("Generated documentation:")
++            print("=" * 50)
++            print(output_file.read_text())
++            print("=" * 50)
++        
++        return ret
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_inherited_attrs2.py b/test_inherited_attrs2.py
+new file mode 100644
+index 000000000..9a48e8e03
+--- /dev/null
++++ b/test_inherited_attrs2.py
+@@ -0,0 +1,97 @@
++"""Test script to reproduce the inherited attributes issue with separate modules."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a base module
++base_module_content = '''
++"""Base module with documented attributes."""
++
++class BaseClass:
++    """Base class with documented attributes."""
++    
++    base_attr = "base value"
++    """This is a base class attribute."""
++    
++    def __init__(self):
++        self.instance_attr = "instance value"
++        """This is an instance attribute."""
++'''
++
++# Create a derived module that imports from base
++derived_module_content = '''
++"""Derived module."""
++
++from base_module import BaseClass
++
++class DerivedClass(BaseClass):
++    """Derived class that inherits attributes."""
++    
++    derived_attr = "derived value"
++    """This is a derived class attribute."""
++'''
++
++# Create RST content that uses autodoc with inherited-members
++rst_content = '''
++Derived Class
++=============
++
++.. autoclass:: derived_module.DerivedClass
++   :members:
++   :inherited-members:
++   :undoc-members:
++   :show-inheritance:
++'''
++
++# Create a minimal conf.py
++conf_content = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++def main():
++    # Create temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Write base module
++        base_module_path = tmpdir / "base_module.py"
++        base_module_path.write_text(base_module_content)
++        
++        # Write derived module
++        derived_module_path = tmpdir / "derived_module.py"
++        derived_module_path.write_text(derived_module_content)
++        
++        # Write RST file
++        index_path = tmpdir / "index.rst"
++        index_path.write_text(rst_content)
++        
++        # Write conf.py
++        conf_path = tmpdir / "conf.py"
++        conf_path.write_text(conf_content)
++        
++        # Add tmpdir to Python path
++        sys.path.insert(0, str(tmpdir))
++        
++        # Build documentation
++        from sphinx.cmd.build import main as sphinx_main
++        
++        build_dir = tmpdir / "_build"
++        ret = sphinx_main(["-b", "text", str(tmpdir), str(build_dir)])
++        
++        # Read and print the output
++        output_file = build_dir / "index.txt"
++        if output_file.exists():
++            print("Generated documentation:")
++            print("=" * 50)
++            print(output_file.read_text())
++            print("=" * 50)
++        
++        return ret
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/test_instance_attrs.py b/test_instance_attrs.py
+new file mode 100644
+index 000000000..6cc1910ba
+--- /dev/null
++++ b/test_instance_attrs.py
+@@ -0,0 +1,53 @@
++"""Test instance attributes with inheritance."""
++
++import tempfile
++from pathlib import Path
++import sys
++
++# Create test modules
++code = '''
++class Base:
++    def __init__(self):
++        self.attr1: int = 1  #: attr1 doc
++        self.attr2: str      #: attr2 doc
++
++class Derived(Base):
++    attr3: int = 3
++'''
++
++rst = '''
++Test
++====
++
++.. autoclass:: test.Derived
++   :members:
++   :inherited-members:
++   :undoc-members:
++'''
++
++conf = '''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++autodoc_inherit_docstrings = True
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    tmpdir = Path(tmpdir)
++    
++    # Write files
++    (tmpdir / "test.py").write_text(code)
++    (tmpdir / "index.rst").write_text(rst)
++    (tmpdir / "conf.py").write_text(conf)
++    
++    # Add to path
++    sys.path.insert(0, str(tmpdir))
++    
++    # Build
++    from sphinx.cmd.build import main as sphinx_main
++    build_dir = tmpdir / "_build"
++    ret = sphinx_main(["-b", "text", str(tmpdir), str(build_dir)])
++    
++    # Show output
++    output_file = build_dir / "index.txt"
++    if output_file.exists():
++        print(output_file.read_text())

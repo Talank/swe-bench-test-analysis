@@ -1,0 +1,377 @@
+diff --git a/sklearn/impute/_iterative.py b/sklearn/impute/_iterative.py
+index 1d918bc0c..b8e520b7d 100644
+--- a/sklearn/impute/_iterative.py
++++ b/sklearn/impute/_iterative.py
+@@ -117,6 +117,13 @@ class IterativeImputer(_BaseImputer):
+         Which strategy to use to initialize the missing values. Same as the
+         `strategy` parameter in :class:`~sklearn.impute.SimpleImputer`.
+ 
++    fill_value : str or numerical value, default=None
++        When `initial_strategy == "constant"`, `fill_value` is used to replace all
++        occurrences of missing_values in the initial imputation step. For string 
++        or object data types, `fill_value` must be a string.
++        If `None`, `fill_value` will be 0 when imputing numerical
++        data and "missing_value" for strings or object data types.
++
+     imputation_order : {'ascending', 'descending', 'roman', 'arabic', \
+             'random'}, default='ascending'
+         The order in which the features will be imputed. Possible values:
+@@ -175,7 +182,7 @@ class IterativeImputer(_BaseImputer):
+         `fit` is called are returned in results when `transform` is called.
+         The imputed value is always `0` except when
+         `initial_strategy="constant"` in which case `fill_value` will be
+-        used instead.
++        used instead (or 0 if `fill_value` is not provided).
+ 
+         .. versionadded:: 1.2
+ 
+@@ -281,6 +288,7 @@ class IterativeImputer(_BaseImputer):
+         "initial_strategy": [
+             StrOptions({"mean", "median", "most_frequent", "constant"})
+         ],
++        "fill_value": "no_validation",  # any object is valid
+         "imputation_order": [
+             StrOptions({"ascending", "descending", "roman", "arabic", "random"})
+         ],
+@@ -301,6 +309,7 @@ class IterativeImputer(_BaseImputer):
+         tol=1e-3,
+         n_nearest_features=None,
+         initial_strategy="mean",
++        fill_value=None,
+         imputation_order="ascending",
+         skip_complete=False,
+         min_value=-np.inf,
+@@ -322,6 +331,7 @@ class IterativeImputer(_BaseImputer):
+         self.tol = tol
+         self.n_nearest_features = n_nearest_features
+         self.initial_strategy = initial_strategy
++        self.fill_value = fill_value
+         self.imputation_order = imputation_order
+         self.skip_complete = skip_complete
+         self.min_value = min_value
+@@ -613,6 +623,7 @@ class IterativeImputer(_BaseImputer):
+             self.initial_imputer_ = SimpleImputer(
+                 missing_values=self.missing_values,
+                 strategy=self.initial_strategy,
++                fill_value=self.fill_value,
+                 keep_empty_features=self.keep_empty_features,
+             )
+             X_filled = self.initial_imputer_.fit_transform(X)
+diff --git a/test_decision_tree_compatibility.py b/test_decision_tree_compatibility.py
+new file mode 100644
+index 000000000..f67d44958
+--- /dev/null
++++ b/test_decision_tree_compatibility.py
+@@ -0,0 +1,51 @@
++import numpy as np
++from sklearn.experimental import enable_iterative_imputer
++from sklearn.impute import IterativeImputer
++from sklearn.tree import DecisionTreeRegressor
++from sklearn.datasets import make_regression
++
++# Test that np.nan as fill_value works with decision tree estimators
++print("Test: IterativeImputer with fill_value=np.nan and DecisionTreeRegressor")
++
++# Create sample data
++X, y = make_regression(n_samples=100, n_features=5, random_state=42)
++
++# Add missing values
++rng = np.random.RandomState(42)
++X[rng.rand(*X.shape) < 0.2] = np.nan
++
++# Test with DecisionTreeRegressor as estimator and np.nan as fill_value
++imputer = IterativeImputer(
++    estimator=DecisionTreeRegressor(random_state=42),
++    initial_strategy='constant',
++    fill_value=np.nan,
++    max_iter=2,
++    random_state=42
++)
++
++try:
++    X_imputed = imputer.fit_transform(X)
++    print("SUCCESS: IterativeImputer with fill_value=np.nan works with DecisionTreeRegressor")
++    print(f"Shape of imputed data: {X_imputed.shape}")
++    print(f"Number of remaining NaN values: {np.isnan(X_imputed).sum()}")
++except Exception as e:
++    print(f"FAILED: {e}")
++
++# Compare with default fill_value (0)
++print("\nCompare with default fill_value=0:")
++imputer_default = IterativeImputer(
++    estimator=DecisionTreeRegressor(random_state=42),
++    initial_strategy='constant',
++    max_iter=2,
++    random_state=42
++)
++
++X_imputed_default = imputer_default.fit_transform(X)
++print(f"Shape of imputed data: {X_imputed_default.shape}")
++print(f"Number of remaining NaN values: {np.isnan(X_imputed_default).sum()}")
++
++# Check that results are different
++if not np.allclose(X_imputed, X_imputed_default, equal_nan=True):
++    print("\nResults differ between fill_value=np.nan and fill_value=0 (as expected)")
++else:
++    print("\nWARNING: Results are the same (unexpected)")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..09af74c05
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,52 @@
++import numpy as np
++from sklearn.experimental import enable_iterative_imputer
++from sklearn.impute import IterativeImputer
++import pytest
++
++# Test edge cases
++
++# Test 1: fill_value with different dtypes
++print("Test 1: fill_value with different numeric types")
++X = np.array([[1.0, 2.0, np.nan], [3.0, np.nan, 6.0], [np.nan, 8.0, 9.0]])
++
++for fill_val in [999, 999.0, np.float32(999), np.int32(999)]:
++    imputer = IterativeImputer(initial_strategy='constant', fill_value=fill_val, max_iter=0)
++    X_imputed = imputer.fit_transform(X)
++    assert X_imputed[0, 2] == 999
++    print(f"  ✓ fill_value={fill_val} (type: {type(fill_val).__name__}) works")
++
++# Test 2: fill_value with extreme values
++print("\nTest 2: fill_value with extreme values")
++for fill_val in [-np.inf, np.inf, 1e308, -1e308]:
++    imputer = IterativeImputer(initial_strategy='constant', fill_value=fill_val, max_iter=0)
++    X_imputed = imputer.fit_transform(X)
++    assert X_imputed[0, 2] == fill_val
++    print(f"  ✓ fill_value={fill_val} works")
++
++# Test 3: fill_value=0 explicitly vs None (default)
++print("\nTest 3: fill_value=0 explicitly vs None (default)")
++imputer_explicit = IterativeImputer(initial_strategy='constant', fill_value=0, max_iter=0)
++imputer_default = IterativeImputer(initial_strategy='constant', fill_value=None, max_iter=0)
++
++X_explicit = imputer_explicit.fit_transform(X)
++X_default = imputer_default.fit_transform(X)
++
++assert np.allclose(X_explicit, X_default)
++print("  ✓ fill_value=0 and fill_value=None produce same results")
++
++# Test 4: Verify fill_value is stored correctly
++print("\nTest 4: Verify fill_value attribute is stored")
++imputer = IterativeImputer(initial_strategy='constant', fill_value=123)
++assert imputer.fill_value == 123
++print("  ✓ fill_value attribute correctly stored")
++
++# Test 5: Array input for fill_value (should not work, but let's verify the error)
++print("\nTest 5: Array input for fill_value (should fail)")
++try:
++    imputer = IterativeImputer(initial_strategy='constant', fill_value=[1, 2, 3], max_iter=0)
++    X_imputed = imputer.fit_transform(X)
++    print("  ✗ Unexpectedly accepted array fill_value")
++except Exception as e:
++    print(f"  ✓ Correctly rejected array fill_value: {type(e).__name__}")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_fill_value_usage.py b/test_fill_value_usage.py
+new file mode 100644
+index 000000000..d3441c699
+--- /dev/null
++++ b/test_fill_value_usage.py
+@@ -0,0 +1,41 @@
++import numpy as np
++from sklearn.experimental import enable_iterative_imputer
++from sklearn.impute import IterativeImputer, SimpleImputer
++
++# Test with custom fill_value
++print("Test: IterativeImputer with custom fill_value")
++X = np.array([[1, 2, np.nan], [3, np.nan, 6], [np.nan, 8, 9]])
++
++# Test with fill_value=999
++iter_imputer = IterativeImputer(initial_strategy='constant', fill_value=999, max_iter=0)
++X_iter = iter_imputer.fit_transform(X)
++print("IterativeImputer result with fill_value=999 and max_iter=0:")
++print(X_iter)
++
++# Test with fill_value=np.nan (for decision tree compatibility)
++print("\nTest: IterativeImputer with fill_value=np.nan")
++iter_imputer_nan = IterativeImputer(initial_strategy='constant', fill_value=np.nan, max_iter=0)
++X_iter_nan = iter_imputer_nan.fit_transform(X)
++print("IterativeImputer result with fill_value=np.nan and max_iter=0:")
++print(X_iter_nan)
++
++# Test with normal iterations
++print("\nTest: IterativeImputer with fill_value=999 and normal iterations")
++iter_imputer_normal = IterativeImputer(initial_strategy='constant', fill_value=999, max_iter=10, random_state=42)
++X_iter_normal = iter_imputer_normal.fit_transform(X)
++print("IterativeImputer result with fill_value=999 and max_iter=10:")
++print(X_iter_normal)
++
++# Compare with default behavior (fill_value=None should use 0)
++print("\nTest: IterativeImputer with default fill_value (should be 0)")
++iter_imputer_default = IterativeImputer(initial_strategy='constant', max_iter=0)
++X_iter_default = iter_imputer_default.fit_transform(X)
++print("IterativeImputer result with default fill_value and max_iter=0:")
++print(X_iter_default)
++
++# Test that fill_value is ignored when initial_strategy is not 'constant'
++print("\nTest: fill_value ignored when initial_strategy='mean'")
++iter_imputer_mean = IterativeImputer(initial_strategy='mean', fill_value=999, max_iter=0)
++X_iter_mean = iter_imputer_mean.fit_transform(X)
++print("IterativeImputer result with initial_strategy='mean' and fill_value=999:")
++print(X_iter_mean)
+diff --git a/test_iterative_imputer_fill_value.py b/test_iterative_imputer_fill_value.py
+new file mode 100644
+index 000000000..a8134c4fd
+--- /dev/null
++++ b/test_iterative_imputer_fill_value.py
+@@ -0,0 +1,38 @@
++import numpy as np
++from sklearn.experimental import enable_iterative_imputer
++from sklearn.impute import IterativeImputer, SimpleImputer
++
++# Test 1: Check if IterativeImputer has fill_value parameter
++print("Test 1: Check if IterativeImputer has fill_value parameter")
++try:
++    imputer = IterativeImputer(initial_strategy='constant', fill_value=999)
++    print("SUCCESS: IterativeImputer accepts fill_value parameter")
++except TypeError as e:
++    print(f"FAILED: {e}")
++
++# Test 2: Check if SimpleImputer with constant strategy works
++print("\nTest 2: SimpleImputer with constant strategy")
++X = np.array([[1, 2, np.nan], [3, np.nan, 6], [np.nan, 8, 9]])
++simple_imputer = SimpleImputer(strategy='constant', fill_value=999)
++X_simple = simple_imputer.fit_transform(X)
++print("SimpleImputer result:")
++print(X_simple)
++
++# Test 3: Check current behavior of IterativeImputer with constant initial strategy
++print("\nTest 3: Current IterativeImputer behavior with constant initial strategy")
++try:
++    iter_imputer = IterativeImputer(initial_strategy='constant')
++    X_iter = iter_imputer.fit_transform(X)
++    print("IterativeImputer result (without fill_value):")
++    print(X_iter)
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test 4: Check if we can access initial_imputer_ after fit
++print("\nTest 4: Check initial_imputer_ attributes")
++iter_imputer = IterativeImputer(initial_strategy='constant')
++iter_imputer.fit(X)
++print(f"Initial imputer class: {type(iter_imputer.initial_imputer_)}")
++print(f"Initial imputer strategy: {iter_imputer.initial_imputer_.strategy}")
++if hasattr(iter_imputer.initial_imputer_, 'fill_value'):
++    print(f"Initial imputer fill_value: {iter_imputer.initial_imputer_.fill_value}")
+diff --git a/test_iterative_imputer_fill_value_comprehensive.py b/test_iterative_imputer_fill_value_comprehensive.py
+new file mode 100644
+index 000000000..682c0714a
+--- /dev/null
++++ b/test_iterative_imputer_fill_value_comprehensive.py
+@@ -0,0 +1,106 @@
++import numpy as np
++import pytest
++from sklearn.experimental import enable_iterative_imputer
++from sklearn.impute import IterativeImputer
++from sklearn.utils._testing import assert_allclose
++
++def test_iterative_imputer_fill_value_constant_strategy():
++    """Test that fill_value is used when initial_strategy='constant'."""
++    X = np.array([[1, 2, np.nan], [3, np.nan, 6], [np.nan, 8, 9]])
++    
++    # Test with custom fill_value
++    imputer = IterativeImputer(initial_strategy='constant', fill_value=999, max_iter=0)
++    X_imputed = imputer.fit_transform(X)
++    expected = np.array([[1, 2, 999], [3, 999, 6], [999, 8, 9]])
++    assert_allclose(X_imputed, expected)
++    
++    # Test with fill_value=np.nan
++    imputer_nan = IterativeImputer(initial_strategy='constant', fill_value=np.nan, max_iter=0)
++    X_imputed_nan = imputer_nan.fit_transform(X)
++    assert np.isnan(X_imputed_nan[0, 2])
++    assert np.isnan(X_imputed_nan[1, 1])
++    assert np.isnan(X_imputed_nan[2, 0])
++    
++    # Test default behavior (fill_value=None should use 0)
++    imputer_default = IterativeImputer(initial_strategy='constant', max_iter=0)
++    X_imputed_default = imputer_default.fit_transform(X)
++    expected_default = np.array([[1, 2, 0], [3, 0, 6], [0, 8, 9]])
++    assert_allclose(X_imputed_default, expected_default)
++
++
++def test_iterative_imputer_fill_value_ignored_other_strategies():
++    """Test that fill_value is ignored when initial_strategy is not 'constant'."""
++    X = np.array([[1, 2, np.nan], [3, np.nan, 6], [np.nan, 8, 9]])
++    
++    # Test with mean strategy
++    imputer_mean = IterativeImputer(initial_strategy='mean', fill_value=999, max_iter=0)
++    X_imputed_mean = imputer_mean.fit_transform(X)
++    # Should use mean, not fill_value
++    assert X_imputed_mean[0, 2] != 999
++    assert X_imputed_mean[1, 1] != 999
++    assert X_imputed_mean[2, 0] != 999
++    
++    # Test with median strategy
++    imputer_median = IterativeImputer(initial_strategy='median', fill_value=999, max_iter=0)
++    X_imputed_median = imputer_median.fit_transform(X)
++    # Should use median, not fill_value
++    assert X_imputed_median[0, 2] != 999
++    assert X_imputed_median[1, 1] != 999
++    assert X_imputed_median[2, 0] != 999
++
++
++def test_iterative_imputer_fill_value_with_iterations():
++    """Test that fill_value affects the final result through iterations."""
++    X = np.array([[1, 2, np.nan], [3, np.nan, 6], [np.nan, 8, 9]])
++    
++    # Compare results with different fill_values
++    imputer1 = IterativeImputer(initial_strategy='constant', fill_value=0, max_iter=5, random_state=42)
++    X_imputed1 = imputer1.fit_transform(X)
++    
++    imputer2 = IterativeImputer(initial_strategy='constant', fill_value=100, max_iter=5, random_state=42)
++    X_imputed2 = imputer2.fit_transform(X)
++    
++    # Results should be different due to different starting points
++    assert not np.allclose(X_imputed1, X_imputed2)
++
++
++def test_iterative_imputer_fill_value_string():
++    """Test fill_value with string data - IterativeImputer only supports numeric data."""
++    # IterativeImputer only supports numeric data, so we skip this test
++    # The fill_value parameter is still added for consistency with SimpleImputer
++    pass
++
++
++def test_iterative_imputer_fill_value_keep_empty_features():
++    """Test fill_value with keep_empty_features=True."""
++    X = np.array([[1, np.nan, 2], [3, np.nan, np.nan]])
++    
++    imputer = IterativeImputer(
++        initial_strategy='constant',
++        fill_value=999,
++        keep_empty_features=True,
++        max_iter=0
++    )
++    X_imputed = imputer.fit_transform(X)
++    
++    # Column 1 should be filled with fill_value
++    assert_allclose(X_imputed[:, 1], 999)
++
++
++if __name__ == "__main__":
++    test_iterative_imputer_fill_value_constant_strategy()
++    print("✓ test_iterative_imputer_fill_value_constant_strategy passed")
++    
++    test_iterative_imputer_fill_value_ignored_other_strategies()
++    print("✓ test_iterative_imputer_fill_value_ignored_other_strategies passed")
++    
++    test_iterative_imputer_fill_value_with_iterations()
++    print("✓ test_iterative_imputer_fill_value_with_iterations passed")
++    
++    test_iterative_imputer_fill_value_string()
++    print("✓ test_iterative_imputer_fill_value_string passed")
++    
++    test_iterative_imputer_fill_value_keep_empty_features()
++    print("✓ test_iterative_imputer_fill_value_keep_empty_features passed")
++    
++    print("\nAll tests passed!")

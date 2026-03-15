@@ -1,0 +1,630 @@
+diff --git a/CHANGES_SUMMARY.md b/CHANGES_SUMMARY.md
+new file mode 100644
+index 0000000000..d70fcccbf2
+--- /dev/null
++++ b/CHANGES_SUMMARY.md
+@@ -0,0 +1,33 @@
++# Summary of Changes
++
++## Problem
++FormSets did not add a CSS class to distinguish non-form errors from other types of errors, unlike Forms which add the `nonfield` CSS class for non-field errors.
++
++## Solution
++Added the `nonform` CSS class to non-form errors in FormSets, following the same pattern used by Forms for non-field errors.
++
++## Changes Made
++
++### 1. Modified `/testbed/django/forms/formsets.py`
++- Line 336: Changed `self._non_form_errors = self.error_class()` to `self._non_form_errors = self.error_class(error_class='nonform')`
++- Line 383: Changed `self._non_form_errors = self.error_class(e.error_list)` to `self._non_form_errors = self.error_class(e.error_list, error_class='nonform')`
++
++### 2. Added test in `/testbed/tests/forms_tests/tests/test_formsets.py`
++Added `test_non_form_errors_css_class` method to verify that:
++- Non-form errors include the 'nonform' CSS class in the error_class attribute
++- HTML rendering includes 'class="errorlist nonform"'
++
++## Benefits
++1. **Consistency**: FormSets now follow the same pattern as Forms for error CSS classes
++2. **Customization**: Developers can now style non-form errors differently from form field errors
++3. **Backward Compatibility**: The change only adds a CSS class, existing functionality remains unchanged
++
++## Testing
++- All existing Django tests pass
++- New test specifically verifies the CSS class is added
++- Comprehensive testing shows the feature works correctly in various scenarios:
++  - Basic non-form errors from clean()
++  - Multiple non-form errors
++  - Management form errors
++  - min_num/max_num validation errors
++  - Custom error classes
+diff --git a/django/forms/formsets.py b/django/forms/formsets.py
+index a89c35599f..1b0d4554e0 100644
+--- a/django/forms/formsets.py
++++ b/django/forms/formsets.py
+@@ -333,7 +333,7 @@ class BaseFormSet:
+         self._non_form_errors.
+         """
+         self._errors = []
+-        self._non_form_errors = self.error_class()
++        self._non_form_errors = self.error_class(error_class='nonform')
+         empty_forms_count = 0
+ 
+         if not self.is_bound:  # Stop further processing.
+@@ -380,7 +380,7 @@ class BaseFormSet:
+             # Give self.clean() a chance to do cross-form validation.
+             self.clean()
+         except ValidationError as e:
+-            self._non_form_errors = self.error_class(e.error_list)
++            self._non_form_errors = self.error_class(e.error_list, error_class='nonform')
+ 
+     def clean(self):
+         """
+diff --git a/test_comprehensive_nonform.py b/test_comprehensive_nonform.py
+new file mode 100644
+index 0000000000..1ac097e505
+--- /dev/null
++++ b/test_comprehensive_nonform.py
+@@ -0,0 +1,244 @@
++"""Comprehensive test for nonform CSS class in formsets."""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django import forms
++from django.forms import formset_factory, BaseFormSet
++from django.core.exceptions import ValidationError
++
++
++class TestForm(forms.Form):
++    name = forms.CharField()
++    email = forms.EmailField()
++
++
++class TestFormSetWithCleanError(BaseFormSet):
++    def clean(self):
++        """Add a non-form error in clean method."""
++        raise ValidationError("This is a non-form error from clean()")
++
++
++class TestFormSetWithMultipleErrors(BaseFormSet):
++    def clean(self):
++        """Add multiple non-form errors."""
++        raise ValidationError([
++            "First non-form error",
++            "Second non-form error",
++        ])
++
++
++def test_basic_nonform_error():
++    """Test basic non-form error has nonform CSS class."""
++    print("\n1. Testing basic non-form error:")
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithCleanError, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++        'form-0-email': 'test@example.com',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'class="errorlist nonform"' in html, f"Expected 'errorlist nonform' class, got: {html}"
++    print("✓ Basic non-form error has 'nonform' CSS class")
++
++
++def test_multiple_nonform_errors():
++    """Test multiple non-form errors have nonform CSS class."""
++    print("\n2. Testing multiple non-form errors:")
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithMultipleErrors, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++        'form-0-email': 'test@example.com',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'class="errorlist nonform"' in html, f"Expected 'errorlist nonform' class, got: {html}"
++    assert 'First non-form error' in html
++    assert 'Second non-form error' in html
++    print("✓ Multiple non-form errors have 'nonform' CSS class")
++
++
++def test_management_form_error():
++    """Test management form errors (also non-form errors) have nonform CSS class."""
++    print("\n3. Testing management form error:")
++    
++    FormSetClass = formset_factory(TestForm, extra=1)
++    
++    # Invalid management form data
++    data = {
++        'form-TOTAL_FORMS': 'invalid',  # This will cause a management form error
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'class="errorlist nonform"' in html, f"Expected 'errorlist nonform' class, got: {html}"
++    print("✓ Management form errors have 'nonform' CSS class")
++
++
++def test_min_num_validation_error():
++    """Test min_num validation errors have nonform CSS class."""
++    print("\n4. Testing min_num validation error:")
++    
++    FormSetClass = formset_factory(TestForm, min_num=2, validate_min=True, extra=0)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '2',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++        'form-0-email': 'test@example.com',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'class="errorlist nonform"' in html, f"Expected 'errorlist nonform' class, got: {html}"
++    assert 'Please submit at least 2 forms' in html
++    print("✓ min_num validation errors have 'nonform' CSS class")
++
++
++def test_max_num_validation_error():
++    """Test max_num validation errors have nonform CSS class."""
++    print("\n5. Testing max_num validation error:")
++    
++    FormSetClass = formset_factory(TestForm, max_num=1, validate_max=True, extra=0)
++    
++    data = {
++        'form-TOTAL_FORMS': '2',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1',
++        'form-0-name': 'test1',
++        'form-0-email': 'test1@example.com',
++        'form-1-name': 'test2',
++        'form-1-email': 'test2@example.com',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'class="errorlist nonform"' in html, f"Expected 'errorlist nonform' class, got: {html}"
++    assert 'Please submit at most 1 form' in html
++    print("✓ max_num validation errors have 'nonform' CSS class")
++
++
++def test_no_errors():
++    """Test that valid formset has no non-form errors."""
++    print("\n6. Testing valid formset (no errors):")
++    
++    FormSetClass = formset_factory(TestForm, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++        'form-0-email': 'test@example.com',
++    }
++    
++    formset = FormSetClass(data=data)
++    assert formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert html == '', f"Expected empty string for valid formset, got: {html}"
++    print("✓ Valid formset has no non-form errors")
++
++
++def test_custom_error_class():
++    """Test that custom error class still gets nonform CSS class appended."""
++    print("\n7. Testing custom error class:")
++    
++    from django.forms.utils import ErrorList
++    
++    class CustomErrorList(ErrorList):
++        def __init__(self, initlist=None, error_class=None):
++            super().__init__(initlist, error_class)
++            # Override to add custom class
++            if error_class:
++                self.error_class = f'custom-error {error_class}'
++            else:
++                self.error_class = 'custom-error'
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithCleanError, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++        'form-0-email': 'test@example.com',
++    }
++    
++    formset = FormSetClass(data=data, error_class=CustomErrorList)
++    formset.is_valid()
++    
++    non_form_errors = formset.non_form_errors()
++    html = non_form_errors.as_ul()
++    
++    assert 'custom-error nonform' in html, f"Expected 'custom-error nonform' class, got: {html}"
++    print("✓ Custom error class gets 'nonform' appended correctly")
++
++
++if __name__ == '__main__':
++    print("Running comprehensive tests for nonform CSS class in formsets...")
++    
++    test_basic_nonform_error()
++    test_multiple_nonform_errors()
++    test_management_form_error()
++    test_min_num_validation_error()
++    test_max_num_validation_error()
++    test_no_errors()
++    test_custom_error_class()
++    
++    print("\n✅ All tests passed!")
+diff --git a/test_nonform_css.py b/test_nonform_css.py
+new file mode 100644
+index 0000000000..42a09c6f53
+--- /dev/null
++++ b/test_nonform_css.py
+@@ -0,0 +1,61 @@
++"""Test script to verify nonform CSS class is added to formset non-form errors."""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django import forms
++from django.forms import formset_factory, BaseFormSet
++from django.core.exceptions import ValidationError
++
++
++class TestForm(forms.Form):
++    name = forms.CharField()
++
++
++class TestFormSet(BaseFormSet):
++    def clean(self):
++        """Add a non-form error to test CSS class."""
++        raise ValidationError("This is a non-form error")
++
++
++# Create a formset with our custom clean method
++TestFormSetClass = formset_factory(TestForm, formset=TestFormSet, extra=1)
++
++# Create an instance with some data to trigger validation
++data = {
++    'form-TOTAL_FORMS': '1',
++    'form-INITIAL_FORMS': '0',
++    'form-MIN_NUM_FORMS': '0',
++    'form-MAX_NUM_FORMS': '1000',
++    'form-0-name': 'test',
++}
++
++formset = TestFormSetClass(data=data)
++
++# Trigger validation
++formset.is_valid()
++
++# Check non-form errors
++non_form_errors = formset.non_form_errors()
++print("Non-form errors:", non_form_errors)
++print("Non-form errors as_ul():", non_form_errors.as_ul())
++print("Error class:", non_form_errors.error_class)
++
++# Check if 'nonform' CSS class is present
++html = non_form_errors.as_ul()
++if 'nonform' in html:
++    print("\n✓ SUCCESS: 'nonform' CSS class is present in non-form errors")
++else:
++    print("\n✗ FAIL: 'nonform' CSS class is NOT present in non-form errors")
++    print("  Expected to find 'nonform' in the error_class")
+diff --git a/test_nonform_css_rendering.py b/test_nonform_css_rendering.py
+new file mode 100644
+index 0000000000..ec5b33d77f
+--- /dev/null
++++ b/test_nonform_css_rendering.py
+@@ -0,0 +1,162 @@
++"""Test that nonform CSS class is rendered in formset non-form errors."""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django import forms
++from django.forms import formset_factory, BaseFormSet
++from django.core.exceptions import ValidationError
++
++
++class TestForm(forms.Form):
++    name = forms.CharField()
++
++
++class TestFormSetWithError(BaseFormSet):
++    def clean(self):
++        raise ValidationError("This is a non-form error")
++
++
++def test_nonform_css_in_as_ul():
++    """Test that as_ul() includes nonform CSS class."""
++    print("\nTesting as_ul() rendering:")
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithError, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    # Get non-form errors as HTML
++    html = formset.non_form_errors().as_ul()
++    print(f"HTML output: {html}")
++    
++    assert 'class="errorlist nonform"' in html
++    print("✓ as_ul() includes 'nonform' CSS class")
++
++
++def test_nonform_css_in_str():
++    """Test that str() representation includes nonform CSS class."""
++    print("\nTesting str() rendering:")
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithError, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    # Get non-form errors as string
++    html = str(formset.non_form_errors())
++    print(f"String output: {html}")
++    
++    assert 'class="errorlist nonform"' in html
++    print("✓ str() includes 'nonform' CSS class")
++
++
++def test_nonform_css_in_formset_rendering():
++    """Test that formset rendering methods don't show non-form errors."""
++    print("\nTesting formset rendering methods:")
++    
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithError, extra=1)
++    
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    
++    # Formset rendering methods (as_table, as_p, as_ul) don't include non-form errors
++    # They only render the forms themselves
++    as_table = formset.as_table()
++    as_p = formset.as_p()
++    as_ul = formset.as_ul()
++    
++    # Non-form errors should not be in these outputs
++    assert 'This is a non-form error' not in as_table
++    assert 'This is a non-form error' not in as_p
++    assert 'This is a non-form error' not in as_ul
++    
++    print("✓ Formset rendering methods don't include non-form errors (as expected)")
++
++
++def test_comparison_with_form_nonfield_errors():
++    """Compare formset non-form errors with form non-field errors."""
++    print("\nComparing with form non-field errors:")
++    
++    class TestFormWithNonFieldError(forms.Form):
++        name = forms.CharField()
++        
++        def clean(self):
++            raise ValidationError("This is a non-field error")
++    
++    # Test form non-field errors
++    form = TestFormWithNonFieldError(data={'name': 'test'})
++    form.is_valid()
++    form_errors = form.non_field_errors()
++    form_html = form_errors.as_ul()
++    
++    print(f"Form non-field errors HTML: {form_html}")
++    assert 'class="errorlist nonfield"' in form_html
++    print("✓ Form non-field errors have 'nonfield' CSS class")
++    
++    # Test formset non-form errors
++    FormSetClass = formset_factory(TestForm, formset=TestFormSetWithError, extra=1)
++    data = {
++        'form-TOTAL_FORMS': '1',
++        'form-INITIAL_FORMS': '0',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        'form-0-name': 'test',
++    }
++    
++    formset = FormSetClass(data=data)
++    formset.is_valid()
++    formset_errors = formset.non_form_errors()
++    formset_html = formset_errors.as_ul()
++    
++    print(f"Formset non-form errors HTML: {formset_html}")
++    assert 'class="errorlist nonform"' in formset_html
++    print("✓ Formset non-form errors have 'nonform' CSS class")
++    
++    print("\n✓ Both use similar patterns: 'nonfield' for forms, 'nonform' for formsets")
++
++
++if __name__ == '__main__':
++    print("Testing nonform CSS class rendering in formsets...")
++    
++    test_nonform_css_in_as_ul()
++    test_nonform_css_in_str()
++    test_nonform_css_in_formset_rendering()
++    test_comparison_with_form_nonfield_errors()
++    
++    print("\n✅ All rendering tests passed!")
+diff --git a/test_patch_for_formsets.py b/test_patch_for_formsets.py
+new file mode 100644
+index 0000000000..6af7eb7f01
+--- /dev/null
++++ b/test_patch_for_formsets.py
+@@ -0,0 +1,38 @@
++"""
++Patch to add test for nonform CSS class in formset tests.
++This shows what test should be added to Django's test suite.
++"""
++
++test_code = '''
++    def test_non_form_errors_css_class(self):
++        """
++        Non-form errors should include the 'nonform' CSS class, similar to
++        how Form.non_field_errors() includes the 'nonfield' CSS class.
++        """
++        class CustomFormSet(BaseFormSet):
++            def clean(self):
++                raise ValidationError("This is a non-form error")
++        
++        CustomFormSetClass = formset_factory(FavoriteDrinkForm, formset=CustomFormSet)
++        data = {
++            'form-TOTAL_FORMS': '1',
++            'form-INITIAL_FORMS': '0',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-name': 'test',
++        }
++        formset = CustomFormSetClass(data=data)
++        self.assertFalse(formset.is_valid())
++        
++        # Check that non-form errors have the 'nonform' CSS class
++        non_form_errors = formset.non_form_errors()
++        self.assertIn('nonform', non_form_errors.error_class)
++        
++        # Check HTML rendering includes the CSS class
++        html = non_form_errors.as_ul()
++        self.assertIn('class="errorlist nonform"', html)
++        self.assertIn('This is a non-form error', html)
++'''
++
++print("Test to add to tests/forms_tests/tests/test_formsets.py:")
++print(test_code)
+diff --git a/tests/forms_tests/tests/test_formsets.py b/tests/forms_tests/tests/test_formsets.py
+index 889560aa74..21b55777d1 100644
+--- a/tests/forms_tests/tests/test_formsets.py
++++ b/tests/forms_tests/tests/test_formsets.py
+@@ -984,6 +984,35 @@ class FormsFormsetTestCase(SimpleTestCase):
+         self.assertFalse(formset.is_valid())
+         self.assertEqual(formset.non_form_errors(), ['You may only specify a drink once.'])
+ 
++    def test_non_form_errors_css_class(self):
++        """
++        Non-form errors should include the 'nonform' CSS class, similar to
++        how Form.non_field_errors() includes the 'nonfield' CSS class.
++        """
++        class CustomFormSet(BaseFormSet):
++            def clean(self):
++                raise ValidationError("This is a non-form error")
++        
++        CustomFormSetClass = formset_factory(FavoriteDrinkForm, formset=CustomFormSet)
++        data = {
++            'form-TOTAL_FORMS': '1',
++            'form-INITIAL_FORMS': '0',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-name': 'test',
++        }
++        formset = CustomFormSetClass(data=data)
++        self.assertFalse(formset.is_valid())
++        
++        # Check that non-form errors have the 'nonform' CSS class
++        non_form_errors = formset.non_form_errors()
++        self.assertIn('nonform', non_form_errors.error_class)
++        
++        # Check HTML rendering includes the CSS class
++        html = non_form_errors.as_ul()
++        self.assertIn('class="errorlist nonform"', html)
++        self.assertIn('This is a non-form error', html)
++
+     def test_formset_iteration(self):
+         """Formset instances are iterable."""
+         ChoiceFormset = formset_factory(Choice, extra=3)

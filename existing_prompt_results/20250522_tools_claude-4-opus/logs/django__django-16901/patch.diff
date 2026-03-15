@@ -1,0 +1,334 @@
+diff --git a/django/db/models/sql/where.py b/django/db/models/sql/where.py
+index aaab1730b7..e6c6aa31c5 100644
+--- a/django/db/models/sql/where.py
++++ b/django/db/models/sql/where.py
+@@ -129,13 +129,16 @@ class WhereNode(tree.Node):
+             # Convert if the database doesn't support XOR:
+             #   a XOR b XOR c XOR ...
+             # to:
+-            #   (a OR b OR c OR ...) AND (a + b + c + ...) == 1
++            #   (a OR b OR c OR ...) AND ((a + b + c + ...) % 2 == 1)
++            # This is true when an odd number of conditions are true.
+             lhs = self.__class__(self.children, OR)
+             rhs_sum = reduce(
+                 operator.add,
+                 (Case(When(c, then=1), default=0) for c in self.children),
+             )
+-            rhs = Exact(1, rhs_sum)
++            # Check if sum is odd (equivalent to XOR for multiple arguments)
++            from django.db.models import Value
++            rhs = Exact(1, rhs_sum % Value(2))
+             return self.__class__([lhs, rhs], AND, self.negated).as_sql(
+                 compiler, connection
+             )
+diff --git a/test_xor_comprehensive.py b/test_xor_comprehensive.py
+new file mode 100644
+index 0000000000..bff0984942
+--- /dev/null
++++ b/test_xor_comprehensive.py
+@@ -0,0 +1,115 @@
++"""Comprehensive test for XOR parity behavior"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Create a simple model for testing
++from django.db import models, connection
++from django.db.models import Q
++
++class TestModel(models.Model):
++    a = models.BooleanField(default=False)
++    b = models.BooleanField(default=False) 
++    c = models.BooleanField(default=False)
++    d = models.BooleanField(default=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data with all combinations
++test_cases = []
++for a in [False, True]:
++    for b in [False, True]:
++        for c in [False, True]:
++            for d in [False, True]:
++                obj = TestModel.objects.create(a=a, b=b, c=c, d=d)
++                test_cases.append((a, b, c, d, obj))
++
++print("Testing XOR parity behavior with all combinations:")
++print("=" * 60)
++
++# Test 2-way XOR
++print("\n2-way XOR (a ^ b):")
++for a, b, c, d, obj in test_cases:
++    result = TestModel.objects.filter(Q(a=True) ^ Q(b=True), pk=obj.pk).exists()
++    expected = (a ^ b)  # Python's XOR
++    status = "✓" if result == expected else "✗"
++    if result != expected:
++        print(f"{status} a={a}, b={b}: got {result}, expected {expected}")
++
++# Test 3-way XOR
++print("\n3-way XOR (a ^ b ^ c):")
++errors = []
++for a, b, c, d, obj in test_cases:
++    result = TestModel.objects.filter(Q(a=True) ^ Q(b=True) ^ Q(c=True), pk=obj.pk).exists()
++    # XOR is true when odd number of inputs are true
++    true_count = sum([a, b, c])
++    expected = (true_count % 2 == 1)
++    status = "✓" if result == expected else "✗"
++    if result != expected:
++        errors.append(f"{status} a={a}, b={b}, c={c}: got {result}, expected {expected} (true_count={true_count})")
++
++if errors:
++    print("ERRORS found:")
++    for error in errors:
++        print(error)
++else:
++    print("All 3-way XOR tests passed!")
++
++# Test 4-way XOR
++print("\n4-way XOR (a ^ b ^ c ^ d):")
++errors = []
++for a, b, c, d, obj in test_cases:
++    result = TestModel.objects.filter(Q(a=True) ^ Q(b=True) ^ Q(c=True) ^ Q(d=True), pk=obj.pk).exists()
++    # XOR is true when odd number of inputs are true
++    true_count = sum([a, b, c, d])
++    expected = (true_count % 2 == 1)
++    status = "✓" if result == expected else "✗"
++    if result != expected:
++        errors.append(f"{status} a={a}, b={b}, c={c}, d={d}: got {result}, expected {expected} (true_count={true_count})")
++
++if errors:
++    print("ERRORS found:")
++    for error in errors:
++        print(error)
++else:
++    print("All 4-way XOR tests passed!")
++
++# Test specific cases from the problem statement
++print("\n\nTesting specific case from problem statement:")
++obj = TestModel.objects.create(a=True, b=False, c=False, d=False)
++print(f"Q(a=True): {TestModel.objects.filter(Q(a=True), pk=obj.pk).count()}")  # Expected: 1
++print(f"Q(a=True) ^ Q(a=True): {TestModel.objects.filter(Q(a=True) ^ Q(a=True), pk=obj.pk).count()}")  # Expected: 0
++print(f"Q(a=True) ^ Q(a=True) ^ Q(a=True): {TestModel.objects.filter(Q(a=True) ^ Q(a=True) ^ Q(a=True), pk=obj.pk).count()}")  # Expected: 1
++print(f"Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True): {TestModel.objects.filter(Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True), pk=obj.pk).count()}")  # Expected: 0
++print(f"Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True): {TestModel.objects.filter(Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True) ^ Q(a=True), pk=obj.pk).count()}")  # Expected: 1
++
++# Show SQL for 3-way XOR
++print("\n\nGenerated SQL for 3-way XOR:")
++qs = TestModel.objects.filter(Q(a=True) ^ Q(b=True) ^ Q(c=True))
++print(qs.query)
+diff --git a/test_xor_issue.py b/test_xor_issue.py
+new file mode 100644
+index 0000000000..739a89c3fd
+--- /dev/null
++++ b/test_xor_issue.py
+@@ -0,0 +1,57 @@
++"""Test script to reproduce the XOR issue with 3+ arguments"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Create a simple model for testing
++from django.db import models
++from django.db.models import Q
++
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++obj = TestModel.objects.create(value=1)
++
++# Test XOR with different numbers of arguments
++print("Testing XOR behavior:")
++print(f"Q(value=1): {TestModel.objects.filter(Q(value=1)).count()}")  # Expected: 1
++print(f"Q(value=1) ^ Q(value=1): {TestModel.objects.filter(Q(value=1) ^ Q(value=1)).count()}")  # Expected: 0
++print(f"Q(value=1) ^ Q(value=1) ^ Q(value=1): {TestModel.objects.filter(Q(value=1) ^ Q(value=1) ^ Q(value=1)).count()}")  # Expected: 1
++print(f"Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1): {TestModel.objects.filter(Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1)).count()}")  # Expected: 0
++print(f"Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1): {TestModel.objects.filter(Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1) ^ Q(value=1)).count()}")  # Expected: 1
++
++# Let's also check the generated SQL
++from django.db import connection
++print("\nGenerated SQL for Q(value=1) ^ Q(value=1) ^ Q(value=1):")
++qs = TestModel.objects.filter(Q(value=1) ^ Q(value=1) ^ Q(value=1))
++print(qs.query)
+diff --git a/test_xor_negation.py b/test_xor_negation.py
+new file mode 100644
+index 0000000000..ebc9c725e5
+--- /dev/null
++++ b/test_xor_negation.py
+@@ -0,0 +1,65 @@
++"""Test XOR with negation"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Create a simple model for testing
++from django.db import models, connection
++from django.db.models import Q
++
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++for i in range(10):
++    TestModel.objects.create(value=i)
++
++print("Testing XOR with negation:")
++print("=" * 40)
++
++# Test case from existing tests
++result = TestModel.objects.filter(Q(value__lte=7) ^ ~Q(value__lt=3) ^ Q(value__lte=1))
++expected_values = [2, 8, 9]  # Based on the test in xor_lookups
++actual_values = sorted([obj.value for obj in result])
++print(f"Q(value__lte=7) ^ ~Q(value__lt=3) ^ Q(value__lte=1)")
++print(f"Expected values: {expected_values}")
++print(f"Actual values: {actual_values}")
++print(f"Match: {actual_values == expected_values}")
++
++# Test negated XOR expression
++print("\nTesting ~(XOR expression):")
++result = TestModel.objects.filter(~(Q(value__lte=7) ^ ~Q(value__lt=3) ^ Q(value__lte=1)))
++expected_values = [0, 1, 3, 4, 5, 6, 7]  # All except [2, 8, 9]
++actual_values = sorted([obj.value for obj in result])
++print(f"~(Q(value__lte=7) ^ ~Q(value__lt=3) ^ Q(value__lte=1))")
++print(f"Expected values: {expected_values}")
++print(f"Actual values: {actual_values}")
++print(f"Match: {actual_values == expected_values}")
+diff --git a/tests/xor_lookups/tests.py b/tests/xor_lookups/tests.py
+index a9cdf9cb31..66031ba32c 100644
+--- a/tests/xor_lookups/tests.py
++++ b/tests/xor_lookups/tests.py
+@@ -65,3 +65,51 @@ class XorLookupsTests(TestCase):
+             Number.objects.filter(Q(pk__in=[]) ^ Q(num__gte=5)),
+             self.numbers[5:],
+         )
++
++    def test_multiple_xor_parity(self):
++        """Test that XOR with 3+ arguments uses parity (odd number of true conditions)."""
++        # Create a number that will match all conditions
++        num = self.numbers[5]  # num=5
++        
++        # Single condition (odd: 1) - should match
++        self.assertEqual(
++            Number.objects.filter(Q(num=5)).count(),
++            1
++        )
++        
++        # Two same conditions (even: 2) - should not match
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=5)).count(),
++            0
++        )
++        
++        # Three same conditions (odd: 3) - should match
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=5) ^ Q(num=5)).count(),
++            1
++        )
++        
++        # Four same conditions (even: 4) - should not match
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=5) ^ Q(num=5) ^ Q(num=5)).count(),
++            0
++        )
++        
++        # Five same conditions (odd: 5) - should match
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=5) ^ Q(num=5) ^ Q(num=5) ^ Q(num=5)).count(),
++            1
++        )
++        
++        # Test with mixed true/false conditions
++        # True ^ False ^ True = False (2 true conditions - even)
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=999) ^ Q(num=5)).count(),
++            0
++        )
++        
++        # True ^ False ^ False = True (1 true condition - odd)
++        self.assertEqual(
++            Number.objects.filter(Q(num=5) ^ Q(num=999) ^ Q(num=998)).count(),
++            1
++        )

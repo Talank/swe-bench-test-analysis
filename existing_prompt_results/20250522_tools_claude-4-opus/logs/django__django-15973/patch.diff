@@ -1,0 +1,796 @@
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index 09785e8586..0e967f8a26 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -450,15 +450,27 @@ class BaseDatabaseSchemaEditor:
+ 
+         # Make M2M tables
+         for field in model._meta.local_many_to_many:
+-            if field.remote_field.through._meta.auto_created:
+-                self.create_model(field.remote_field.through)
++            # Handle the case where through is a string reference
++            through = field.remote_field.through
++            if isinstance(through, str):
++                # If through is a string, it's a manually specified model
++                # that will be created by its own migration, so skip it
++                continue
++            if through._meta.auto_created:
++                self.create_model(through)
+ 
+     def delete_model(self, model):
+         """Delete a model from the database."""
+         # Handle auto-created intermediary models
+         for field in model._meta.local_many_to_many:
+-            if field.remote_field.through._meta.auto_created:
+-                self.delete_model(field.remote_field.through)
++            # Handle the case where through is a string reference
++            through = field.remote_field.through
++            if isinstance(through, str):
++                # If through is a string, it's a manually specified model
++                # that will be deleted by its own migration, so skip it
++                continue
++            if through._meta.auto_created:
++                self.delete_model(through)
+ 
+         # Delete the table
+         self.execute(
+@@ -630,8 +642,14 @@ class BaseDatabaseSchemaEditor:
+         involve adding a table instead (for M2M fields).
+         """
+         # Special-case implicit M2M tables
+-        if field.many_to_many and field.remote_field.through._meta.auto_created:
+-            return self.create_model(field.remote_field.through)
++        if field.many_to_many:
++            through = field.remote_field.through
++            if isinstance(through, str):
++                # If through is a string, it's a manually specified model
++                # that will be created by its own migration
++                return
++            if through._meta.auto_created:
++                return self.create_model(through)
+         # Get the column's definition
+         definition, params = self.column_sql(model, field, include_default=True)
+         # It might not actually have a column behind it
+@@ -704,8 +722,14 @@ class BaseDatabaseSchemaEditor:
+         but for M2Ms may involve deleting a table.
+         """
+         # Special-case implicit M2M tables
+-        if field.many_to_many and field.remote_field.through._meta.auto_created:
+-            return self.delete_model(field.remote_field.through)
++        if field.many_to_many:
++            through = field.remote_field.through
++            if isinstance(through, str):
++                # If through is a string, it's a manually specified model
++                # that will be deleted by its own migration
++                return
++            if through._meta.auto_created:
++                return self.delete_model(through)
+         # It might not actually have a column behind it
+         if field.db_parameters(connection=self.connection)["type"] is None:
+             return
+@@ -759,23 +783,33 @@ class BaseDatabaseSchemaEditor:
+             and (
+                 old_field.remote_field.through
+                 and new_field.remote_field.through
+-                and old_field.remote_field.through._meta.auto_created
+-                and new_field.remote_field.through._meta.auto_created
+             )
+         ):
+-            return self._alter_many_to_many(model, old_field, new_field, strict)
++            # Check if both through models are auto-created
++            old_through = old_field.remote_field.through
++            new_through = new_field.remote_field.through
++            # Skip if either through is a string (manually specified model)
++            if isinstance(old_through, str) or isinstance(new_through, str):
++                return
++            if old_through._meta.auto_created and new_through._meta.auto_created:
++                return self._alter_many_to_many(model, old_field, new_field, strict)
+         elif (
+             old_type is None
+             and new_type is None
+             and (
+                 old_field.remote_field.through
+                 and new_field.remote_field.through
+-                and not old_field.remote_field.through._meta.auto_created
+-                and not new_field.remote_field.through._meta.auto_created
+             )
+         ):
+-            # Both sides have through models; this is a no-op.
+-            return
++            # Check if both through models are NOT auto-created
++            old_through = old_field.remote_field.through
++            new_through = new_field.remote_field.through
++            # Skip if either through is a string (manually specified model)
++            if isinstance(old_through, str) or isinstance(new_through, str):
++                return
++            if not old_through._meta.auto_created and not new_through._meta.auto_created:
++                # Both sides have through models; this is a no-op.
++                return
+         elif old_type is None or new_type is None:
+             raise ValueError(
+                 "Cannot alter field %s into %s - they are not compatible types "
+@@ -1246,34 +1280,39 @@ class BaseDatabaseSchemaEditor:
+ 
+     def _alter_many_to_many(self, model, old_field, new_field, strict):
+         """Alter M2Ms to repoint their to= endpoints."""
++        # Get through models
++        old_through = old_field.remote_field.through
++        new_through = new_field.remote_field.through
++        
++        # Skip if either through is a string (manually specified model)
++        if isinstance(old_through, str) or isinstance(new_through, str):
++            return
++            
+         # Rename the through table
+-        if (
+-            old_field.remote_field.through._meta.db_table
+-            != new_field.remote_field.through._meta.db_table
+-        ):
++        if old_through._meta.db_table != new_through._meta.db_table:
+             self.alter_db_table(
+-                old_field.remote_field.through,
+-                old_field.remote_field.through._meta.db_table,
+-                new_field.remote_field.through._meta.db_table,
++                old_through,
++                old_through._meta.db_table,
++                new_through._meta.db_table,
+             )
+         # Repoint the FK to the other side
+         self.alter_field(
+-            new_field.remote_field.through,
++            new_through,
+             # The field that points to the target model is needed, so we can
+             # tell alter_field to change it - this is m2m_reverse_field_name()
+             # (as opposed to m2m_field_name(), which points to our model).
+-            old_field.remote_field.through._meta.get_field(
++            old_through._meta.get_field(
+                 old_field.m2m_reverse_field_name()
+             ),
+-            new_field.remote_field.through._meta.get_field(
++            new_through._meta.get_field(
+                 new_field.m2m_reverse_field_name()
+             ),
+         )
+         self.alter_field(
+-            new_field.remote_field.through,
++            new_through,
+             # for self-referential models we need to alter field from the other end too
+-            old_field.remote_field.through._meta.get_field(old_field.m2m_field_name()),
+-            new_field.remote_field.through._meta.get_field(new_field.m2m_field_name()),
++            old_through._meta.get_field(old_field.m2m_field_name()),
++            new_through._meta.get_field(new_field.m2m_field_name()),
+         )
+ 
+     def _create_index_name(self, table_name, column_names, suffix=""):
+diff --git a/test_m2m_through_different_app.py b/test_m2m_through_different_app.py
+new file mode 100644
+index 0000000000..979ae7cb5a
+--- /dev/null
++++ b/test_m2m_through_different_app.py
+@@ -0,0 +1,125 @@
++"""
++Test for ManyToMany through model in different app - reproducing the exact issue from the problem statement
++"""
++import os
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'fonte',
++        'variavel',
++        'fonte_variavel',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a migration that reproduces the exact issue
++migration = Migration('0001_initial', 'fonte')
++migration.dependencies = [('variavel', '__first__')]
++
++# This is the exact operation from the problem statement
++migration.operations = [
++    operations.CreateModel(
++        name='FonteModel',
++        fields=[
++            ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++            ('nome', models.TextField(unique=True)),
++            ('descricao', models.TextField()),
++            ('data_inicial', models.DateField()),
++            ('data_final', models.DateField(blank=True, null=True)),
++            ('variaveis', models.ManyToManyField(through='fonte_variavel.FonteVariavelModel', to='variavel.variavelmodel')),
++        ],
++        options={
++            'verbose_name': 'Fonte',
++            'verbose_name_plural': 'Fontes',
++            'db_table': 'fontes',
++        },
++    ),
++]
++
++# Create the states
++from_state = ProjectState()
++
++# Add VariavelModel to the state
++from_state.add_model(ModelState(
++    'variavel',
++    'VariavelModel',
++    [
++        ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++        ('nome', models.TextField(unique=True)),
++        ('descricao', models.TextField()),
++    ],
++    {
++        'db_table': 'variaveis',
++        'verbose_name': 'Variável',
++        'verbose_name_plural': 'Variáveis',
++    }
++))
++
++# Add FonteVariavelModel to the state
++from_state.add_model(ModelState(
++    'fonte_variavel',
++    'FonteVariavelModel',
++    [
++        ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++        ('variavel', models.ForeignKey('variavel.VariavelModel', on_delete=models.CASCADE)),
++        ('fonte', models.ForeignKey('fonte.FonteModel', on_delete=models.CASCADE)),
++    ],
++    {
++        'db_table': 'fontes_variaveis',
++        'verbose_name': 'Fonte',
++        'verbose_name_plural': 'Fontes',
++    }
++))
++
++to_state = from_state.clone()
++
++# Apply the migration operation to create FonteModel
++for operation in migration.operations:
++    operation.state_forwards('fonte', to_state)
++
++# Now test the database operation
++try:
++    with connection.schema_editor() as schema_editor:
++        # This is where the error occurred in the original issue
++        migration.operations[0].database_forwards('fonte', schema_editor, from_state, to_state)
++    print("SUCCESS: Migration applied without error!")
++    
++    # Verify the table was created
++    with connection.cursor() as cursor:
++        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fontes';")
++        result = cursor.fetchone()
++        if result:
++            print(f"Table 'fontes' was created successfully!")
++        else:
++            print("ERROR: Table 'fontes' was not created!")
++            
++except AttributeError as e:
++    print(f"ERROR: {e}")
++    print("This is the original error that should now be fixed.")
++    import traceback
++    traceback.print_exc()
++except Exception as e:
++    print(f"Unexpected error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_m2m_through_fix.py b/test_m2m_through_fix.py
+new file mode 100644
+index 0000000000..1d62fd61e4
+--- /dev/null
++++ b/test_m2m_through_fix.py
+@@ -0,0 +1,157 @@
++"""
++Test the fix for ManyToMany through model in different app
++"""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.test import TestCase, TransactionTestCase
++from django.apps import apps
++
++# Create a temporary directory for our test apps
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++# Create the app directories
++for app in ['fonte', 'variavel', 'fonte_variavel']:
++    app_dir = Path(test_dir) / app
++    app_dir.mkdir()
++    (app_dir / '__init__.py').touch()
++    (app_dir / 'migrations').mkdir()
++    (app_dir / 'migrations' / '__init__.py').touch()
++
++# Create models.py files
++fonte_models = '''
++from django.db import models
++
++class FonteModel(models.Model):
++    nome = models.TextField(unique=True)
++    descricao = models.TextField()
++    data_inicial = models.DateField()
++    data_final = models.DateField(blank=True, null=True)
++    variaveis = models.ManyToManyField("variavel.VariavelModel", through="fonte_variavel.FonteVariavelModel")
++    
++    def __str__(self):
++        return self.nome
++    
++    class Meta:
++        db_table = "fontes"
++        verbose_name = "Fonte"
++        verbose_name_plural = "Fontes"
++'''
++
++variavel_models = '''
++from django.db import models
++
++class VariavelModel(models.Model):
++    nome = models.TextField(unique=True)
++    descricao = models.TextField()
++    
++    class Meta:
++        db_table = 'variaveis'
++        verbose_name = 'Variável'
++        verbose_name_plural = 'Variáveis'
++'''
++
++fonte_variavel_models = '''
++from django.db import models
++
++class FonteVariavelModel(models.Model):
++    variavel = models.ForeignKey('variavel.VariavelModel', on_delete=models.CASCADE)
++    fonte = models.ForeignKey('fonte.FonteModel', on_delete=models.CASCADE)
++    
++    class Meta:
++        db_table = 'fontes_variaveis'
++        verbose_name = 'Fonte'
++        verbose_name_plural = 'Fontes'
++'''
++
++with open(Path(test_dir) / 'fonte' / 'models.py', 'w') as f:
++    f.write(fonte_models)
++
++with open(Path(test_dir) / 'variavel' / 'models.py', 'w') as f:
++    f.write(variavel_models)
++
++with open(Path(test_dir) / 'fonte_variavel' / 'models.py', 'w') as f:
++    f.write(fonte_variavel_models)
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'fonte',
++        'variavel',
++        'fonte_variavel',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create migrations
++from django.core.management import call_command
++import io
++import contextlib
++
++try:
++    # Create migrations for each app
++    for app in ['variavel', 'fonte_variavel', 'fonte']:
++        print(f"Creating migrations for {app}...")
++        with contextlib.redirect_stdout(io.StringIO()):
++            call_command('makemigrations', app)
++    
++    # Apply migrations
++    print("Applying migrations...")
++    call_command('migrate', verbosity=2)
++    
++    print("\nSUCCESS: All migrations applied successfully!")
++    
++    # Test that we can create instances
++    from fonte.models import FonteModel
++    from variavel.models import VariavelModel
++    from fonte_variavel.models import FonteVariavelModel
++    import datetime
++    
++    # Create test data
++    var1 = VariavelModel.objects.create(nome="Variable 1", descricao="Test variable 1")
++    fonte1 = FonteModel.objects.create(
++        nome="Fonte 1",
++        descricao="Test fonte 1", 
++        data_inicial=datetime.date.today()
++    )
++    
++    # Test the many-to-many relationship
++    fonte1.variaveis.add(var1)
++    
++    print(f"Created fonte: {fonte1}")
++    print(f"Created variavel: {var1}")
++    print(f"Fonte variaveis: {list(fonte1.variaveis.all())}")
++    
++except Exception as e:
++    print(f"\nERROR: {e}")
++    import traceback
++    traceback.print_exc()
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
+diff --git a/test_m2m_through_string.py b/test_m2m_through_string.py
+new file mode 100644
+index 0000000000..6af6c1fb6b
+--- /dev/null
++++ b/test_m2m_through_string.py
+@@ -0,0 +1,115 @@
++"""
++Test that verifies the fix for ManyToMany through model as string reference
++"""
++import django
++from django.test import TestCase, TransactionTestCase
++from django.db import models, connection
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.operations import CreateModel
++from django.apps import apps
++
++class TestM2MThroughString(TransactionTestCase):
++    """Test that M2M fields with through as string don't cause AttributeError"""
++    
++    def test_create_model_with_m2m_through_string(self):
++        """
++        Test that CreateModel operation works when ManyToManyField 
++        has through specified as a string to a model in another app
++        """
++        # Create the operation that was failing
++        operation = CreateModel(
++            name='FonteModel',
++            fields=[
++                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('nome', models.TextField(unique=True)),
++                ('descricao', models.TextField()),
++                ('data_inicial', models.DateField()),
++                ('data_final', models.DateField(blank=True, null=True)),
++                # This is the field that was causing the issue
++                ('variaveis', models.ManyToManyField(through='fonte_variavel.FonteVariavelModel', to='variavel.VariavelModel')),
++            ],
++            options={
++                'verbose_name': 'Fonte',
++                'verbose_name_plural': 'Fontes',
++                'db_table': 'test_fontes',
++            },
++        )
++        
++        # Create a project state with the required models
++        project_state = ProjectState()
++        
++        # Add VariavelModel
++        project_state.add_model(ModelState(
++            'variavel',
++            'VariavelModel',
++            [
++                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('nome', models.TextField(unique=True)),
++                ('descricao', models.TextField()),
++            ],
++            {
++                'db_table': 'test_variaveis',
++            }
++        ))
++        
++        # Add FonteVariavelModel (the through model)
++        project_state.add_model(ModelState(
++            'fonte_variavel',
++            'FonteVariavelModel',
++            [
++                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('variavel', models.ForeignKey('variavel.VariavelModel', on_delete=models.CASCADE)),
++                ('fonte', models.ForeignKey('fonte.FonteModel', on_delete=models.CASCADE)),
++            ],
++            {
++                'db_table': 'test_fontes_variaveis',
++            }
++        ))
++        
++        # Apply the operation to create the new state
++        new_state = project_state.clone()
++        operation.state_forwards('fonte', new_state)
++        
++        # This is where the AttributeError was occurring
++        with connection.schema_editor() as editor:
++            # Should not raise AttributeError: 'str' object has no attribute '_meta'
++            operation.database_forwards('fonte', editor, project_state, new_state)
++            
++        # Verify the table was created
++        with connection.cursor() as cursor:
++            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='test_fontes';")
++            result = cursor.fetchone()
++            self.assertIsNotNone(result, "Table test_fontes should have been created")
++
++if __name__ == '__main__':
++    # Run the test
++    import os
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++    
++    from django.conf import settings
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['django.contrib.contenttypes'],
++        SECRET_KEY='test-key',
++    )
++    
++    django.setup()
++    
++    # Run the test
++    test = TestM2MThroughString()
++    test._pre_setup()
++    try:
++        test.test_create_model_with_m2m_through_string()
++        print("✓ Test passed: ManyToMany with through as string works correctly")
++    except Exception as e:
++        print(f"✗ Test failed: {e}")
++        import traceback
++        traceback.print_exc()
++    finally:
++        test._post_teardown()
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..a9df00e208
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,83 @@
++"""
++Test script to reproduce the issue with ManyToMany through model in different app
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++if not os.path.exists('test_settings.py'):
++    with open('test_settings.py', 'w') as f:
++        f.write('''
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'fonte',
++    'variavel', 
++    'fonte_variavel',
++]
++
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
++''')
++
++# Import after settings are configured
++django.setup()
++
++# Create the migration that reproduces the issue
++migration = Migration('test_migration', 'fonte')
++
++# Add the CreateModel operation that causes the issue
++migration.operations = [
++    operations.CreateModel(
++        name='FonteModel',
++        fields=[
++            ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++            ('nome', models.TextField(unique=True)),
++            ('descricao', models.TextField()),
++            ('data_inicial', models.DateField()),
++            ('data_final', models.DateField(blank=True, null=True)),
++            ('variaveis', models.ManyToManyField(through='fonte_variavel.FonteVariavelModel', to='variavel.VariavelModel')),
++        ],
++        options={
++            'verbose_name': 'Fonte',
++            'verbose_name_plural': 'Fontes',
++            'db_table': 'fontes',
++        },
++    ),
++]
++
++# Try to apply the migration
++try:
++    from django.db import connection
++    from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++    
++    with connection.schema_editor() as schema_editor:
++        # Create a fake state
++        from_state = ProjectState()
++        to_state = from_state.clone()
++        
++        # This should trigger the error
++        migration.operations[0].database_forwards('fonte', schema_editor, from_state, to_state)
++        
++except AttributeError as e:
++    print(f"Error reproduced: {e}")
++    print(f"Error type: {type(e)}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_schema_m2m_through_fix.py b/test_schema_m2m_through_fix.py
+new file mode 100644
+index 0000000000..5630129bb5
+--- /dev/null
++++ b/test_schema_m2m_through_fix.py
+@@ -0,0 +1,122 @@
++"""
++Direct test of the schema editor fix for ManyToMany through model in different app
++"""
++import os
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++
++# Configure Django minimally
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Create a mock model with a ManyToManyField where through is a string
++class MockMeta:
++    def __init__(self):
++        self.local_many_to_many = []
++        self.auto_created = False
++
++class MockRemoteField:
++    def __init__(self, through):
++        self.through = through
++
++class MockField:
++    def __init__(self, through):
++        self.remote_field = MockRemoteField(through)
++
++class MockModel:
++    def __init__(self):
++        self._meta = MockMeta()
++
++# Test case 1: through is a string (manually specified model)
++print("Test 1: through is a string (manually specified model)")
++model = MockModel()
++field = MockField("fonte_variavel.FonteVariavelModel")
++model._meta.local_many_to_many = [field]
++
++try:
++    with connection.schema_editor() as editor:
++        # This should not raise AttributeError anymore
++        editor.create_model(model)
++    print("✓ SUCCESS: No AttributeError when through is a string")
++except AttributeError as e:
++    print(f"✗ FAILED: {e}")
++
++# Test case 2: through is a model class with auto_created=True
++print("\nTest 2: through is a model class with auto_created=True")
++
++class AutoCreatedThrough:
++    class _meta:
++        auto_created = True
++
++model2 = MockModel()
++field2 = MockField(AutoCreatedThrough)
++model2._meta.local_many_to_many = [field2]
++
++# Mock the create_model method to avoid actual table creation
++original_create_model = BaseDatabaseSchemaEditor.create_model
++created_models = []
++
++def mock_create_model(self, model):
++    if hasattr(model, '_meta'):
++        created_models.append(model)
++    else:
++        original_create_model(self, model)
++
++BaseDatabaseSchemaEditor.create_model = mock_create_model
++
++try:
++    with connection.schema_editor() as editor:
++        editor.create_model(model2)
++    if AutoCreatedThrough in created_models:
++        print("✓ SUCCESS: Auto-created through model was processed")
++    else:
++        print("✗ FAILED: Auto-created through model was not processed")
++except Exception as e:
++    print(f"✗ FAILED: {e}")
++
++# Restore original method
++BaseDatabaseSchemaEditor.create_model = original_create_model
++
++# Test case 3: through is a model class with auto_created=False
++print("\nTest 3: through is a model class with auto_created=False (manually created)")
++
++class ManualThrough:
++    class _meta:
++        auto_created = False
++
++model3 = MockModel()
++field3 = MockField(ManualThrough)
++model3._meta.local_many_to_many = [field3]
++
++created_models = []
++BaseDatabaseSchemaEditor.create_model = mock_create_model
++
++try:
++    with connection.schema_editor() as editor:
++        editor.create_model(model3)
++    if ManualThrough not in created_models:
++        print("✓ SUCCESS: Manually created through model was not processed")
++    else:
++        print("✗ FAILED: Manually created through model should not be processed")
++except Exception as e:
++    print(f"✗ FAILED: {e}")
++
++# Restore original method
++BaseDatabaseSchemaEditor.create_model = original_create_model
++
++print("\nAll tests completed!")

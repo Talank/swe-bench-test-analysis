@@ -1,0 +1,824 @@
+diff --git a/django/forms/formsets.py b/django/forms/formsets.py
+index 75b0646512..a246486012 100644
+--- a/django/forms/formsets.py
++++ b/django/forms/formsets.py
+@@ -146,16 +146,24 @@ class BaseFormSet(RenderableFormMixin):
+             # count in the data; this is DoS protection to prevent clients
+             # from forcing the server to instantiate arbitrary numbers of
+             # forms
+-            return min(self.management_form.cleaned_data[TOTAL_FORM_COUNT], self.absolute_max)
++            total_forms = min(self.management_form.cleaned_data[TOTAL_FORM_COUNT], self.absolute_max)
++            # If edit_only is True, limit to initial forms only
++            if getattr(self, 'edit_only', False):
++                total_forms = min(total_forms, self.initial_form_count())
++            return total_forms
+         else:
+             initial_forms = self.initial_form_count()
+-            total_forms = max(initial_forms, self.min_num) + self.extra
+-            # Allow all existing related objects/inlines to be displayed,
+-            # but don't allow extra beyond max_num.
+-            if initial_forms > self.max_num >= 0:
++            # If edit_only is True, don't add extra forms
++            if getattr(self, 'edit_only', False):
+                 total_forms = initial_forms
+-            elif total_forms > self.max_num >= 0:
+-                total_forms = self.max_num
++            else:
++                total_forms = max(initial_forms, self.min_num) + self.extra
++                # Allow all existing related objects/inlines to be displayed,
++                # but don't allow extra beyond max_num.
++                if initial_forms > self.max_num >= 0:
++                    total_forms = initial_forms
++                elif total_forms > self.max_num >= 0:
++                    total_forms = self.max_num
+         return total_forms
+ 
+     def initial_form_count(self):
+@@ -478,8 +486,13 @@ class BaseFormSet(RenderableFormMixin):
+ def formset_factory(form, formset=BaseFormSet, extra=1, can_order=False,
+                     can_delete=False, max_num=None, validate_max=False,
+                     min_num=None, validate_min=False, absolute_max=None,
+-                    can_delete_extra=True, renderer=None):
+-    """Return a FormSet for the given form class."""
++                    can_delete_extra=True, renderer=None, edit_only=False):
++    """Return a FormSet for the given form class.
++    
++    If edit_only is True, the formset will not allow creation of new instances,
++    only editing of existing ones. This is useful for creating "edit only" views
++    where users should not be able to add new objects.
++    """
+     if min_num is None:
+         min_num = DEFAULT_MIN_NUM
+     if max_num is None:
+@@ -505,6 +518,7 @@ def formset_factory(form, formset=BaseFormSet, extra=1, can_order=False,
+         'validate_min': validate_min,
+         'validate_max': validate_max,
+         'renderer': renderer or get_default_renderer(),
++        'edit_only': edit_only,
+     }
+     return type(form.__name__ + 'FormSet', (formset,), attrs)
+ 
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 7effb202e3..da4b13f1e2 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -813,6 +813,9 @@ class BaseModelFormSet(BaseFormSet):
+ 
+     def save_new_objects(self, commit=True):
+         self.new_objects = []
++        # If edit_only is True, don't save any new objects
++        if getattr(self, 'edit_only', False):
++            return self.new_objects
+         for form in self.extra_forms:
+             if not form.has_changed():
+                 continue
+@@ -875,8 +878,14 @@ def modelformset_factory(model, form=ModelForm, formfield_callback=None,
+                          widgets=None, validate_max=False, localized_fields=None,
+                          labels=None, help_texts=None, error_messages=None,
+                          min_num=None, validate_min=False, field_classes=None,
+-                         absolute_max=None, can_delete_extra=True, renderer=None):
+-    """Return a FormSet class for the given Django model class."""
++                         absolute_max=None, can_delete_extra=True, renderer=None,
++                         edit_only=False):
++    """Return a FormSet class for the given Django model class.
++    
++    If edit_only is True, the formset will not allow creation of new instances,
++    only editing of existing ones. This is useful for creating "edit only" views
++    where users should not be able to add new objects.
++    """
+     meta = getattr(form, 'Meta', None)
+     if (getattr(meta, 'fields', fields) is None and
+             getattr(meta, 'exclude', exclude) is None):
+@@ -894,7 +903,7 @@ def modelformset_factory(model, form=ModelForm, formfield_callback=None,
+                               can_order=can_order, can_delete=can_delete,
+                               validate_min=validate_min, validate_max=validate_max,
+                               absolute_max=absolute_max, can_delete_extra=can_delete_extra,
+-                              renderer=renderer)
++                              renderer=renderer, edit_only=edit_only)
+     FormSet.model = model
+     return FormSet
+ 
+@@ -1076,7 +1085,8 @@ def inlineformset_factory(parent_model, model, form=ModelForm,
+                           widgets=None, validate_max=False, localized_fields=None,
+                           labels=None, help_texts=None, error_messages=None,
+                           min_num=None, validate_min=False, field_classes=None,
+-                          absolute_max=None, can_delete_extra=True, renderer=None):
++                          absolute_max=None, can_delete_extra=True, renderer=None,
++                          edit_only=False):
+     """
+     Return an ``InlineFormSet`` for the given kwargs.
+ 
+@@ -1109,6 +1119,7 @@ def inlineformset_factory(parent_model, model, form=ModelForm,
+         'absolute_max': absolute_max,
+         'can_delete_extra': can_delete_extra,
+         'renderer': renderer,
++        'edit_only': edit_only,
+     }
+     FormSet = modelformset_factory(model, **kwargs)
+     FormSet.fk = fk
+diff --git a/test_edit_only_formset.py b/test_edit_only_formset.py
+new file mode 100644
+index 0000000000..da96feb0fc
+--- /dev/null
++++ b/test_edit_only_formset.py
+@@ -0,0 +1,100 @@
++#!/usr/bin/env python
++"""Test script to reproduce the issue with model formsets not having edit-only mode."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Import after Django setup
++from django.db import models
++from django.forms import modelformset_factory
++from django.test import TestCase
++
++
++# Define a simple model for testing
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the database tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Book)
++
++
++def test_edit_only_issue():
++    """Test that demonstrates the issue with extra=0 not preventing new forms."""
++    # Create some initial books
++    book1 = Book.objects.create(title="Book 1", author="Author 1")
++    book2 = Book.objects.create(title="Book 2", author="Author 2")
++    
++    # Create a formset with extra=0
++    BookFormSet = modelformset_factory(Book, fields=['title', 'author'], extra=0)
++    
++    # Simulate POST data with existing books and an additional new form
++    data = {
++        'form-TOTAL_FORMS': '3',  # User sends 3 forms instead of 2
++        'form-INITIAL_FORMS': '2',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        # Existing forms
++        'form-0-id': str(book1.id),
++        'form-0-title': 'Book 1 - Edited',
++        'form-0-author': 'Author 1',
++        'form-1-id': str(book2.id),
++        'form-1-title': 'Book 2',
++        'form-1-author': 'Author 2 - Edited',
++        # Additional form that shouldn't be allowed in edit-only mode
++        'form-2-id': '',
++        'form-2-title': 'New Book',
++        'form-2-author': 'New Author',
++    }
++    
++    formset = BookFormSet(data)
++    
++    print("Is formset valid?", formset.is_valid())
++    print("Number of forms:", len(formset.forms))
++    print("Initial form count:", formset.initial_form_count())
++    print("Total form count:", formset.total_form_count())
++    
++    if formset.is_valid():
++        instances = formset.save()
++        print("Saved instances:", len(instances))
++        print("Total books in database:", Book.objects.count())
++        
++        # The issue: even with extra=0, a new book can be created
++        if Book.objects.count() > 2:
++            print("\nISSUE: New book was created even though extra=0!")
++            print("Books in database:")
++            for book in Book.objects.all():
++                print(f"  - {book.title} by {book.author}")
++    
++    return Book.objects.count() > 2
++
++
++if __name__ == '__main__':
++    issue_exists = test_edit_only_issue()
++    sys.exit(0 if issue_exists else 1)
+diff --git a/test_edit_only_formset_feature.py b/test_edit_only_formset_feature.py
+new file mode 100644
+index 0000000000..2c7f398fb6
+--- /dev/null
++++ b/test_edit_only_formset_feature.py
+@@ -0,0 +1,136 @@
++"""
++Test case for the edit_only feature in model formsets.
++This should be added to the Django test suite.
++"""
++from django.forms.models import modelformset_factory
++from django.test import TestCase
++
++from tests.model_formsets.models import Author, Book
++
++
++class EditOnlyFormsetTests(TestCase):
++    """Test the edit_only parameter for model formsets."""
++    
++    def test_edit_only_prevents_new_objects(self):
++        """edit_only=True should prevent creation of new objects."""
++        # Create some initial data
++        author = Author.objects.create(name="Charles Dickens")
++        book1 = Book.objects.create(author=author, title="Great Expectations")
++        book2 = Book.objects.create(author=author, title="A Tale of Two Cities")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title'], edit_only=True)
++        
++        # Simulate POST data with an extra form
++        data = {
++            'form-TOTAL_FORMS': '3',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book1.id),
++            'form-0-title': 'Great Expectations - Edited',
++            'form-1-id': str(book2.id),
++            'form-1-title': 'A Tale of Two Cities - Edited',
++            # Extra form that shouldn't be saved
++            'form-2-id': '',
++            'form-2-title': 'Oliver Twist',
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        # Only 2 forms should be rendered (existing objects only)
++        self.assertEqual(len(formset.forms), 2)
++        
++        instances = formset.save()
++        
++        # Only existing books should be updated
++        self.assertEqual(len(instances), 2)
++        self.assertEqual(Book.objects.count(), 2)
++        
++        # Verify the edits were saved
++        book1.refresh_from_db()
++        book2.refresh_from_db()
++        self.assertEqual(book1.title, 'Great Expectations - Edited')
++        self.assertEqual(book2.title, 'A Tale of Two Cities - Edited')
++        
++        # Verify no new book was created
++        self.assertFalse(Book.objects.filter(title='Oliver Twist').exists())
++    
++    def test_edit_only_with_unbound_formset(self):
++        """edit_only=True should not show extra forms in unbound formsets."""
++        author = Author.objects.create(name="Jane Austen")
++        Book.objects.create(author=author, title="Pride and Prejudice")
++        Book.objects.create(author=author, title="Sense and Sensibility")
++        
++        # Create formset with extra=3 but edit_only=True
++        BookFormSet = modelformset_factory(Book, fields=['title'], extra=3, edit_only=True)
++        formset = BookFormSet(queryset=Book.objects.filter(author=author))
++        
++        # Should only show existing forms, not extra forms
++        self.assertEqual(len(formset.forms), 2)
++        self.assertEqual(formset.total_form_count(), 2)
++        self.assertEqual(formset.initial_form_count(), 2)
++    
++    def test_edit_only_false_allows_new_objects(self):
++        """edit_only=False (default) should allow creation of new objects."""
++        author = Author.objects.create(name="Mark Twain")
++        book = Book.objects.create(author=author, title="Tom Sawyer")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title', 'author'], edit_only=False)
++        
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '1',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book.id),
++            'form-0-title': 'Tom Sawyer',
++            'form-0-author': str(author.id),
++            # New form
++            'form-1-id': '',
++            'form-1-title': 'Huckleberry Finn',
++            'form-1-author': str(author.id),
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        instances = formset.save()
++        
++        # Should save both existing and new
++        self.assertEqual(len(instances), 2)
++        self.assertEqual(Book.objects.count(), 2)
++        self.assertTrue(Book.objects.filter(title='Huckleberry Finn').exists())
++    
++    def test_edit_only_with_can_delete(self):
++        """edit_only=True should still allow deletion when can_delete=True."""
++        author = Author.objects.create(name="George Orwell")
++        book1 = Book.objects.create(author=author, title="1984")
++        book2 = Book.objects.create(author=author, title="Animal Farm")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title'], edit_only=True, can_delete=True)
++        
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book1.id),
++            'form-0-title': '1984',
++            'form-0-DELETE': 'on',  # Mark for deletion
++            'form-1-id': str(book2.id),
++            'form-1-title': 'Animal Farm - Edited',
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        instances = formset.save()
++        
++        # Only one instance should be saved (the edited one)
++        self.assertEqual(len(instances), 1)
++        self.assertEqual(Book.objects.count(), 1)
++        
++        # Verify the correct book was deleted
++        self.assertFalse(Book.objects.filter(title='1984').exists())
++        self.assertTrue(Book.objects.filter(title='Animal Farm - Edited').exists())
+diff --git a/test_edit_only_solution.py b/test_edit_only_solution.py
+new file mode 100644
+index 0000000000..ab1113a5b8
+--- /dev/null
++++ b/test_edit_only_solution.py
+@@ -0,0 +1,183 @@
++#!/usr/bin/env python
++"""Test script to verify the edit_only parameter works correctly."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Import after Django setup
++from django.db import models
++from django.forms import modelformset_factory
++from django.test import TestCase
++
++
++# Define a simple model for testing
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the database tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Book)
++
++
++def test_edit_only_parameter():
++    """Test that the edit_only parameter prevents new object creation."""
++    # Create some initial books
++    book1 = Book.objects.create(title="Book 1", author="Author 1")
++    book2 = Book.objects.create(title="Book 2", author="Author 2")
++    
++    print("=== Testing with edit_only=True ===")
++    # Create a formset with edit_only=True
++    BookFormSet = modelformset_factory(Book, fields=['title', 'author'], extra=0, edit_only=True)
++    
++    # Simulate POST data with existing books and an additional new form
++    data = {
++        'form-TOTAL_FORMS': '3',  # User sends 3 forms instead of 2
++        'form-INITIAL_FORMS': '2',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        # Existing forms
++        'form-0-id': str(book1.id),
++        'form-0-title': 'Book 1 - Edited',
++        'form-0-author': 'Author 1',
++        'form-1-id': str(book2.id),
++        'form-1-title': 'Book 2',
++        'form-1-author': 'Author 2 - Edited',
++        # Additional form that shouldn't be allowed in edit-only mode
++        'form-2-id': '',
++        'form-2-title': 'New Book',
++        'form-2-author': 'New Author',
++    }
++    
++    formset = BookFormSet(data)
++    
++    print("Is formset valid?", formset.is_valid())
++    print("Number of forms:", len(formset.forms))
++    print("Initial form count:", formset.initial_form_count())
++    print("Total form count:", formset.total_form_count())
++    
++    if formset.is_valid():
++        instances = formset.save()
++        print("Saved instances:", len(instances))
++        print("Total books in database:", Book.objects.count())
++        
++        if Book.objects.count() == 2:
++            print("\nSUCCESS: No new book was created with edit_only=True!")
++            print("Books in database:")
++            for book in Book.objects.all():
++                print(f"  - {book.title} by {book.author}")
++        else:
++            print("\nFAILED: New book was created even with edit_only=True!")
++            return False
++    
++    print("\n=== Testing with edit_only=False (default) ===")
++    # Reset database
++    Book.objects.all().delete()
++    book1 = Book.objects.create(title="Book 1", author="Author 1")
++    book2 = Book.objects.create(title="Book 2", author="Author 2")
++    
++    # Create a formset without edit_only (default behavior)
++    BookFormSet2 = modelformset_factory(Book, fields=['title', 'author'], extra=0)
++    
++    # Update data with correct IDs for the new books
++    data2 = {
++        'form-TOTAL_FORMS': '3',  # User sends 3 forms instead of 2
++        'form-INITIAL_FORMS': '2',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        # Existing forms
++        'form-0-id': str(book1.id),
++        'form-0-title': 'Book 1 - Edited',
++        'form-0-author': 'Author 1',
++        'form-1-id': str(book2.id),
++        'form-1-title': 'Book 2',
++        'form-1-author': 'Author 2 - Edited',
++        # Additional form that should be allowed without edit_only
++        'form-2-id': '',
++        'form-2-title': 'New Book',
++        'form-2-author': 'New Author',
++    }
++    
++    formset2 = BookFormSet2(data2)
++    
++    print("Is formset valid?", formset2.is_valid())
++    print("Number of forms:", len(formset2.forms))
++    
++    if formset2.is_valid():
++        instances = formset2.save()
++        print("Saved instances:", len(instances))
++        print("Total books in database:", Book.objects.count())
++        
++        if Book.objects.count() == 3:
++            print("\nSUCCESS: New book was created with edit_only=False (default)!")
++            print("Books in database:")
++            for book in Book.objects.all():
++                print(f"  - {book.title} by {book.author}")
++        else:
++            print("\nFAILED: Expected 3 books with default behavior!")
++            return False
++    
++    return True
++
++
++def test_edit_only_with_unbound_formset():
++    """Test that edit_only works correctly with unbound formsets."""
++    print("\n=== Testing unbound formset with edit_only=True ===")
++    
++    # Create some initial books
++    Book.objects.all().delete()
++    book1 = Book.objects.create(title="Book 1", author="Author 1")
++    book2 = Book.objects.create(title="Book 2", author="Author 2")
++    
++    # Create an unbound formset with edit_only=True and extra=2
++    BookFormSet = modelformset_factory(Book, fields=['title', 'author'], extra=2, edit_only=True)
++    formset = BookFormSet(queryset=Book.objects.all())
++    
++    print("Number of forms in unbound formset:", len(formset.forms))
++    print("Initial form count:", formset.initial_form_count())
++    print("Total form count:", formset.total_form_count())
++    
++    # With edit_only=True, we should only see the existing forms, not extra forms
++    if len(formset.forms) == 2:
++        print("SUCCESS: Unbound formset with edit_only=True shows only existing forms!")
++        return True
++    else:
++        print("FAILED: Unbound formset with edit_only=True shows extra forms!")
++        return False
++
++
++if __name__ == '__main__':
++    success1 = test_edit_only_parameter()
++    success2 = test_edit_only_with_unbound_formset()
++    
++    if success1 and success2:
++        print("\n✓ All tests passed!")
++        sys.exit(0)
++    else:
++        print("\n✗ Some tests failed!")
++        sys.exit(1)
+diff --git a/test_inline_edit_only.py b/test_inline_edit_only.py
+new file mode 100644
+index 0000000000..ba35586a56
+--- /dev/null
++++ b/test_inline_edit_only.py
+@@ -0,0 +1,125 @@
++#!/usr/bin/env python
++"""Test script to verify the edit_only parameter works with inline formsets."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Import after Django setup
++from django.db import models
++from django.forms import inlineformset_factory
++
++
++# Define models for testing
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Book(models.Model):
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the database tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++
++def test_inline_edit_only():
++    """Test that edit_only works with inline formsets."""
++    # Create an author with some books
++    author = Author.objects.create(name="J.K. Rowling")
++    book1 = Book.objects.create(author=author, title="Harry Potter 1")
++    book2 = Book.objects.create(author=author, title="Harry Potter 2")
++    
++    print("=== Testing inline formset with edit_only=True ===")
++    BookFormSet = inlineformset_factory(Author, Book, fields=['title'], extra=2, edit_only=True)
++    
++    # Simulate POST data with existing books and an additional new form
++    data = {
++        'book_set-TOTAL_FORMS': '3',
++        'book_set-INITIAL_FORMS': '2',
++        'book_set-MIN_NUM_FORMS': '0',
++        'book_set-MAX_NUM_FORMS': '1000',
++        # Existing forms
++        'book_set-0-id': str(book1.id),
++        'book_set-0-author': str(author.id),
++        'book_set-0-title': 'Harry Potter and the Philosopher\'s Stone',
++        'book_set-1-id': str(book2.id),
++        'book_set-1-author': str(author.id),
++        'book_set-1-title': 'Harry Potter and the Chamber of Secrets',
++        # Additional form that shouldn't be allowed
++        'book_set-2-id': '',
++        'book_set-2-author': str(author.id),
++        'book_set-2-title': 'Harry Potter and the Prisoner of Azkaban',
++    }
++    
++    formset = BookFormSet(data, instance=author)
++    
++    print("Is formset valid?", formset.is_valid())
++    print("Number of forms:", len(formset.forms))
++    print("Initial form count:", formset.initial_form_count())
++    print("Total form count:", formset.total_form_count())
++    
++    if formset.is_valid():
++        instances = formset.save()
++        print("Saved instances:", len(instances))
++        print("Total books for author:", Book.objects.filter(author=author).count())
++        
++        if Book.objects.filter(author=author).count() == 2:
++            print("\nSUCCESS: No new book was created with edit_only=True!")
++            print("Books:")
++            for book in Book.objects.filter(author=author):
++                print(f"  - {book.title}")
++        else:
++            print("\nFAILED: New book was created even with edit_only=True!")
++            return False
++    
++    print("\n=== Testing unbound inline formset with edit_only=True ===")
++    formset2 = BookFormSet(instance=author)
++    print("Number of forms in unbound formset:", len(formset2.forms))
++    
++    if len(formset2.forms) == 2:
++        print("SUCCESS: Unbound inline formset shows only existing forms!")
++        return True
++    else:
++        print("FAILED: Unbound inline formset shows extra forms!")
++        return False
++
++
++if __name__ == '__main__':
++    success = test_inline_edit_only()
++    
++    if success:
++        print("\n✓ All inline formset tests passed!")
++        sys.exit(0)
++    else:
++        print("\n✗ Some tests failed!")
++        sys.exit(1)
+diff --git a/tests/model_formsets/tests.py b/tests/model_formsets/tests.py
+index bb1a8a8a5e..1a77b5b3bf 100644
+--- a/tests/model_formsets/tests.py
++++ b/tests/model_formsets/tests.py
+@@ -2021,3 +2021,133 @@ class TestModelFormsetOverridesTroughFormMeta(TestCase):
+         BookFormSet = modelformset_factory(Author, fields='__all__', renderer=renderer)
+         formset = BookFormSet()
+         self.assertEqual(formset.renderer, renderer)
++
++
++class EditOnlyFormsetTests(TestCase):
++    """Test the edit_only parameter for model formsets."""
++    
++    def test_edit_only_prevents_new_objects(self):
++        """edit_only=True should prevent creation of new objects."""
++        # Create some initial data
++        author = Author.objects.create(name="Charles Dickens")
++        book1 = Book.objects.create(author=author, title="Great Expectations")
++        book2 = Book.objects.create(author=author, title="A Tale of Two Cities")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title'], edit_only=True)
++        
++        # Simulate POST data with an extra form
++        data = {
++            'form-TOTAL_FORMS': '3',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book1.id),
++            'form-0-title': 'Great Expectations - Edited',
++            'form-1-id': str(book2.id),
++            'form-1-title': 'A Tale of Two Cities - Edited',
++            # Extra form that shouldn't be saved
++            'form-2-id': '',
++            'form-2-title': 'Oliver Twist',
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        # Only 2 forms should be rendered (existing objects only)
++        self.assertEqual(len(formset.forms), 2)
++        
++        instances = formset.save()
++        
++        # Only existing books should be updated
++        self.assertEqual(len(instances), 2)
++        self.assertEqual(Book.objects.count(), 2)
++        
++        # Verify the edits were saved
++        book1.refresh_from_db()
++        book2.refresh_from_db()
++        self.assertEqual(book1.title, 'Great Expectations - Edited')
++        self.assertEqual(book2.title, 'A Tale of Two Cities - Edited')
++        
++        # Verify no new book was created
++        self.assertFalse(Book.objects.filter(title='Oliver Twist').exists())
++    
++    def test_edit_only_with_unbound_formset(self):
++        """edit_only=True should not show extra forms in unbound formsets."""
++        author = Author.objects.create(name="Jane Austen")
++        Book.objects.create(author=author, title="Pride and Prejudice")
++        Book.objects.create(author=author, title="Sense and Sensibility")
++        
++        # Create formset with extra=3 but edit_only=True
++        BookFormSet = modelformset_factory(Book, fields=['title'], extra=3, edit_only=True)
++        formset = BookFormSet(queryset=Book.objects.filter(author=author))
++        
++        # Should only show existing forms, not extra forms
++        self.assertEqual(len(formset.forms), 2)
++        self.assertEqual(formset.total_form_count(), 2)
++        self.assertEqual(formset.initial_form_count(), 2)
++    
++    def test_edit_only_false_allows_new_objects(self):
++        """edit_only=False (default) should allow creation of new objects."""
++        author = Author.objects.create(name="Mark Twain")
++        book = Book.objects.create(author=author, title="Tom Sawyer")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title', 'author'], edit_only=False)
++        
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '1',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book.id),
++            'form-0-title': 'Tom Sawyer',
++            'form-0-author': str(author.id),
++            # New form
++            'form-1-id': '',
++            'form-1-title': 'Huckleberry Finn',
++            'form-1-author': str(author.id),
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        instances = formset.save()
++        
++        # Should save both existing and new
++        # Note: formset.save() returns only changed instances
++        # The existing book wasn't changed, so only the new book is returned
++        self.assertEqual(len(instances), 1)
++        self.assertEqual(Book.objects.count(), 2)
++        self.assertTrue(Book.objects.filter(title='Huckleberry Finn').exists())
++    
++    def test_edit_only_with_can_delete(self):
++        """edit_only=True should still allow deletion when can_delete=True."""
++        author = Author.objects.create(name="George Orwell")
++        book1 = Book.objects.create(author=author, title="1984")
++        book2 = Book.objects.create(author=author, title="Animal Farm")
++        
++        BookFormSet = modelformset_factory(Book, fields=['title'], edit_only=True, can_delete=True)
++        
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            'form-0-id': str(book1.id),
++            'form-0-title': '1984',
++            'form-0-DELETE': 'on',  # Mark for deletion
++            'form-1-id': str(book2.id),
++            'form-1-title': 'Animal Farm - Edited',
++        }
++        
++        formset = BookFormSet(data)
++        self.assertTrue(formset.is_valid())
++        
++        instances = formset.save()
++        
++        # Only one instance should be saved (the edited one)
++        self.assertEqual(len(instances), 1)
++        self.assertEqual(Book.objects.count(), 1)
++        
++        # Verify the correct book was deleted
++        self.assertFalse(Book.objects.filter(title='1984').exists())
++        self.assertTrue(Book.objects.filter(title='Animal Farm - Edited').exists())

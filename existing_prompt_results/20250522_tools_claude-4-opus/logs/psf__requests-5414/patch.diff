@@ -1,0 +1,383 @@
+diff --git a/requests/adapters.py b/requests/adapters.py
+index fe22ff45..4d9914e7 100644
+--- a/requests/adapters.py
++++ b/requests/adapters.py
+@@ -500,6 +500,9 @@ class HTTPAdapter(BaseAdapter):
+         except (ProtocolError, socket.error) as err:
+             raise ConnectionError(err, request=request)
+ 
++        except LocationValueError as e:
++            raise InvalidURL(e, request=request)
++
+         except MaxRetryError as e:
+             if isinstance(e.reason, ConnectTimeoutError):
+                 # TODO: Remove this in 3.0.0: see #2811
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 00000000..5276fb70
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,59 @@
++#!/usr/bin/env python
++"""Comprehensive test for the LocationValueError fix"""
++
++import requests
++from requests.exceptions import InvalidURL
++import pytest
++
++def test_location_parse_error_urls():
++    """Test URLs that trigger LocationParseError in urllib3"""
++    # These URLs should raise InvalidURL, not LocationParseError or UnicodeError
++    invalid_urls = [
++        "http://.example.com",
++        "http://..example.com", 
++        "http://example..com",
++        "http://example.com..",
++        "http://.",
++        "http://..",
++        "https://.example.com",
++        "https://..example.com",
++    ]
++    
++    for url in invalid_urls:
++        print(f"Testing {url}")
++        with pytest.raises(InvalidURL) as exc_info:
++            requests.get(url)
++        assert "Failed to parse" in str(exc_info.value)
++        assert "label empty or too long" in str(exc_info.value)
++        print(f"  ✓ Correctly raised InvalidURL: {exc_info.value}")
++
++def test_valid_edge_case_urls():
++    """Test URLs that are edge cases but should not raise InvalidURL during prepare"""
++    # These might fail during connection but not during URL parsing
++    urls = [
++        "http://example.com.",  # Trailing dot is technically valid
++        "http://-example.com",  # Leading hyphen in subdomain
++        "http://example-.com",  # Trailing hyphen in subdomain
++    ]
++    
++    for url in urls:
++        print(f"Testing {url}")
++        req = requests.Request('GET', url)
++        prepared = req.prepare()
++        print(f"  ✓ URL prepared successfully: {prepared.url}")
++
++def test_other_invalid_urls():
++    """Test other invalid URL patterns"""
++    with pytest.raises(InvalidURL) as exc_info:
++        requests.get("http://")
++    assert "No host supplied" in str(exc_info.value)
++    print(f"✓ Empty host correctly raises InvalidURL: {exc_info.value}")
++
++if __name__ == "__main__":
++    print("Testing LocationParseError handling...")
++    test_location_parse_error_urls()
++    print("\nTesting edge case URLs...")
++    test_valid_edge_case_urls()
++    print("\nTesting other invalid URLs...")
++    test_other_invalid_urls()
++    print("\nAll tests passed!")
+diff --git a/test_detailed_trace.py b/test_detailed_trace.py
+new file mode 100644
+index 00000000..12430f16
+--- /dev/null
++++ b/test_detailed_trace.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python
++"""Detailed trace of the error"""
++
++import requests
++from requests.adapters import HTTPAdapter
++from requests import Session
++import traceback
++
++class DebugAdapter(HTTPAdapter):
++    def send(self, request, **kwargs):
++        print(f"DebugAdapter.send called with URL: {request.url}")
++        try:
++            return super().send(request, **kwargs)
++        except Exception as e:
++            print(f"Exception in send: {type(e).__name__}: {e}")
++            traceback.print_exc()
++            raise
++
++def test_with_debug_adapter():
++    """Test with debug adapter"""
++    session = Session()
++    session.mount('http://', DebugAdapter())
++    
++    try:
++        response = session.get("http://.example.com")
++        print(f"FAIL: No exception raised, got response: {response}")
++    except Exception as e:
++        print(f"Final exception type: {type(e).__name__}")
++        print(f"Final exception message: {e}")
++
++if __name__ == "__main__":
++    test_with_debug_adapter()
+diff --git a/test_direct_prepare.py b/test_direct_prepare.py
+new file mode 100644
+index 00000000..81680943
+--- /dev/null
++++ b/test_direct_prepare.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python
++"""Test the prepare_url method directly"""
++
++from requests import Request, Session
++from requests.exceptions import InvalidURL
++
++def test_prepare_url():
++    """Test prepare_url directly"""
++    req = Request('GET', 'http://.example.com')
++    try:
++        prepared = req.prepare()
++        print(f"FAIL: No exception raised, prepared URL: {prepared.url}")
++    except InvalidURL as e:
++        print(f"PASS: Got InvalidURL as expected: {e}")
++    except Exception as e:
++        print(f"FAIL: Got unexpected exception {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++
++def test_session_prepare():
++    """Test through session prepare"""
++    s = Session()
++    req = Request('GET', 'http://.example.com')
++    try:
++        prepared = s.prepare_request(req)
++        print(f"FAIL: No exception raised, prepared URL: {prepared.url}")
++    except InvalidURL as e:
++        print(f"PASS: Got InvalidURL as expected: {e}")
++    except Exception as e:
++        print(f"FAIL: Got unexpected exception {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++
++if __name__ == "__main__":
++    print("Testing Request.prepare():")
++    test_prepare_url()
++    print("\nTesting Session.prepare_request():")
++    test_session_prepare()
+diff --git a/test_get_connection.py b/test_get_connection.py
+new file mode 100644
+index 00000000..00a3fe3f
+--- /dev/null
++++ b/test_get_connection.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python
++"""Test get_connection directly"""
++
++from requests.adapters import HTTPAdapter
++from requests import Request
++from requests.exceptions import InvalidURL
++
++def test_get_connection():
++    """Test get_connection directly"""
++    adapter = HTTPAdapter()
++    req = Request('GET', 'http://.example.com')
++    prepared = req.prepare()
++    
++    try:
++        conn = adapter.get_connection(prepared.url, proxies={})
++        print(f"FAIL: No exception raised, got connection: {conn}")
++    except InvalidURL as e:
++        print(f"PASS: Got InvalidURL as expected: {e}")
++    except Exception as e:
++        print(f"FAIL: Got unexpected exception {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++
++if __name__ == "__main__":
++    test_get_connection()
+diff --git a/test_normal_urls.py b/test_normal_urls.py
+new file mode 100644
+index 00000000..88132628
+--- /dev/null
++++ b/test_normal_urls.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++"""Test that normal URLs still work correctly"""
++
++import requests
++from requests import Request
++
++def test_normal_urls_prepare():
++    """Test that normal URLs can still be prepared without issues"""
++    normal_urls = [
++        "http://example.com",
++        "https://example.com",
++        "http://example.com:8080",
++        "http://example.com/path",
++        "http://example.com/path?query=value",
++        "http://user:pass@example.com",
++        "http://subdomain.example.com",
++        "http://192.168.1.1",
++        "http://[::1]",  # IPv6
++        "http://localhost",
++    ]
++    
++    for url in normal_urls:
++        try:
++            req = Request('GET', url)
++            prepared = req.prepare()
++            print(f"✓ {url} -> {prepared.url}")
++        except Exception as e:
++            print(f"✗ {url} failed: {type(e).__name__}: {e}")
++            raise
++
++if __name__ == "__main__":
++    print("Testing normal URLs still work...")
++    test_normal_urls_prepare()
++    print("\n✅ All normal URLs work correctly!")
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 00000000..7f4e9616
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,13 @@
++#!/usr/bin/env python
++"""Original reproduction script from the issue"""
++
++import requests
++
++try:
++    requests.get("http://.example.com")
++except requests.exceptions.InvalidURL as e:
++    print(f"SUCCESS: Got InvalidURL exception as expected: {e}")
++except UnicodeError as e:
++    print(f"FAIL: Got UnicodeError: {e}")
++except Exception as e:
++    print(f"FAIL: Got unexpected exception {type(e).__name__}: {e}")
+diff --git a/test_pr_requirements.py b/test_pr_requirements.py
+new file mode 100644
+index 00000000..1a3fab6a
+--- /dev/null
++++ b/test_pr_requirements.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test that the PR requirements are met"""
++
++import requests
++from requests.exceptions import InvalidURL
++
++def test_pr_requirement():
++    """
++    Test the specific requirement from the PR:
++    - Getting http://.example.com should raise InvalidURL, not UnicodeError
++    - The error should contain information about invalid label
++    """
++    try:
++        requests.get("http://.example.com")
++        assert False, "Expected InvalidURL exception but no exception was raised"
++    except InvalidURL as e:
++        # Check that it's the right exception type
++        print(f"✓ Correct exception type: {type(e).__name__}")
++        
++        # Check that the error message contains relevant information
++        error_msg = str(e)
++        assert "label" in error_msg.lower(), f"Error message should mention 'label', got: {error_msg}"
++        print(f"✓ Error message mentions label: {error_msg}")
++        
++        # The error is more descriptive than just "URL has an invalid label"
++        # It says "Failed to parse: '.example.com', label empty or too long"
++        # which is even better
++        assert ".example.com" in error_msg, f"Error should mention the problematic host"
++        print(f"✓ Error message includes the problematic host")
++        
++        return True
++    except UnicodeError as e:
++        assert False, f"Got UnicodeError instead of InvalidURL: {e}"
++    except Exception as e:
++        assert False, f"Got unexpected exception {type(e).__name__}: {e}"
++
++if __name__ == "__main__":
++    print("Testing PR requirements...")
++    if test_pr_requirement():
++        print("\n✅ All PR requirements are met!")
++        print("- http://.example.com raises InvalidURL (not UnicodeError)")
++        print("- The error message contains information about invalid label")
++        print("- The error message is descriptive and includes the problematic host")
+diff --git a/test_trace_error.py b/test_trace_error.py
+new file mode 100644
+index 00000000..1b95a007
+--- /dev/null
++++ b/test_trace_error.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python
++"""Trace where the error occurs"""
++
++import requests
++from requests.exceptions import InvalidURL
++import traceback
++
++def test_with_trace():
++    """Test with full traceback"""
++    try:
++        response = requests.get("http://.example.com")
++        print(f"FAIL: No exception raised, got response: {response}")
++    except Exception as e:
++        print(f"Exception type: {type(e).__name__}")
++        print(f"Exception message: {e}")
++        print("\nFull traceback:")
++        traceback.print_exc()
++
++if __name__ == "__main__":
++    test_with_trace()
+diff --git a/test_unicode_error.py b/test_unicode_error.py
+new file mode 100644
+index 00000000..73900146
+--- /dev/null
++++ b/test_unicode_error.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++"""Test script to reproduce the UnicodeError issue"""
++
++import requests
++from requests.exceptions import InvalidURL
++
++def test_dot_prefix_url():
++    """Test that http://.example.com raises InvalidURL instead of UnicodeError"""
++    try:
++        requests.get("http://.example.com")
++        print("FAIL: No exception was raised")
++    except InvalidURL as e:
++        print(f"PASS: Got expected InvalidURL exception: {e}")
++    except UnicodeError as e:
++        print(f"FAIL: Got UnicodeError instead of InvalidURL: {e}")
++    except Exception as e:
++        print(f"FAIL: Got unexpected exception type {type(e).__name__}: {e}")
++
++def test_other_invalid_urls():
++    """Test other URLs that might trigger similar issues"""
++    test_urls = [
++        "http://.example.com",
++        "http://..example.com",
++        "http://example..com",
++        "http://example.com.",
++        "http://example.com..",
++        "http://-example.com",
++        "http://example-.com",
++        "http://",
++        "http://.",
++        "http://..",
++    ]
++    
++    for url in test_urls:
++        print(f"\nTesting URL: {url}")
++        try:
++            requests.get(url)
++            print("  No exception raised")
++        except InvalidURL as e:
++            print(f"  InvalidURL: {e}")
++        except UnicodeError as e:
++            print(f"  UnicodeError: {e}")
++        except Exception as e:
++            print(f"  {type(e).__name__}: {e}")
++
++if __name__ == "__main__":
++    print("Testing main issue:")
++    test_dot_prefix_url()
++    print("\n" + "="*50 + "\n")
++    print("Testing other potentially problematic URLs:")
++    test_other_invalid_urls()

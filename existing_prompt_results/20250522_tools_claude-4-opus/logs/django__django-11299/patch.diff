@@ -1,0 +1,437 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index b99f03cd88..d69c24419b 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1338,7 +1338,7 @@ class Query(BaseExpression):
+             if isinstance(child, Node):
+                 child_clause, needed_inner = self._add_q(
+                     child, used_aliases, branch_negated,
+-                    current_negated, allow_joins, split_subq)
++                    current_negated, allow_joins, split_subq, simple_col)
+                 joinpromoter.add_votes(needed_inner)
+             else:
+                 child_clause, needed_inner = self.build_filter(
+diff --git a/test_check_constraint_or.py b/test_check_constraint_or.py
+new file mode 100644
+index 0000000000..ff19be3a76
+--- /dev/null
++++ b/test_check_constraint_or.py
+@@ -0,0 +1,60 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Q, CheckConstraint
++from django.test import TestCase
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++
++# Test model to reproduce the issue
++class TestConstraint(models.Model):
++    field_1 = models.IntegerField(blank=True, null=True)
++    flag = models.BooleanField(blank=False, null=False)
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.CheckConstraint(
++                check=models.Q(flag__exact=True, field_1__isnull=False) |
++                      models.Q(flag__exact=False,),
++                name='field_1_has_value_if_flag_set'
++            ),
++        ]
++
++# Create a test to examine the generated SQL
++def test_check_constraint_sql():
++    # Get the constraint
++    constraint = TestConstraint._meta.constraints[0]
++    
++    # Create a mock schema editor for SQLite
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        # Get the SQL that would be generated
++        sql = constraint._get_check_sql(TestConstraint, schema_editor)
++        print("Generated SQL for check constraint:")
++        print(sql)
++        
++        # Check if it contains table references
++        if "new__" in sql or "test_app_testconstraint" in sql:
++            print("\nERROR: SQL contains table references!")
++        else:
++            print("\nOK: SQL does not contain table references")
++
++if __name__ == "__main__":
++    test_check_constraint_sql()
+diff --git a/test_complex_constraint.py b/test_complex_constraint.py
+new file mode 100644
+index 0000000000..68b98ba7bc
+--- /dev/null
++++ b/test_complex_constraint.py
+@@ -0,0 +1,100 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Q, CheckConstraint
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++
++# Test various complex constraint scenarios
++class TestModel(models.Model):
++    field_1 = models.IntegerField(blank=True, null=True)
++    field_2 = models.IntegerField(blank=True, null=True)
++    field_3 = models.IntegerField(blank=True, null=True)
++    flag = models.BooleanField(blank=False, null=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++def test_constraint(name, check):
++    constraint = models.CheckConstraint(check=check, name=name)
++    
++    # Create a mock schema editor
++    class MockSchemaEditor(BaseDatabaseSchemaEditor):
++        def __init__(self):
++            self.connection = connection
++            
++        def quote_value(self, value):
++            return "'%s'" % value
++            
++        def quote_name(self, name):
++            return '"%s"' % name
++    
++    schema_editor = MockSchemaEditor()
++    sql = constraint._get_check_sql(TestModel, schema_editor)
++    
++    print(f"\n{name}:")
++    print(f"SQL: {sql}")
++    
++    # Check for table references
++    has_table_ref = "test_app_testmodel" in sql
++    print(f"Has table references: {has_table_ref}")
++    
++    return sql, has_table_ref
++
++# Test 1: Simple OR with AND (original problem case)
++print("Test 1: Simple OR with AND")
++test_constraint(
++    "test1",
++    Q(flag__exact=True, field_1__isnull=False) | Q(flag__exact=False)
++)
++
++# Test 2: Multiple ORs
++print("\nTest 2: Multiple ORs")
++test_constraint(
++    "test2", 
++    Q(field_1__gt=0) | Q(field_2__gt=0) | Q(field_3__gt=0)
++)
++
++# Test 3: Nested Q objects
++print("\nTest 3: Nested Q objects")
++test_constraint(
++    "test3",
++    Q(Q(field_1__gt=0, field_2__gt=0) | Q(field_3__gt=0)) & Q(flag=True)
++)
++
++# Test 4: Complex nested structure
++print("\nTest 4: Complex nested structure")
++test_constraint(
++    "test4",
++    Q(
++        Q(field_1__isnull=False, field_2__isnull=False) | 
++        Q(field_3__isnull=False)
++    ) & Q(
++        Q(flag=True) | Q(field_1__gt=100)
++    )
++)
++
++# Test 5: Only AND (should work correctly)
++print("\nTest 5: Only AND")
++test_constraint(
++    "test5",
++    Q(field_1__gt=0, field_2__gt=0, field_3__gt=0)
++)
++
++print("\nAll tests completed!")
+diff --git a/test_migration_scenario.py b/test_migration_scenario.py
+new file mode 100644
+index 0000000000..3eab974439
+--- /dev/null
++++ b/test_migration_scenario.py
+@@ -0,0 +1,107 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Q, CheckConstraint
++
++# Recreate the exact scenario from the problem statement
++class TestConstraint(models.Model):
++    field_1 = models.IntegerField(blank=True, null=True)
++    flag = models.BooleanField(blank=False, null=False)
++    
++    class Meta:
++        app_label = 'app'
++        db_table = 'app_testconstraint'
++        constraints = [
++            models.CheckConstraint(
++                check=models.Q(flag__exact=True, field_1__isnull=False) |
++                      models.Q(flag__exact=False,),
++                name='field_1_has_value_if_flag_set'
++            ),
++        ]
++
++# Test the SQL generation in the context of a table rename
++# (which is what happens during SQLite migrations)
++with connection.cursor() as cursor:
++    # Create the initial table
++    cursor.execute('''
++        CREATE TABLE "app_testconstraint" (
++            "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
++            "field_1" integer NULL,
++            "flag" bool NOT NULL
++        )
++    ''')
++    
++    # Get the constraint
++    constraint = TestConstraint._meta.constraints[0]
++    
++    # Simulate what happens during migration - create new table with constraint
++    with connection.schema_editor() as schema_editor:
++        # Override table name to simulate the "new__" prefix used during migrations
++        old_db_table = TestConstraint._meta.db_table
++        TestConstraint._meta.db_table = "new__app_testconstraint"
++        
++        try:
++            sql = constraint._get_check_sql(TestConstraint, schema_editor)
++            print("SQL generated for constraint during migration:")
++            print(sql)
++            
++            # The SQL should NOT contain the new__ table name
++            if "new__app_testconstraint" in sql:
++                print("\nERROR: SQL contains temporary table name!")
++                print("This would cause: malformed database schema - no such column")
++            else:
++                print("\nOK: SQL does not contain temporary table name")
++                print("Migration should work correctly!")
++                
++            # Test the actual CREATE TABLE statement
++            create_sql = f'''
++            CREATE TABLE "new__app_testconstraint" (
++                "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
++                "field_1" integer NULL,
++                "flag" bool NOT NULL,
++                CONSTRAINT "field_1_has_value_if_flag_set" CHECK ({sql})
++            )'''
++            
++            print("\nFull CREATE TABLE SQL:")
++            print(create_sql)
++            
++            # Try to execute it
++            try:
++                cursor.execute(create_sql)
++                print("\nSUCCESS: Table created successfully!")
++                
++                # Test inserting data
++                cursor.execute('INSERT INTO "new__app_testconstraint" ("field_1", "flag") VALUES (NULL, 0)')
++                cursor.execute('INSERT INTO "new__app_testconstraint" ("field_1", "flag") VALUES (1, 1)')
++                print("Data inserted successfully!")
++                
++                # Try invalid data
++                try:
++                    cursor.execute('INSERT INTO "new__app_testconstraint" ("field_1", "flag") VALUES (NULL, 1)')
++                    print("ERROR: Invalid data was allowed!")
++                except Exception as e:
++                    print(f"Constraint correctly rejected invalid data: {e}")
++                    
++            except Exception as e:
++                print(f"\nERROR creating table: {e}")
++                
++        finally:
++            # Restore original table name
++            TestConstraint._meta.db_table = old_db_table
+diff --git a/test_oracle_constraint.py b/test_oracle_constraint.py
+new file mode 100644
+index 0000000000..817ebc3ecd
+--- /dev/null
++++ b/test_oracle_constraint.py
+@@ -0,0 +1,79 @@
++import django
++from django.conf import settings
++
++# Configure for Oracle-like behavior
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.oracle',
++            'NAME': 'dummy',
++            'USER': 'dummy',
++            'PASSWORD': 'dummy',
++            'HOST': '',
++            'PORT': '',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models import Q, CheckConstraint
++from django.db.backends.oracle.base import DatabaseWrapper
++from django.db.backends.oracle.schema import DatabaseSchemaEditor
++
++# Mock Oracle connection
++class MockOracleConnection:
++    vendor = 'oracle'
++    
++    class features:
++        supports_table_check_constraints = True
++        
++    class ops:
++        quote_name = lambda self, name: '"%s"' % name.upper()
++
++# Test model
++class TestModel(models.Model):
++    field_1 = models.IntegerField(blank=True, null=True)
++    flag = models.BooleanField(blank=False, null=False)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_constraint'
++
++# Create constraint
++constraint = models.CheckConstraint(
++    check=models.Q(flag__exact=True, field_1__isnull=False) |
++          models.Q(flag__exact=False,),
++    name='field_1_has_value_if_flag_set'
++)
++
++# Create mock schema editor
++class MockOracleSchemaEditor:
++    def __init__(self):
++        self.connection = MockOracleConnection()
++        
++    def quote_value(self, value):
++        if isinstance(value, bool):
++            return '1' if value else '0'
++        return "'%s'" % value
++        
++    def quote_name(self, name):
++        return '"%s"' % name.upper()
++
++schema_editor = MockOracleSchemaEditor()
++sql = constraint._get_check_sql(TestModel, schema_editor)
++
++print("Oracle SQL for check constraint:")
++print(sql)
++
++# Check for table references
++if "TEST_CONSTRAINT" in sql or "test_constraint" in sql:
++    print("\nERROR: SQL contains table references!")
++else:
++    print("\nOK: SQL does not contain table references")
+diff --git a/tests/constraints/tests.py b/tests/constraints/tests.py
+index b7aeb1e7f0..0e69856e08 100644
+--- a/tests/constraints/tests.py
++++ b/tests/constraints/tests.py
+@@ -79,6 +79,49 @@ class CheckConstraintTests(TestCase):
+         expected_name = 'price_gt_discounted_price'
+         self.assertIn(expected_name, constraints)
+ 
++    def test_check_constraint_or_operator_no_table_references(self):
++        """
++        Test that CheckConstraint with OR operators doesn't include table
++        references in the generated SQL.
++        """
++        from django.db import connection
++        from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++        
++        constraint = models.CheckConstraint(
++            check=models.Q(price__gt=100, discounted_price__isnull=False) |
++                  models.Q(price__lte=100),
++            name='price_range_check'
++        )
++        
++        # Create a dummy model for testing
++        class DummyModel(models.Model):
++            price = models.IntegerField()
++            discounted_price = models.IntegerField(null=True)
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        # Create a mock schema editor that doesn't require a transaction
++        class MockSchemaEditor(BaseDatabaseSchemaEditor):
++            def __init__(self):
++                self.connection = connection
++                
++            def quote_value(self, value):
++                return "'%s'" % value
++                
++            def quote_name(self, name):
++                return '"%s"' % name
++        
++        schema_editor = MockSchemaEditor()
++        sql = constraint._get_check_sql(DummyModel, schema_editor)
++        # The SQL should not contain table references like "table_name"."column"
++        # It should only contain column names without table prefix
++        self.assertNotIn('"test_app_dummymodel"', sql)
++        self.assertNotIn('test_app_dummymodel.', sql)
++        # Verify it contains the column names without table prefix
++        self.assertIn('"price"', sql)
++        self.assertIn('"discounted_price"', sql)
++
+ 
+ class UniqueConstraintTests(TestCase):
+     @classmethod

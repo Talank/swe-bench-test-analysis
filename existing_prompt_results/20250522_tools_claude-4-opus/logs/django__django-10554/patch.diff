@@ -1,0 +1,1243 @@
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 0000000000..e6234f5f6d
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,106 @@
++"""Debug the union ordering issue"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create some test data
++dimensions = []
++for i, (pk, name, order) in enumerate([
++    (10, 'boeksoort', 1),
++    (11, 'grootboek', 2), 
++    (16, 'kenteken', 7),
++    (17, 'activa', 8),
++]):
++    dim = Dimension(pk=pk, name=name, order=order)
++    dim.save()
++    dimensions.append(dim)
++
++# Create the union query
++qs1 = Dimension.objects.filter(pk__in=[10, 11])
++qs2 = Dimension.objects.filter(pk__in=[16, 17])
++union_qs = qs1.union(qs2).order_by('order')
++
++print("Initial state:")
++print("union_qs id:", id(union_qs))
++print("union_qs.query id:", id(union_qs.query))
++print("union_qs.query.combined_queries[0] id:", id(union_qs.query.combined_queries[0]))
++print("union_qs.query.combined_queries[1] id:", id(union_qs.query.combined_queries[1]))
++print()
++
++# Create derived query
++print("Creating derived query...")
++derived_qs = union_qs.order_by()
++print("derived_qs id:", id(derived_qs))
++print("derived_qs.query id:", id(derived_qs.query))
++print("derived_qs is union_qs:", derived_qs is union_qs)
++print("derived_qs.query is union_qs.query:", derived_qs.query is union_qs.query)
++print()
++
++# Check if combined_queries are shared
++print("Checking combined_queries:")
++print("derived_qs.query.combined_queries is union_qs.query.combined_queries:", 
++      derived_qs.query.combined_queries is union_qs.query.combined_queries)
++if hasattr(derived_qs.query, 'combined_queries') and hasattr(union_qs.query, 'combined_queries'):
++    print("derived_qs.query.combined_queries[0] is union_qs.query.combined_queries[0]:",
++          derived_qs.query.combined_queries[0] is union_qs.query.combined_queries[0])
++print()
++
++# Now add values_list
++print("Adding values_list...")
++final_qs = derived_qs.values_list('pk', flat=True)
++print("final_qs id:", id(final_qs))
++print("final_qs.query id:", id(final_qs.query))
++print()
++
++# Check if the original combined queries were modified
++print("Checking if original combined_queries were modified:")
++print("union_qs.query.combined_queries[0].values_select:", union_qs.query.combined_queries[0].values_select)
++print("union_qs.query.combined_queries[1].values_select:", union_qs.query.combined_queries[1].values_select)
++
++# Let's trace through the compilation
++print("\nCompiling union_qs...")
++from django.db.models.sql.compiler import SQLCompiler
++compiler = union_qs.query.get_compiler(using='default')
++try:
++    sql, params = compiler.as_sql()
++    print("SQL:", sql)
++except Exception as e:
++    print("Error:", e)
++    import traceback
++    traceback.print_exc()
+diff --git a/debug_ordering.py b/debug_ordering.py
+new file mode 100644
+index 0000000000..78942b2a56
+--- /dev/null
++++ b/debug_ordering.py
+@@ -0,0 +1,105 @@
++"""Debug the ordering calculation"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models.expressions import OrderBy, Col
++
++# Create a model
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create test data
++for pk, name, order in [(10, 'a', 1), (11, 'b', 2), (16, 'c', 3), (17, 'd', 4)]:
++    Dimension(pk=pk, name=name, order=order).save()
++
++# Create union query
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++# Get compiler and trace through get_order_by
++compiler = qs.query.get_compiler(using='default')
++compiler.setup_query()
++compiler.pre_sql_setup()
++
++print("Tracing get_order_by()...")
++print("query.order_by:", compiler.query.order_by)
++print("query.combinator:", compiler.query.combinator)
++
++# Manually trace through what get_order_by does
++order_by = []
++for field in compiler.query.order_by:
++    print(f"\nProcessing field: {field}")
++    
++    # This is what find_ordering_name returns for a simple field
++    from django.db.models.sql.compiler import get_order_dir
++    from django.db.models.expressions import OrderBy, Col
++    
++    name, order = get_order_dir(field, 'ASC')
++    descending = order == 'DESC'
++    print(f"  name: {name}, descending: {descending}")
++    
++    # For a simple field like 'order', find_ordering_name returns something like:
++    # [(OrderBy(Col(dimensions_dimension, test_app.Dimension.order), descending=False), False)]
++    # setup_joins returns more values
++    result = compiler.query.setup_joins([name], compiler.query.get_meta(), compiler.query.get_initial_alias())
++    # Unpack based on what setup_joins returns
++    targets = result[1]  # targets is the second element
++    print(f"  targets: {targets}")
++    
++    col = targets[0].get_col(compiler.query.get_initial_alias())
++    print(f"  col: {col}")
++    
++    order_by.append((OrderBy(col, descending=descending), False))
++
++print("\norder_by list:", order_by)
++
++# Now trace through the combinator handling
++print("\nTracing combinator handling...")
++for expr, is_ref in order_by:
++    print(f"\nExpression: {expr}, is_ref: {is_ref}")
++    resolved = expr.resolve_expression(compiler.query, allow_joins=True, reuse=None)
++    print(f"Resolved: {resolved}")
++    
++    if compiler.query.combinator:
++        src = resolved.get_source_expressions()[0]
++        print(f"Source expression: {src}")
++        
++        # Check against select list
++        print("Checking against select list:")
++        for idx, (sel_expr, _, col_alias) in enumerate(compiler.select):
++            print(f"  {idx+1}: {sel_expr} (alias: {col_alias})")
++            if src == sel_expr:
++                print(f"  MATCH! Using position {idx + 1}")
++                break
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 08d7faf194..6563fea6a7 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -328,6 +328,9 @@ class Query(BaseExpression):
+             obj.subq_aliases = self.subq_aliases.copy()
+         obj.used_aliases = self.used_aliases.copy()
+         obj._filtered_relations = self._filtered_relations.copy()
++        # Clone combined queries if present to avoid shared state issues
++        if self.combinator and self.combined_queries:
++            obj.combined_queries = tuple(q.clone() for q in self.combined_queries)
+         # Clear the cached_property
+         try:
+             del obj.base_table
+diff --git a/investigate_position.py b/investigate_position.py
+new file mode 100644
+index 0000000000..77e9f2cd64
+--- /dev/null
++++ b/investigate_position.py
+@@ -0,0 +1,110 @@
++"""Investigate the position issue more carefully"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a model with more fields to see position issues
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    code = models.CharField(max_length=10, default='')
++    order = models.IntegerField(default=0)
++    extra = models.CharField(max_length=50, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create test data
++for pk, name, order in [(10, 'a', 1), (11, 'b', 2), (16, 'c', 3), (17, 'd', 4)]:
++    Dimension(pk=pk, name=name, order=order).save()
++
++# Create union query with order by a field that's not first
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')  # This is the 3rd field in the model
++)
++
++print("Initial query:")
++print(qs.query)
++print()
++
++# Check what position is used
++compiler = qs.query.get_compiler(using='default')
++compiler.setup_query()
++compiler.pre_sql_setup()
++
++print("Select fields:")
++for idx, (sel_expr, sql, alias) in enumerate(compiler.select):
++    print(f"  {idx+1}: {sql[0]}")
++
++ordering = compiler.get_order_by()
++print("\nOrdering:", ordering)
++
++# Now let's see what happens with a more complex scenario
++# What if we order by a field that's in a different position?
++print("\n\nTrying order by 'extra' field:")
++qs2 = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('extra')  # This is the 5th field (after id)
++)
++
++compiler2 = qs2.query.get_compiler(using='default')
++compiler2.setup_query()
++compiler2.pre_sql_setup()
++
++print("Select fields:")
++for idx, (sel_expr, sql, alias) in enumerate(compiler2.select):
++    print(f"  {idx+1}: {sql[0]}")
++
++ordering2 = compiler2.get_order_by()
++print("\nOrdering:", ordering2)
++
++# Now the key test - what happens after values_list?
++print("\n\nAfter values_list('pk'):")
++derived = qs2.order_by().values_list('pk', flat=True)
++
++# Force evaluation of derived to potentially trigger the issue
++list(derived)
++
++# Now check the original query again
++print("Original query after derived query evaluation:")
++print(qs2.query)
++
++compiler3 = qs2.query.get_compiler(using='default')
++compiler3.setup_query()
++compiler3.pre_sql_setup()
++
++print("\nSelect fields after derived query:")
++for idx, (sel_expr, sql, alias) in enumerate(compiler3.select):
++    print(f"  {idx+1}: {sql[0]}")
++
++print("\nOrdering after derived query:", compiler3.get_order_by())
+diff --git a/reproduce_exact_issue.py b/reproduce_exact_issue.py
+new file mode 100644
+index 0000000000..9e75915d68
+--- /dev/null
++++ b/reproduce_exact_issue.py
+@@ -0,0 +1,83 @@
++"""Reproduce the exact issue from the problem statement"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create test data matching the problem statement
++test_data = [
++    (10, 'boeksoort', 1),
++    (11, 'grootboek', 2), 
++    (12, 'test1', 3),
++    (13, 'test2', 4),
++    (14, 'test3', 5),
++    (15, 'test4', 6),
++    (16, 'kenteken', 7),
++    (17, 'activa', 8),
++    (18, 'test5', 9),
++]
++
++for pk, name, order in test_data:
++    Dimension(pk=pk, name=name, order=order).save()
++
++print("Dimension.objects.values_list('id', flat=True):", list(Dimension.objects.values_list('id', flat=True)))
++
++# Reproduce the exact issue
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++print("\nqs:", list(qs))
++
++# This causes re-evaluation of the original qs to break
++derived = qs.order_by().values_list('pk', flat=True)
++print("\nqs.order_by().values_list('pk', flat=True):", list(derived))
++
++print("\nTrying to access qs again...")
++try:
++    result = list(qs)
++    print("qs:", result)
++    print("NO ERROR - the issue might be database-specific")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++    
++    # Let's check the SQL being generated
++    print("\nSQL for qs:")
++    print(qs.query)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..57452dc7ab
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,82 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models
++from django.db import connection
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create some test data
++dimensions = []
++for i, (pk, name, order) in enumerate([
++    (10, 'boeksoort', 1),
++    (11, 'grootboek', 2), 
++    (12, 'test1', 3),
++    (13, 'test2', 4),
++    (14, 'test3', 5),
++    (15, 'test4', 6),
++    (16, 'kenteken', 7),
++    (17, 'activa', 8),
++    (18, 'test5', 9),
++]):
++    dim = Dimension(pk=pk, name=name, order=order)
++    dim.save()
++    dimensions.append(dim)
++
++print("Initial data:")
++print("Dimension.objects.values_list('id', flat=True):", list(Dimension.objects.values_list('id', flat=True)))
++
++# Reproduce the issue
++print("\nCreating union queryset with ordering...")
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++print("qs:", list(qs))
++
++print("\nCreating derived queryset with order_by().values_list()...")
++derived_qs = qs.order_by().values_list('pk', flat=True)
++print("derived_qs:", list(derived_qs))
++
++print("\nTrying to access original qs again (this should break)...")
++try:
++    print("qs:", list(qs))
++    print("SUCCESS: No error occurred!")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/reproduce_issue2.py b/reproduce_issue2.py
+new file mode 100644
+index 0000000000..fe0a6704df
+--- /dev/null
++++ b/reproduce_issue2.py
+@@ -0,0 +1,67 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.backends.utils import CursorWrapper
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Let's try to reproduce with raw SQL
++cursor = connection.cursor()
++
++# First, let's see what SQL is generated
++from django.db.models import Q
++
++# Create the union query
++qs1 = Dimension.objects.filter(pk__in=[10, 11])
++qs2 = Dimension.objects.filter(pk__in=[16, 17])
++union_qs = qs1.union(qs2).order_by('order')
++
++print("Union query SQL:")
++print(union_qs.query)
++print()
++
++# Now create a derived query
++derived_qs = union_qs.order_by().values_list('pk', flat=True)
++print("Derived query SQL:")
++print(derived_qs.query)
++print()
++
++# Let's check the internal state
++print("Union query combined_queries:", hasattr(union_qs.query, 'combined_queries'))
++print("Union query combinator:", getattr(union_qs.query, 'combinator', None))
++print("Union query order_by:", union_qs.query.order_by)
++print()
++
++# Check what happens when we access the union_qs again
++print("Trying to access union_qs query again...")
++print(union_qs.query)
+diff --git a/test_mutation.py b/test_mutation.py
+new file mode 100644
+index 0000000000..f5c4ca8b12
+--- /dev/null
++++ b/test_mutation.py
+@@ -0,0 +1,74 @@
++"""Test to show the mutation issue"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create some test data
++dimensions = []
++for i, (pk, name, order) in enumerate([
++    (10, 'boeksoort', 1),
++    (11, 'grootboek', 2), 
++    (16, 'kenteken', 7),
++    (17, 'activa', 8),
++]):
++    dim = Dimension(pk=pk, name=name, order=order)
++    dim.save()
++    dimensions.append(dim)
++
++# Create the union query
++qs1 = Dimension.objects.filter(pk__in=[10, 11])
++qs2 = Dimension.objects.filter(pk__in=[16, 17])
++union_qs = qs1.union(qs2).order_by('order')
++
++# Store original combined_queries
++original_combined_queries = union_qs.query.combined_queries
++print("Original combined_queries id:", id(original_combined_queries))
++print("Original combined_queries[0] id:", id(original_combined_queries[0]))
++
++# Create a chain
++chained = union_qs._chain()
++print("\nAfter _chain:")
++print("chained.query.combined_queries is original:", chained.query.combined_queries is original_combined_queries)
++print("chained.query.combined_queries[0] is original[0]:", chained.query.combined_queries[0] is original_combined_queries[0])
++
++# Now let's manually mutate the combined query
++print("\nManually mutating combined_queries[0]...")
++chained.query.combined_queries[0].values_select = ('id',)
++print("original_combined_queries[0].values_select:", original_combined_queries[0].values_select)
++print("This shows the mutation!")
+diff --git a/test_postgres_issue.py b/test_postgres_issue.py
+new file mode 100644
+index 0000000000..e424b6cb60
+--- /dev/null
++++ b/test_postgres_issue.py
+@@ -0,0 +1,99 @@
++"""Test that simulates the PostgreSQL-specific issue"""
++import os
++import django
++from django.conf import settings
++from django.test import TestCase, TransactionTestCase
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.utils import DatabaseError
++
++# Create a model
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++
++def test_issue():
++    """Test the specific issue from the problem statement"""
++    # Create the table
++    with connection.schema_editor() as schema_editor:
++        try:
++            schema_editor.create_model(Dimension)
++        except:
++            pass  # Table might already exist
++            
++    # Create test data
++    Dimension.objects.all().delete()
++    Dimension.objects.create(pk=10, name='boeksoort', order=1)
++    Dimension.objects.create(pk=11, name='grootboek', order=2)
++    Dimension.objects.create(pk=16, name='kenteken', order=3)
++    Dimension.objects.create(pk=17, name='activa', order=4)
++    
++    print("Testing union with ordering issue...")
++    
++    # Create the problematic query sequence
++    qs = (
++        Dimension.objects.filter(pk__in=[10, 11])
++        .union(Dimension.objects.filter(pk__in=[16, 17]))
++        .order_by('order')
++    )
++    
++    # First access should work
++    print("First access of qs:", list(qs))
++    
++    # This causes re-evaluation of the original qs to potentially break
++    derived = qs.order_by().values_list('pk', flat=True)
++    print("Derived query result:", list(derived))
++    
++    # This is where the error would occur in PostgreSQL
++    print("Second access of qs:", list(qs))
++    
++    # Let's also test that the combined queries are properly cloned
++    print("\nChecking query cloning...")
++    original_cq = qs.query.combined_queries
++    cloned = qs._chain()
++    cloned_cq = cloned.query.combined_queries
++    
++    print(f"Original combined_queries[0] id: {id(original_cq[0])}")
++    print(f"Cloned combined_queries[0] id: {id(cloned_cq[0])}")
++    print(f"Are they the same object? {original_cq[0] is cloned_cq[0]}")
++    
++    if original_cq[0] is cloned_cq[0]:
++        print("ERROR: Combined queries are shared! This would cause the PostgreSQL issue.")
++        return False
++    else:
++        print("SUCCESS: Combined queries are properly cloned.")
++        return True
++
++
++if __name__ == '__main__':
++    success = test_issue()
++    if success:
++        print("\nAll tests passed! The issue should be fixed.")
++    else:
++        print("\nTests failed! The issue is not fixed.")
+diff --git a/test_shared_state.py b/test_shared_state.py
+new file mode 100644
+index 0000000000..11453b4252
+--- /dev/null
++++ b/test_shared_state.py
+@@ -0,0 +1,101 @@
++"""Test if the issue is related to shared state"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a model
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create test data
++for pk, name, order in [(10, 'a', 1), (11, 'b', 2), (16, 'c', 3), (17, 'd', 4)]:
++    Dimension(pk=pk, name=name, order=order).save()
++
++# Create union query
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++print("Initial state:")
++print("qs.query.combined_queries:", qs.query.combined_queries)
++print("qs.query.order_by:", qs.query.order_by)
++
++# Store references to the combined queries
++cq1 = qs.query.combined_queries[0]
++cq2 = qs.query.combined_queries[1]
++
++print("\nCombined query 1:")
++print("  id:", id(cq1))
++print("  order_by:", cq1.order_by)
++print("  values_select:", cq1.values_select)
++
++print("\nCombined query 2:")
++print("  id:", id(cq2))
++print("  order_by:", cq2.order_by)
++print("  values_select:", cq2.values_select)
++
++# Create derived query
++print("\n--- Creating derived query ---")
++derived = qs.order_by().values_list('pk', flat=True)
++
++print("\nAfter creating derived query:")
++print("Original qs.query.order_by:", qs.query.order_by)
++print("Derived query.order_by:", derived.query.order_by)
++
++print("\nCombined query 1 after:")
++print("  id:", id(cq1))
++print("  order_by:", cq1.order_by)
++print("  values_select:", cq1.values_select)
++
++print("\nCombined query 2 after:")
++print("  id:", id(cq2))
++print("  order_by:", cq2.order_by)
++print("  values_select:", cq2.values_select)
++
++# Check if combined_queries are the same objects
++print("\nChecking if combined queries are shared:")
++print("derived.query.combined_queries[0] is cq1:", derived.query.combined_queries[0] is cq1)
++print("derived.query.combined_queries[1] is cq2:", derived.query.combined_queries[1] is cq2)
++
++# Now force compilation of derived query
++print("\n--- Forcing compilation of derived query ---")
++list(derived)
++
++print("\nCombined query 1 after compilation:")
++print("  order_by:", cq1.order_by)
++print("  values_select:", cq1.values_select)
++
++print("\nCombined query 2 after compilation:")
++print("  order_by:", cq2.order_by)
++print("  values_select:", cq2.values_select)
+diff --git a/test_union_issue.py b/test_union_issue.py
+new file mode 100644
+index 0000000000..b2eea4346b
+--- /dev/null
++++ b/test_union_issue.py
+@@ -0,0 +1,101 @@
++"""Test to reproduce the union ordering issue"""
++import os
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import QuerySet
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create some test data
++dimensions = []
++for i, (pk, name, order) in enumerate([
++    (10, 'boeksoort', 1),
++    (11, 'grootboek', 2), 
++    (16, 'kenteken', 7),
++    (17, 'activa', 8),
++]):
++    dim = Dimension(pk=pk, name=name, order=order)
++    dim.save()
++    dimensions.append(dim)
++
++# Test the issue
++print("Creating union queryset with ordering...")
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++print("Original query SQL:")
++print(qs.query)
++print()
++
++# Check the internal state before creating derived query
++print("Before derived query:")
++print("- combined_queries:", hasattr(qs.query, 'combined_queries'))
++print("- combinator:", getattr(qs.query, 'combinator', None))
++print("- order_by:", qs.query.order_by)
++print()
++
++# Create a derived query
++print("Creating derived queryset with order_by().values_list()...")
++derived_qs = qs.order_by().values_list('pk', flat=True)
++
++print("Derived query SQL:")
++print(derived_qs.query)
++print()
++
++# Check if the original query was modified
++print("After derived query:")
++print("Original query SQL (should be unchanged):")
++print(qs.query)
++print("- order_by:", qs.query.order_by)
++
++# Try to execute the original query
++print("\nExecuting original query...")
++try:
++    result = list(qs)
++    print("Success! Results:", result)
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++
++# Let's also check what happens with _chain
++print("\nChecking _chain behavior...")
++chained = qs._chain()
++print("Chained query is same object?", chained is qs)
++print("Chained query.query is same object?", chained.query is qs.query)
+diff --git a/test_union_ordering_issue.py b/test_union_ordering_issue.py
+new file mode 100644
+index 0000000000..af9d554247
+--- /dev/null
++++ b/test_union_ordering_issue.py
+@@ -0,0 +1,100 @@
++"""Test for the union ordering issue"""
++import os
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a model
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++
++class UnionOrderingTest(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        # Create the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(Dimension)
++            
++        # Create test data
++        Dimension.objects.create(pk=10, name='boeksoort', order=1)
++        Dimension.objects.create(pk=11, name='grootboek', order=2)
++        Dimension.objects.create(pk=16, name='kenteken', order=3)
++        Dimension.objects.create(pk=17, name='activa', order=4)
++    
++    def test_union_with_ordering_and_derived_queryset(self):
++        """Test that creating a derived queryset from a union with ordering doesn't break the original"""
++        # Create union queryset with ordering
++        qs = (
++            Dimension.objects.filter(pk__in=[10, 11])
++            .union(Dimension.objects.filter(pk__in=[16, 17]))
++            .order_by('order')
++        )
++        
++        # Verify initial query works
++        result1 = list(qs)
++        self.assertEqual(len(result1), 4)
++        self.assertEqual([d.name for d in result1], ['boeksoort', 'grootboek', 'kenteken', 'activa'])
++        
++        # Create derived queryset - this should not affect the original
++        derived_qs = qs.order_by().values_list('pk', flat=True)
++        derived_result = list(derived_qs)
++        self.assertEqual(set(derived_result), {10, 11, 16, 17})
++        
++        # Original queryset should still work
++        result2 = list(qs)
++        self.assertEqual(len(result2), 4)
++        self.assertEqual([d.name for d in result2], ['boeksoort', 'grootboek', 'kenteken', 'activa'])
++        
++    def test_union_combined_queries_not_shared(self):
++        """Test that combined queries are not shared between cloned querysets"""
++        # Create union queryset
++        qs = (
++            Dimension.objects.filter(pk__in=[10, 11])
++            .union(Dimension.objects.filter(pk__in=[16, 17]))
++            .order_by('order')
++        )
++        
++        # Clone the queryset
++        cloned = qs._chain()
++        
++        # Combined queries should not be the same objects
++        self.assertIsNot(qs.query.combined_queries[0], cloned.query.combined_queries[0])
++        self.assertIsNot(qs.query.combined_queries[1], cloned.query.combined_queries[1])
++
++
++if __name__ == '__main__':
++    # Run the test
++    test = UnionOrderingTest()
++    test.setUpTestData()
++    test.test_union_with_ordering_and_derived_queryset()
++    test.test_union_combined_queries_not_shared()
++    print("All tests passed!")
+diff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py
+index 227972e8c4..cdf8a17291 100644
+--- a/tests/queries/test_qs_combinators.py
++++ b/tests/queries/test_qs_combinators.py
+@@ -228,3 +228,34 @@ class QuerySetSetOperationTests(TestCase):
+         qs1 = Number.objects.all()
+         qs2 = Number.objects.intersection(Number.objects.filter(num__gt=1))
+         self.assertEqual(qs1.difference(qs2).count(), 2)
++
++    def test_union_with_ordering_and_derived_queryset(self):
++        """
++        Test that creating a derived queryset from a union with ordering
++        doesn't break the original queryset. This prevents shared state
++        issues with combined_queries.
++        """
++        qs1 = Number.objects.filter(num__lte=1)
++        qs2 = Number.objects.filter(num__gte=8)
++        union_qs = qs1.union(qs2).order_by('num')
++        
++        # First access should work
++        result1 = list(union_qs)
++        self.assertNumbersEqual(result1, [0, 1, 8, 9])
++        
++        # Create derived queryset - this should not affect the original
++        derived_qs = union_qs.order_by().values_list('num', flat=True)
++        derived_result = list(derived_qs)
++        self.assertEqual(set(derived_result), {0, 1, 8, 9})
++        
++        # Original queryset should still work
++        result2 = list(union_qs)
++        self.assertNumbersEqual(result2, [0, 1, 8, 9])
++        
++        # Verify combined queries are not shared
++        cloned = union_qs._chain()
++        self.assertIsNot(
++            union_qs.query.combined_queries[0],
++            cloned.query.combined_queries[0],
++            "Combined queries should not be shared between cloned querysets"
++        )
+diff --git a/trace_issue.py b/trace_issue.py
+new file mode 100644
+index 0000000000..b87e74919d
+--- /dev/null
++++ b/trace_issue.py
+@@ -0,0 +1,90 @@
++"""Trace through the issue more carefully"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings  
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db import models, connection
++
++# Create a simple model for testing
++class Dimension(models.Model):
++    name = models.CharField(max_length=100)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'dimensions_dimension'
++        
++    def __str__(self):
++        return self.name
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Dimension)
++
++# Create test data
++for pk, name, order in [(10, 'a', 1), (11, 'b', 2), (16, 'c', 3), (17, 'd', 4)]:
++    Dimension(pk=pk, name=name, order=order).save()
++
++# Create union query with order
++qs = (
++    Dimension.objects.filter(pk__in=[10, 11])
++    .union(Dimension.objects.filter(pk__in=[16, 17]))
++    .order_by('order')
++)
++
++print("Original qs state:")
++print("qs.query.order_by:", qs.query.order_by)
++print("qs.query.combinator:", qs.query.combinator)
++
++# Get the compiler and check the ordering
++from django.db.models.sql.compiler import SQLCompiler
++compiler = qs.query.get_compiler(using='default')
++# Setup the compiler first
++compiler.setup_query()
++compiler.pre_sql_setup()
++ordering = compiler.get_order_by()
++print("\nOriginal compiler.get_order_by():", ordering)
++
++# Now create derived query
++derived = qs.order_by().values_list('pk', flat=True)
++
++print("\nAfter creating derived query:")
++print("qs.query.order_by:", qs.query.order_by)
++
++# Get compiler again
++compiler2 = qs.query.get_compiler(using='default')
++compiler2.setup_query()
++compiler2.pre_sql_setup()
++ordering2 = compiler2.get_order_by()
++print("New compiler.get_order_by():", ordering2)
++
++# Check the select list
++print("\nChecking select lists:")
++print("compiler2.select:", compiler2.select)
++
++# Let's manually check what happens in get_order_by for combinator queries
++print("\nManual check of ordering resolution:")
++for expr, is_ref in ordering2:
++    print(f"Expression: {expr}, is_ref: {is_ref}")
++    if hasattr(expr, 'get_source_expressions'):
++        src_exprs = expr.get_source_expressions()
++        if src_exprs:
++            print(f"  Source expression: {src_exprs[0]}")

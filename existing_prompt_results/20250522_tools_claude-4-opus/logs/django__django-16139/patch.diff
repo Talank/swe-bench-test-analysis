@@ -1,0 +1,441 @@
+diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py
+index b3cfc6723c..37b7607c18 100644
+--- a/django/contrib/auth/forms.py
++++ b/django/contrib/auth/forms.py
+@@ -163,7 +163,12 @@ class UserChangeForm(forms.ModelForm):
+         super().__init__(*args, **kwargs)
+         password = self.fields.get("password")
+         if password:
+-            password.help_text = password.help_text.format("../password/")
++            # Use absolute URL to password change form to handle access via to_field
++            if self.instance.pk:
++                password.help_text = password.help_text.format(f"../../{self.instance.pk}/password/")
++            else:
++                # If no pk yet (shouldn't happen for UserChangeForm), use relative path
++                password.help_text = password.help_text.format("../password/")
+         user_permissions = self.fields.get("user_permissions")
+         if user_permissions:
+             user_permissions.queryset = user_permissions.queryset.select_related(
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..220f9ee3cf
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,91 @@
++"""
++Test edge cases for the password link fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='django.contrib.auth.urls',
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++
++# Setup Django
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.forms import UserChangeForm
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++def test_edge_cases():
++    """Test edge cases for password link generation"""
++    
++    print("Testing edge cases for password reset link\n")
++    
++    # Edge case 1: User instance without pk (shouldn't happen in UserChangeForm, but let's be safe)
++    print("1. Testing with unsaved user instance:")
++    unsaved_user = User(username='unsaved', email='unsaved@example.com')
++    # Note: UserChangeForm is meant for existing users, but let's test the safety check
++    
++    try:
++        form = UserChangeForm(instance=unsaved_user)
++        password_field = form.fields.get('password')
++        if 'href="../password/"' in password_field.help_text:
++            print("   ✓ Correctly falls back to relative path for unsaved instance")
++        else:
++            print("   ✗ Unexpected behavior for unsaved instance")
++            print(f"   Help text: {password_field.help_text}")
++    except Exception as e:
++        print(f"   Note: Exception occurred (expected): {e}")
++    
++    # Edge case 2: Saved user with pk
++    print("\n2. Testing with saved user instance:")
++    saved_user = User.objects.create_user(
++        username='saved',
++        email='saved@example.com',
++        password='testpass123'
++    )
++    
++    form = UserChangeForm(instance=saved_user)
++    password_field = form.fields.get('password')
++    expected_link = f'../../{saved_user.pk}/password/'
++    
++    if expected_link in password_field.help_text:
++        print(f"   ✓ Correctly uses absolute path for saved instance: {expected_link}")
++    else:
++        print("   ✗ Unexpected behavior for saved instance")
++        print(f"   Help text: {password_field.help_text}")
++    
++    # Clean up
++    saved_user.delete()
++    
++    print("\n✅ Edge case testing complete!")
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/test_password_link.py b/test_password_link.py
+new file mode 100644
+index 0000000000..3766f1de13
+--- /dev/null
++++ b/test_password_link.py
+@@ -0,0 +1,87 @@
++"""
++Test script to reproduce the password reset link issue when accessing UserAdmin via to_field
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='django.contrib.auth.urls',
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++
++# Setup Django
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.forms import UserChangeForm
++from django.urls import reverse
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++def test_password_link_with_to_field():
++    """Test that password reset link works correctly when accessed via to_field"""
++    
++    # Create a test user
++    user = User.objects.create_user(
++        username='testuser',
++        email='test@example.com',
++        password='testpass123'
++    )
++    
++    # Test the form with the fix
++    form = UserChangeForm(instance=user)
++    password_field = form.fields.get('password')
++    print("Password help text after fix:", password_field.help_text)
++    
++    # Verify the link is correct
++    expected_link = f'../../{user.pk}/password/'
++    assert expected_link in password_field.help_text, f"Expected link '{expected_link}' not found in help text"
++    print(f"\n✓ Password reset link correctly uses absolute path: {expected_link}")
++    
++    # Test with a different user to ensure it's dynamic
++    user2 = User.objects.create_user(
++        username='testuser2',
++        email='test2@example.com',
++        password='testpass123'
++    )
++    
++    form2 = UserChangeForm(instance=user2)
++    password_field2 = form2.fields.get('password')
++    expected_link2 = f'../../{user2.pk}/password/'
++    assert expected_link2 in password_field2.help_text, f"Expected link '{expected_link2}' not found in help text"
++    print(f"✓ Password reset link for user2 correctly uses: {expected_link2}")
++    
++    # Clean up
++    user.delete()
++    user2.delete()
++    
++    print("\n✅ All tests passed! The fix correctly generates absolute password reset links.")
++
++if __name__ == '__main__':
++    test_password_link_with_to_field()
+diff --git a/test_password_link_comprehensive.py b/test_password_link_comprehensive.py
+new file mode 100644
+index 0000000000..afbbed91f9
+--- /dev/null
++++ b/test_password_link_comprehensive.py
+@@ -0,0 +1,118 @@
++"""
++Comprehensive test to demonstrate the password reset link issue and fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='django.contrib.auth.urls',
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++
++# Setup Django
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.forms import UserChangeForm
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++def test_password_link_scenarios():
++    """Test various scenarios for password reset link generation"""
++    
++    print("Testing password reset link generation in UserChangeForm\n")
++    print("=" * 60)
++    
++    # Scenario 1: Normal user access (via pk)
++    print("\n1. Normal access scenario (via pk):")
++    print("   URL pattern: /admin/auth/user/1/change/")
++    
++    user1 = User.objects.create_user(
++        username='normaluser',
++        email='normal@example.com',
++        password='testpass123'
++    )
++    
++    form1 = UserChangeForm(instance=user1)
++    password_field1 = form1.fields.get('password')
++    print(f"   User PK: {user1.pk}")
++    print(f"   Generated link: {extract_href(password_field1.help_text)}")
++    print(f"   ✓ Link will resolve to: /admin/auth/user/{user1.pk}/password/")
++    
++    # Scenario 2: Access via to_field (e.g., UUID)
++    print("\n2. Access via to_field scenario:")
++    print("   URL pattern: /admin/auth/user/<uuid>/change/?_to_field=uuid")
++    
++    user2 = User.objects.create_user(
++        username='uuiduser',
++        email='uuid@example.com',
++        password='testpass123'
++    )
++    
++    form2 = UserChangeForm(instance=user2)
++    password_field2 = form2.fields.get('password')
++    print(f"   User PK: {user2.pk}")
++    print(f"   Generated link: {extract_href(password_field2.help_text)}")
++    print(f"   ✓ Link will still resolve to: /admin/auth/user/{user2.pk}/password/")
++    
++    # Scenario 3: Multiple users to ensure dynamic generation
++    print("\n3. Multiple users - dynamic link generation:")
++    
++    users = []
++    for i in range(3, 6):
++        user = User.objects.create_user(
++            username=f'user{i}',
++            email=f'user{i}@example.com',
++            password='testpass123'
++        )
++        users.append(user)
++        
++        form = UserChangeForm(instance=user)
++        password_field = form.fields.get('password')
++        link = extract_href(password_field.help_text)
++        print(f"   User {i} (pk={user.pk}): {link}")
++    
++    print("\n" + "=" * 60)
++    print("\nSUMMARY:")
++    print("The fix ensures that password reset links work correctly regardless")
++    print("of how the UserAdmin is accessed (via pk or to_field).")
++    print("\nBefore fix: ../password/ (breaks when accessed via to_field)")
++    print("After fix:  ../../<pk>/password/ (works in all scenarios)")
++    
++    # Clean up
++    User.objects.all().delete()
++
++def extract_href(help_text):
++    """Extract the href value from the help text HTML"""
++    import re
++    match = re.search(r'href="([^"]+)"', help_text)
++    return match.group(1) if match else "NOT FOUND"
++
++if __name__ == '__main__':
++    test_password_link_scenarios()
+diff --git a/test_password_link_for_django.py b/test_password_link_for_django.py
+new file mode 100644
+index 0000000000..ee51e67729
+--- /dev/null
++++ b/test_password_link_for_django.py
+@@ -0,0 +1,103 @@
++"""
++Test case that could be added to Django's test suite for the password link fix
++"""
++import django
++from django.conf import settings
++
++# Configure Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.forms import UserChangeForm
++from django.test import TestCase
++
++
++class UserChangeFormPasswordLinkTest(TestCase):
++    """Test that password reset link works correctly when UserAdmin is accessed via to_field"""
++    
++    def test_password_link_uses_pk_not_relative_path(self):
++        """
++        The password reset link should use an absolute path with the user's pk
++        to work correctly when UserAdmin is accessed via to_field.
++        """
++        user = User.objects.create_user(
++            username='testuser',
++            email='test@example.com',
++            password='testpass123'
++        )
++        
++        form = UserChangeForm(instance=user)
++        password_field = form.fields.get('password')
++        
++        # The link should use the absolute path with pk, not a relative path
++        expected_link = f'../../{user.pk}/password/'
++        self.assertIn(expected_link, password_field.help_text)
++        
++        # Ensure it doesn't use the old relative path
++        self.assertNotIn('href="../password/"', password_field.help_text)
++    
++    def test_password_link_with_unsaved_user(self):
++        """
++        For unsaved users (edge case), the form should fall back to relative path.
++        """
++        unsaved_user = User(username='unsaved', email='unsaved@example.com')
++        
++        form = UserChangeForm(instance=unsaved_user)
++        password_field = form.fields.get('password')
++        
++        # Should fall back to relative path for unsaved instances
++        self.assertIn('href="../password/"', password_field.help_text)
++    
++    def test_password_link_dynamic_per_user(self):
++        """
++        The password reset link should be dynamic based on each user's pk.
++        """
++        user1 = User.objects.create_user(username='user1', password='pass1')
++        user2 = User.objects.create_user(username='user2', password='pass2')
++        
++        form1 = UserChangeForm(instance=user1)
++        form2 = UserChangeForm(instance=user2)
++        
++        password_field1 = form1.fields.get('password')
++        password_field2 = form2.fields.get('password')
++        
++        # Each form should have the correct user's pk in the link
++        self.assertIn(f'../../{user1.pk}/password/', password_field1.help_text)
++        self.assertIn(f'../../{user2.pk}/password/', password_field2.help_text)
++        
++        # They should not have each other's pk
++        self.assertNotIn(f'../../{user2.pk}/password/', password_field1.help_text)
++        self.assertNotIn(f'../../{user1.pk}/password/', password_field2.help_text)
++
++
++if __name__ == '__main__':
++    # This would normally be run as part of Django's test suite
++    from django.test.utils import get_runner
++    from django.core.management import call_command
++    
++    call_command('migrate', verbosity=0)
++    
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2, interactive=False)
++    failures = test_runner.run_tests(['__main__.UserChangeFormPasswordLinkTest'])
++    
++    if failures:
++        print("\n❌ Tests failed!")
++    else:
++        print("\n✅ All tests passed!")

@@ -1,0 +1,180 @@
+diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py
+index a0cfed0995..14063bcb12 100644
+--- a/django/contrib/auth/forms.py
++++ b/django/contrib/auth/forms.py
+@@ -191,9 +191,12 @@ class AuthenticationForm(forms.Form):
+ 
+         # Set the max length and label for the "username" field.
+         self.username_field = UserModel._meta.get_field(UserModel.USERNAME_FIELD)
+-        self.fields['username'].max_length = self.username_field.max_length or 254
++        username_max_length = self.username_field.max_length or 254
++        self.fields['username'].max_length = username_max_length
+         if self.fields['username'].label is None:
+             self.fields['username'].label = capfirst(self.username_field.verbose_name)
++        # Update the widget attrs to include maxlength
++        self.fields['username'].widget.attrs['maxlength'] = username_max_length
+ 
+     def clean(self):
+         username = self.cleaned_data.get('username')
+diff --git a/test_auth_form_maxlength.py b/test_auth_form_maxlength.py
+new file mode 100644
+index 0000000000..4292afe4ff
+--- /dev/null
++++ b/test_auth_form_maxlength.py
+@@ -0,0 +1,54 @@
++"""Test script to reproduce the AuthenticationForm maxlength issue."""
++import django
++from django.conf import settings
++
++# Configure Django settings first
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import AuthenticationForm
++
++
++def test_authentication_form_maxlength():
++    """Test that AuthenticationForm's username field has maxlength attribute."""
++    form = AuthenticationForm()
++    username_field = form.fields['username']
++    
++    # Check that max_length is set on the field
++    print(f"Username field max_length: {username_field.max_length}")
++    
++    # Get the widget attributes
++    widget = username_field.widget
++    attrs = username_field.widget_attrs(widget)
++    print(f"Widget attributes: {attrs}")
++    
++    # Check if maxlength is in the rendered HTML
++    rendered = form['username'].as_widget()
++    print(f"Rendered HTML: {rendered}")
++    
++    # Check if maxlength is present
++    has_maxlength = 'maxlength' in rendered
++    print(f"Has maxlength attribute: {has_maxlength}")
++    
++    return has_maxlength
++
++
++if __name__ == "__main__":
++    # Run the test
++    result = test_authentication_form_maxlength()
++    print(f"\nTest {'PASSED' if result else 'FAILED'}")
+diff --git a/test_custom_user_maxlength.py b/test_custom_user_maxlength.py
+new file mode 100644
+index 0000000000..7d42c36871
+--- /dev/null
++++ b/test_custom_user_maxlength.py
+@@ -0,0 +1,77 @@
++"""Test script to verify AuthenticationForm works with custom user models."""
++import django
++from django.conf import settings
++
++# Configure Django settings first
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++    AUTH_USER_MODEL='auth.User',
++)
++
++django.setup()
++
++from django.contrib.auth.forms import AuthenticationForm
++from django.contrib.auth import get_user_model
++
++
++def test_default_user_model():
++    """Test with default User model (max_length=150)."""
++    form = AuthenticationForm()
++    username_field = form.fields['username']
++    
++    print("Default User Model Test:")
++    print(f"  Username max_length: {username_field.max_length}")
++    print(f"  Widget attrs: {username_field.widget.attrs}")
++    
++    rendered = str(form['username'])
++    has_maxlength = 'maxlength="150"' in rendered
++    print(f"  Has maxlength in HTML: {has_maxlength}")
++    print(f"  HTML: {rendered}")
++    
++    return has_maxlength
++
++
++def test_custom_max_length():
++    """Test that form correctly picks up custom max_length."""
++    # Simulate a custom user model with different max_length
++    User = get_user_model()
++    original_max_length = User._meta.get_field('username').max_length
++    
++    # Temporarily change max_length (this is just for testing)
++    User._meta.get_field('username').max_length = 200
++    
++    try:
++        form = AuthenticationForm()
++        username_field = form.fields['username']
++        
++        print("\nCustom Max Length Test:")
++        print(f"  Username max_length: {username_field.max_length}")
++        print(f"  Widget attrs: {username_field.widget.attrs}")
++        
++        rendered = str(form['username'])
++        has_maxlength = 'maxlength="200"' in rendered
++        print(f"  Has maxlength=\"200\" in HTML: {has_maxlength}")
++        
++        return has_maxlength
++    finally:
++        # Restore original max_length
++        User._meta.get_field('username').max_length = original_max_length
++
++
++if __name__ == "__main__":
++    test1 = test_default_user_model()
++    test2 = test_custom_max_length()
++    
++    print(f"\nAll tests {'PASSED' if test1 and test2 else 'FAILED'}")
+diff --git a/tests/auth_tests/test_forms.py b/tests/auth_tests/test_forms.py
+index 7085dcfa11..d02c4c49bb 100644
+--- a/tests/auth_tests/test_forms.py
++++ b/tests/auth_tests/test_forms.py
+@@ -445,6 +445,14 @@ class AuthenticationFormTest(TestDataMixin, TestCase):
+         form = CustomAuthenticationForm()
+         self.assertEqual(form['username'].label, "Name")
+ 
++    def test_username_field_renders_maxlength(self):
++        """
++        The username field should render with maxlength HTML attribute.
++        """
++        form = AuthenticationForm()
++        self.assertEqual(form.fields['username'].max_length, 150)
++        self.assertIn('maxlength="150"', str(form['username']))
++
+     def test_username_field_label_not_set(self):
+ 
+         class CustomAuthenticationForm(AuthenticationForm):

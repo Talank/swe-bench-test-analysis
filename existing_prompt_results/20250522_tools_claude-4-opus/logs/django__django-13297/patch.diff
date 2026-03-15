@@ -1,0 +1,403 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 28374272f4..dde2c91749 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -21,7 +21,7 @@ from django.utils.dateparse import (
+     parse_date, parse_datetime, parse_duration, parse_time,
+ )
+ from django.utils.duration import duration_microseconds, duration_string
+-from django.utils.functional import Promise, cached_property
++from django.utils.functional import Promise, SimpleLazyObject, cached_property, empty
+ from django.utils.ipv6 import clean_ipv6_address
+ from django.utils.itercompat import is_iterable
+ from django.utils.text import capfirst
+@@ -806,6 +806,15 @@ class Field(RegisterLookupMixin):
+         """Perform preliminary non-db specific value checks and conversions."""
+         if isinstance(value, Promise):
+             value = value._proxy____cast()
++        elif isinstance(value, SimpleLazyObject):
++            # Force evaluation of SimpleLazyObject
++            # We need to get the actual wrapped value
++            if value._wrapped is empty:
++                # Force evaluation by accessing any method/attribute
++                # The __str__ method will trigger _setup() and return the wrapped value
++                _ = str(value)
++            # Now get the actual wrapped value
++            value = value._wrapped
+         return value
+ 
+     def get_db_prep_value(self, value, connection, prepared=False):
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..af94949e61
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,127 @@
++"""Comprehensive test for SimpleLazyObject handling in database queries."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase, RequestFactory
++from django.views.generic import TemplateView
++from django.db import models
++from django.shortcuts import get_object_or_404
++from django.utils.functional import SimpleLazyObject
++from datetime import datetime, date
++from decimal import Decimal
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    }],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create test models
++class TestModel(models.Model):
++    slug = models.SlugField(unique=True)
++    name = models.CharField(max_length=100)
++    number = models.IntegerField()
++    price = models.DecimalField(max_digits=10, decimal_places=2)
++    created = models.DateTimeField()
++    birth_date = models.DateField()
++    is_active = models.BooleanField(default=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++def test_simplelazy_with_different_types():
++    """Test that SimpleLazyObject works with different field types."""
++    
++    # Create test data
++    test_date = date(2021, 1, 1)
++    test_datetime = datetime(2021, 1, 1, 12, 0, 0)
++    
++    obj = TestModel.objects.create(
++        slug='test-slug',
++        name='Test Name',
++        number=42,
++        price=Decimal('99.99'),
++        created=test_datetime,
++        birth_date=test_date,
++        is_active=True
++    )
++    
++    # Test with string (slug)
++    lazy_slug = SimpleLazyObject(lambda: 'test-slug')
++    result = TestModel.objects.filter(slug=lazy_slug).first()
++    assert result is not None, "Failed to find by lazy slug"
++    print("[OK] String field (slug) works with SimpleLazyObject".encode('utf-8').decode('utf-8'))
++    
++    # Test with integer
++    lazy_number = SimpleLazyObject(lambda: 42)
++    result = TestModel.objects.filter(number=lazy_number).first()
++    assert result is not None, "Failed to find by lazy number"
++    print("[OK] Integer field works with SimpleLazyObject")
++    
++    # Test with decimal
++    lazy_price = SimpleLazyObject(lambda: Decimal('99.99'))
++    result = TestModel.objects.filter(price=lazy_price).first()
++    assert result is not None, "Failed to find by lazy price"
++    print("[OK] Decimal field works with SimpleLazyObject")
++    
++    # Test with boolean
++    lazy_bool = SimpleLazyObject(lambda: True)
++    result = TestModel.objects.filter(is_active=lazy_bool).first()
++    assert result is not None, "Failed to find by lazy boolean"
++    print("[OK] Boolean field works with SimpleLazyObject")
++    
++    # Test with date
++    lazy_date = SimpleLazyObject(lambda: test_date)
++    result = TestModel.objects.filter(birth_date=lazy_date).first()
++    assert result is not None, "Failed to find by lazy date"
++    print("[OK] Date field works with SimpleLazyObject")
++    
++    # Test with datetime
++    lazy_datetime = SimpleLazyObject(lambda: test_datetime)
++    result = TestModel.objects.filter(created=lazy_datetime).first()
++    assert result is not None, "Failed to find by lazy datetime"
++    print("[OK] DateTime field works with SimpleLazyObject")
++    
++    # Test get_object_or_404
++    lazy_slug_404 = SimpleLazyObject(lambda: 'test-slug')
++    result = get_object_or_404(TestModel, slug=lazy_slug_404)
++    assert result is not None, "get_object_or_404 failed with lazy slug"
++    print("[OK] get_object_or_404 works with SimpleLazyObject")
++    
++    print("\nAll tests passed!")
++
++if __name__ == '__main__':
++    test_simplelazy_with_different_types()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..ae853ea01c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,77 @@
++"""Test edge cases for SimpleLazyObject handling."""
++
++import django
++from django.conf import settings
++from django.db import models
++from django.utils.functional import SimpleLazyObject
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes'],
++)
++django.setup()
++
++# Test model
++class TestModel(models.Model):
++    value = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++def test_edge_cases():
++    # Test 1: SimpleLazyObject that returns None
++    lazy_none = SimpleLazyObject(lambda: None)
++    field = TestModel._meta.get_field('value')
++    result = field.get_prep_value(lazy_none)
++    assert result is None, f"Expected None, got {result}"
++    print("[OK] SimpleLazyObject returning None works")
++    
++    # Test 2: SimpleLazyObject that returns empty string
++    lazy_empty = SimpleLazyObject(lambda: "")
++    result = field.get_prep_value(lazy_empty)
++    assert result == "", f"Expected empty string, got {result!r}"
++    print("[OK] SimpleLazyObject returning empty string works")
++    
++    # Test 3: SimpleLazyObject that returns a complex object
++    class ComplexObj:
++        def __str__(self):
++            return "complex"
++    
++    lazy_complex = SimpleLazyObject(lambda: ComplexObj())
++    result = field.get_prep_value(lazy_complex)
++    assert str(result) == "complex", f"Expected 'complex', got {result}"
++    print("[OK] SimpleLazyObject returning complex object works")
++    
++    # Test 4: Nested SimpleLazyObject (edge case)
++    inner_lazy = SimpleLazyObject(lambda: "inner")
++    outer_lazy = SimpleLazyObject(lambda: inner_lazy)
++    result = field.get_prep_value(outer_lazy)
++    # The result should be the inner SimpleLazyObject, not the string
++    assert isinstance(result, SimpleLazyObject), f"Expected SimpleLazyObject, got {type(result)}"
++    print("[OK] Nested SimpleLazyObject handled correctly")
++    
++    # Test 5: Already evaluated SimpleLazyObject
++    evaluated_lazy = SimpleLazyObject(lambda: "evaluated")
++    # Force evaluation
++    _ = str(evaluated_lazy)
++    result = field.get_prep_value(evaluated_lazy)
++    assert result == "evaluated", f"Expected 'evaluated', got {result}"
++    print("[OK] Already evaluated SimpleLazyObject works")
++    
++    print("\nAll edge case tests passed!")
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/test_template_view_issue.py b/test_template_view_issue.py
+new file mode 100644
+index 0000000000..ad57f9f9c0
+--- /dev/null
++++ b/test_template_view_issue.py
+@@ -0,0 +1,95 @@
++"""Test script to reproduce the TemplateView SimpleLazyObject issue."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase, RequestFactory
++from django.views.generic import TemplateView
++from django.db import models
++from django.shortcuts import get_object_or_404
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    }],
++)
++
++django.setup()
++
++# Create a test model
++class Account(models.Model):
++    slug = models.SlugField(unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Account)
++
++# Create test view
++class OfferView(TemplateView):
++    template_name = "offers/offer.html"
++    
++    def get_context_data(self, **kwargs):
++        offer_slug = kwargs.get("offer_slug", "")
++        print(f"Type of offer_slug: {type(offer_slug)}")
++        print(f"Value of offer_slug: {offer_slug}")
++        
++        # This should fail with SimpleLazyObject
++        try:
++            offer = get_object_or_404(Account, slug=offer_slug)
++            print("Success: Found account")
++            return {"offer": offer, "offer_slug": offer_slug}
++        except Exception as e:
++            print(f"Error: {type(e).__name__}: {e}")
++            raise
++
++# Test the issue
++def test_template_view_kwargs():
++    # Create a test account
++    account = Account.objects.create(slug='test-slug', name='Test Account')
++    
++    # Create a request
++    factory = RequestFactory()
++    request = factory.get('/offers/test-slug/')
++    
++    # Create view instance
++    view = OfferView()
++    view.setup(request, offer_slug='test-slug')
++    
++    # Call get method which will trigger get_context_data
++    try:
++        response = view.get(request, offer_slug='test-slug')
++        print("Test passed!")
++    except Exception as e:
++        print(f"Test failed with error: {type(e).__name__}: {e}")
++
++if __name__ == '__main__':
++    test_template_view_kwargs()
+diff --git a/test_template_view_lazy_kwargs.py b/test_template_view_lazy_kwargs.py
+new file mode 100644
+index 0000000000..ae3a8ee010
+--- /dev/null
++++ b/test_template_view_lazy_kwargs.py
+@@ -0,0 +1,51 @@
++"""
++Test for SimpleLazyObject handling in TemplateView kwargs.
++
++This test ensures that URL kwargs passed to TemplateView.get_context_data()
++work correctly with database queries even when wrapped in SimpleLazyObject
++(as they are in Django 3.1+ for deprecation warnings).
++"""
++
++from django.db import models
++from django.shortcuts import get_object_or_404
++from django.test import TestCase, RequestFactory
++from django.views.generic import TemplateView
++
++
++class TestModel(models.Model):
++    slug = models.SlugField(unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_lazy_kwargs'
++
++
++class TestView(TemplateView):
++    template_name = "test.html"
++    
++    def get_context_data(self, **kwargs):
++        # In Django 3.1+, kwargs values are wrapped in SimpleLazyObject
++        slug = kwargs.get("slug", "")
++        # This should work without explicitly converting to str()
++        obj = get_object_or_404(TestModel, slug=slug)
++        return {"object": obj, "slug": slug}
++
++
++class SimpleLazyObjectKwargsTest(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.test_obj = TestModel.objects.create(slug='test-slug', name='Test Object')
++    
++    def test_template_view_with_lazy_kwargs(self):
++        """Test that SimpleLazyObject kwargs work in database queries."""
++        request = self.factory.get('/test/test-slug/')
++        view = TestView()
++        view.setup(request, slug='test-slug')
++        
++        # This should not raise an error
++        response = view.get(request, slug='test-slug')
++        
++        # Verify the context was set correctly
++        context = response.context_data
++        self.assertEqual(context['object'], self.test_obj)
++        self.assertEqual(str(context['slug']), 'test-slug')

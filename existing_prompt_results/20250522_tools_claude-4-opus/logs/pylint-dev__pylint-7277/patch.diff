@@ -1,0 +1,444 @@
+diff --git a/pylint/__init__.py b/pylint/__init__.py
+index 9f3dd74e6..b0d05b2b5 100644
+--- a/pylint/__init__.py
++++ b/pylint/__init__.py
+@@ -86,7 +86,7 @@ def modify_sys_path() -> None:
+     stdlib or pylint's own modules.
+     CPython issue: https://bugs.python.org/issue33053
+ 
+-    - Remove the first entry. This will always be either "" or the working directory
++    - Remove the first entry only if it's "", "." or the working directory
+     - Remove the working directory from the second and third entries
+       if PYTHONPATH includes a ":" at the beginning or the end.
+       https://github.com/PyCQA/pylint/issues/3636
+@@ -96,9 +96,10 @@ def modify_sys_path() -> None:
+       if pylint is installed in an editable configuration (as the last item).
+       https://github.com/PyCQA/pylint/issues/4161
+     """
+-    sys.path.pop(0)
+-    env_pythonpath = os.environ.get("PYTHONPATH", "")
+     cwd = os.getcwd()
++    if sys.path and sys.path[0] in ("", ".", cwd):
++        sys.path.pop(0)
++    env_pythonpath = os.environ.get("PYTHONPATH", "")
+     if env_pythonpath.startswith(":") and env_pythonpath not in (f":{cwd}", ":."):
+         sys.path.pop(0)
+     elif env_pythonpath.endswith(":") and env_pythonpath not in (f"{cwd}:", ".:"):
+diff --git a/test_comprehensive_fix.py b/test_comprehensive_fix.py
+new file mode 100644
+index 000000000..d1384d796
+--- /dev/null
++++ b/test_comprehensive_fix.py
+@@ -0,0 +1,100 @@
++"""Comprehensive test for the modify_sys_path fix."""
++import sys
++import os
++import subprocess
++import tempfile
++
++def test_comprehensive():
++    """Test all scenarios to ensure the fix works correctly."""
++    
++    # Test 1: Direct Python script that uses runpy (as in problem statement)
++    test_script = '''
++import sys
++import runpy
++
++# Test with custom path
++sys.path.insert(0, "something")
++print(f"Before runpy: {sys.path[:3]}")
++
++try:
++    runpy.run_module('pylint', run_name="__main__", alter_sys=True)
++except SystemExit:
++    pass
++
++print(f"After runpy: {sys.path[:3]}")
++assert "something" in sys.path, "Custom path was incorrectly removed!"
++print("✓ Custom path preserved correctly")
++'''
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++        f.write(test_script)
++        temp_file = f.name
++    
++    try:
++        result = subprocess.run(
++            [sys.executable, temp_file],
++            capture_output=True,
++            text=True,
++            cwd='/testbed',
++            env={**os.environ, 'PYTHONPATH': '/testbed'}
++        )
++        
++        assert "✓ Custom path preserved correctly" in result.stdout, \
++            f"Test failed. Output:\n{result.stdout}\nError:\n{result.stderr}"
++        
++    finally:
++        os.unlink(temp_file)
++    
++    # Test 2: Test that normal paths are still removed
++    test_script2 = '''
++import sys
++import os
++sys.path.insert(0, '/testbed')
++
++from pylint import modify_sys_path
++
++# Test empty string removal
++sys.path = ["", "/usr/lib"]
++modify_sys_path()
++assert sys.path == ["/usr/lib"], f"Empty string not removed: {sys.path}"
++print("✓ Empty string removed correctly")
++
++# Test dot removal
++sys.path = [".", "/usr/lib"]
++modify_sys_path()
++assert sys.path == ["/usr/lib"], f"Dot not removed: {sys.path}"
++print("✓ Dot removed correctly")
++
++# Test cwd removal
++cwd = os.getcwd()
++sys.path = [cwd, "/usr/lib"]
++modify_sys_path()
++assert sys.path == ["/usr/lib"], f"CWD not removed: {sys.path}"
++print("✓ CWD removed correctly")
++'''
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++        f.write(test_script2)
++        temp_file2 = f.name
++    
++    try:
++        result = subprocess.run(
++            [sys.executable, temp_file2],
++            capture_output=True,
++            text=True,
++            cwd='/testbed'
++        )
++        
++        assert result.returncode == 0, f"Test failed with return code {result.returncode}. Error:\n{result.stderr}"
++        assert "✓ Empty string removed correctly" in result.stdout
++        assert "✓ Dot removed correctly" in result.stdout
++        assert "✓ CWD removed correctly" in result.stdout
++        
++    finally:
++        os.unlink(temp_file2)
++    
++    print("All comprehensive tests passed!")
++
++
++if __name__ == "__main__":
++    test_comprehensive()
+diff --git a/test_file.py b/test_file.py
+new file mode 100644
+index 000000000..f056684ae
+--- /dev/null
++++ b/test_file.py
+@@ -0,0 +1,8 @@
++"""Simple test file for pylint."""
++
++def hello_world():
++    """Print hello world."""
++    print("Hello, world!")
++
++if __name__ == "__main__":
++    hello_world()
+diff --git a/test_modify_sys_path_custom.py b/test_modify_sys_path_custom.py
+new file mode 100644
+index 000000000..8e5b9da26
+--- /dev/null
++++ b/test_modify_sys_path_custom.py
+@@ -0,0 +1,61 @@
++"""Test for the fix of modify_sys_path with custom paths."""
++import sys
++import os
++from copy import copy
++import pytest
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++from pylint import modify_sys_path
++
++
++def test_modify_sys_path_preserves_custom_paths():
++    """Test that modify_sys_path doesn't remove custom paths from sys.path."""
++    # Save original state
++    original_sys_path = copy(sys.path)
++    original_pythonpath = os.environ.get("PYTHONPATH", "")
++    
++    try:
++        # Test 1: Custom path should be preserved
++        sys.path = ["custom_path", "/usr/lib", "/usr/local/lib"]
++        modify_sys_path()
++        assert sys.path == ["custom_path", "/usr/lib", "/usr/local/lib"]
++        
++        # Test 2: Empty string should be removed
++        sys.path = ["", "/usr/lib", "/usr/local/lib"]
++        modify_sys_path()
++        assert sys.path == ["/usr/lib", "/usr/local/lib"]
++        
++        # Test 3: "." should be removed
++        sys.path = [".", "/usr/lib", "/usr/local/lib"]
++        modify_sys_path()
++        assert sys.path == ["/usr/lib", "/usr/local/lib"]
++        
++        # Test 4: Current working directory should be removed
++        cwd = os.getcwd()
++        sys.path = [cwd, "/usr/lib", "/usr/local/lib"]
++        modify_sys_path()
++        assert sys.path == ["/usr/lib", "/usr/local/lib"]
++        
++        # Test 5: Multiple custom paths should all be preserved
++        sys.path = ["path1", "path2", "", "path3"]
++        modify_sys_path()
++        assert sys.path == ["path1", "path2", "", "path3"]
++        
++        # Test 6: Empty sys.path should not cause error
++        sys.path = []
++        modify_sys_path()
++        assert sys.path == []
++        
++    finally:
++        # Restore original state
++        sys.path = original_sys_path
++        if original_pythonpath:
++            os.environ["PYTHONPATH"] = original_pythonpath
++        elif "PYTHONPATH" in os.environ:
++            del os.environ["PYTHONPATH"]
++
++
++if __name__ == "__main__":
++    test_modify_sys_path_preserves_custom_paths()
++    print("All tests passed!")
+diff --git a/test_pythonpath_edge_cases.py b/test_pythonpath_edge_cases.py
+new file mode 100644
+index 000000000..280771472
+--- /dev/null
++++ b/test_pythonpath_edge_cases.py
+@@ -0,0 +1,59 @@
++"""Test edge cases with PYTHONPATH environment variable."""
++import sys
++import os
++from copy import copy
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++from pylint import modify_sys_path
++
++
++def test_pythonpath_edge_cases():
++    """Test that PYTHONPATH handling still works correctly with our fix."""
++    # Save original state
++    original_sys_path = copy(sys.path)
++    original_pythonpath = os.environ.get("PYTHONPATH", "")
++    cwd = os.getcwd()
++    
++    try:
++        # Test case 1: PYTHONPATH starts with ":"
++        os.environ["PYTHONPATH"] = ":/custom_path"
++        sys.path = ["", cwd, "/custom_path", "/usr/lib"]
++        modify_sys_path()
++        # Should remove both "" and cwd
++        assert sys.path == ["/custom_path", "/usr/lib"], f"Expected ['/custom_path', '/usr/lib'], got {sys.path}"
++        
++        # Test case 2: PYTHONPATH ends with ":"
++        os.environ["PYTHONPATH"] = "/custom_path:"
++        sys.path = [cwd, "/custom_path", cwd, "/usr/lib"]
++        modify_sys_path()
++        # Should remove first cwd and the one at index 1 (after removal)
++        assert sys.path == ["/custom_path", "/usr/lib"], f"Expected ['/custom_path', '/usr/lib'], got {sys.path}"
++        
++        # Test case 3: PYTHONPATH is ":."
++        os.environ["PYTHONPATH"] = ":."
++        sys.path = ["", ".", "/usr/lib"]
++        modify_sys_path()
++        # Should only remove the first empty string, not the second
++        assert sys.path == [".", "/usr/lib"], f"Expected ['.', '/usr/lib'], got {sys.path}"
++        
++        # Test case 4: Custom path at beginning should be preserved
++        os.environ["PYTHONPATH"] = "/my_custom_path:/other_path"
++        sys.path = ["/my_custom_path", "/other_path", "/usr/lib"]
++        modify_sys_path()
++        # Custom path should be preserved
++        assert sys.path == ["/my_custom_path", "/other_path", "/usr/lib"], f"Expected custom paths preserved, got {sys.path}"
++        
++        print("All PYTHONPATH edge cases passed!")
++        
++    finally:
++        # Restore original state
++        sys.path = original_sys_path
++        if original_pythonpath:
++            os.environ["PYTHONPATH"] = original_pythonpath
++        elif "PYTHONPATH" in os.environ:
++            del os.environ["PYTHONPATH"]
++
++
++if __name__ == "__main__":
++    test_pythonpath_edge_cases()
+diff --git a/test_runpy_integration.py b/test_runpy_integration.py
+new file mode 100644
+index 000000000..46e0eb54c
+--- /dev/null
++++ b/test_runpy_integration.py
+@@ -0,0 +1,68 @@
++"""Integration test for runpy scenario from the problem statement."""
++import sys
++import runpy
++import subprocess
++import tempfile
++import os
++
++def test_runpy_with_custom_path():
++    """Test that pylint preserves custom paths when run via runpy."""
++    
++    # Create a test script that reproduces the issue
++    test_script = '''
++import sys
++import runpy
++
++# Add custom path
++sys.path.insert(0, "something")
++initial_path = sys.path.copy()
++
++# Run pylint module
++try:
++    runpy.run_module('pylint', run_name="__main__", alter_sys=True)
++except SystemExit:
++    pass
++
++# Check if custom path is preserved
++if "something" in sys.path:
++    print("SUCCESS: Custom path preserved")
++    sys.exit(0)
++else:
++    print("FAILURE: Custom path was removed")
++    print(f"Initial path: {initial_path[:3]}")
++    print(f"Final path: {sys.path[:3]}")
++    sys.exit(1)
++'''
++
++    # Write test script to temporary file
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++        f.write(test_script)
++        temp_file = f.name
++    
++    try:
++        # Run the test script
++        result = subprocess.run(
++            [sys.executable, temp_file],
++            capture_output=True,
++            text=True,
++            cwd='/testbed'
++        )
++        
++        print("STDOUT:")
++        print(result.stdout)
++        if result.stderr:
++            print("STDERR:")
++            print(result.stderr)
++        
++        # Check result
++        assert result.returncode == 0, f"Test failed with return code {result.returncode}"
++        assert "SUCCESS" in result.stdout, "Custom path was not preserved"
++        
++    finally:
++        # Clean up
++        os.unlink(temp_file)
++
++
++if __name__ == "__main__":
++    test_runpy_with_custom_path()
++    print("Integration test passed!")
+diff --git a/test_runpy_issue.py b/test_runpy_issue.py
+new file mode 100644
+index 000000000..26259521a
+--- /dev/null
++++ b/test_runpy_issue.py
+@@ -0,0 +1,52 @@
++"""Test script to reproduce the issue with runpy and sys.path modification."""
++import sys
++import os
++from copy import copy
++
++# Add testbed to path to import pylint
++sys.path.insert(0, '/testbed')
++
++# Save original sys.path
++original_sys_path = copy(sys.path)
++
++# Import modify_sys_path
++from pylint import modify_sys_path
++
++# Test case 1: When first item is a custom path
++print("Test case 1: Custom path as first item")
++sys.path = ["something", "/usr/lib", "/usr/local/lib"]
++print(f"Before import: sys.path = {sys.path}")
++modify_sys_path()
++print(f"After modify_sys_path: sys.path = {sys.path}")
++print(f"First item removed incorrectly: {'something' not in sys.path}")
++print()
++
++# Reset sys.path
++sys.path = copy(original_sys_path)
++
++# Test case 2: When first item is empty string (current directory)
++print("Test case 2: Empty string as first item")
++sys.path = ["", "/usr/lib", "/usr/local/lib"]
++print(f"Before modify_sys_path: sys.path = {sys.path}")
++modify_sys_path()
++print(f"After modify_sys_path: sys.path = {sys.path}")
++print(f"Empty string removed correctly: {'' not in sys.path}")
++print()
++
++# Test case 3: When first item is "."
++print("Test case 3: '.' as first item")
++sys.path = [".", "/usr/lib", "/usr/local/lib"]
++print(f"Before modify_sys_path: sys.path = {sys.path}")
++modify_sys_path()
++print(f"After modify_sys_path: sys.path = {sys.path}")
++print(f"'.' removed correctly: {'.' not in sys.path}")
++print()
++
++# Test case 4: When first item is current working directory
++print("Test case 4: Current working directory as first item")
++cwd = os.getcwd()
++sys.path = [cwd, "/usr/lib", "/usr/local/lib"]
++print(f"Before modify_sys_path: sys.path = {sys.path}")
++modify_sys_path()
++print(f"After modify_sys_path: sys.path = {sys.path}")
++print(f"CWD removed correctly: {cwd not in sys.path}")
+diff --git a/test_runpy_scenario.py b/test_runpy_scenario.py
+new file mode 100644
+index 000000000..9c501fc4b
+--- /dev/null
++++ b/test_runpy_scenario.py
+@@ -0,0 +1,28 @@
++"""Test the exact scenario from the problem statement."""
++import sys
++import runpy
++from copy import copy
++
++# Save original sys.path
++original_sys_path = copy(sys.path)
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++# Test the exact scenario from the problem statement
++print("Testing runpy scenario from problem statement:")
++print(f"Initial sys.path: {sys.path[:3]}...")
++
++# Insert custom path as described in the problem
++sys.path.insert(0, "something")
++print(f"After inserting 'something': {sys.path[:3]}...")
++
++# Run pylint module
++try:
++    runpy.run_module('pylint', run_name="__main__", alter_sys=True)
++except SystemExit:
++    # pylint exits, which is expected
++    pass
++
++print(f"After running pylint: {sys.path[:3]}...")
++print(f"'something' still in sys.path: {'something' in sys.path}")

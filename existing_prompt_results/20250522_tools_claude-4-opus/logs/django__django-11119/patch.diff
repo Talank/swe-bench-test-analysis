@@ -1,0 +1,238 @@
+diff --git a/django/template/engine.py b/django/template/engine.py
+index dfaa67ba12..ff9ce58d59 100644
+--- a/django/template/engine.py
++++ b/django/template/engine.py
+@@ -160,7 +160,7 @@ class Engine:
+         if isinstance(context, Context):
+             return t.render(context)
+         else:
+-            return t.render(Context(context))
++            return t.render(Context(context, autoescape=self.autoescape))
+ 
+     def select_template(self, template_name_list):
+         """
+diff --git a/test_autoescape_bug.py b/test_autoescape_bug.py
+new file mode 100644
+index 0000000000..843198c6ee
+--- /dev/null
++++ b/test_autoescape_bug.py
+@@ -0,0 +1,41 @@
++"""Test to reproduce the autoescape bug in Engine.render_to_string()"""
++from django.template import Engine
++
++def test_render_to_string_autoescape_false():
++    """Test that render_to_string honors autoescape=False"""
++    # Create an engine with autoescape=False
++    engine = Engine(autoescape=False)
++    
++    # Template with HTML that should NOT be escaped
++    template_string = "{{ content }}"
++    
++    # Create a template from string
++    template = engine.from_string(template_string)
++    
++    # Test data with HTML
++    context = {'content': '<b>Hello</b>'}
++    
++    # Test direct template rendering (this should work correctly)
++    from django.template import Context
++    context_obj = Context(context, autoescape=False)
++    result_direct = template.render(context_obj)
++    print(f"Direct render result: {result_direct}")
++    print(f"Direct render escaped: {'&lt;' in result_direct}")
++    
++    # Test render_to_string (this is where the bug is)
++    # First, we need to set up a template loader
++    engine = Engine(
++        loaders=[('django.template.loaders.locmem.Loader', {'test.html': template_string})],
++        autoescape=False
++    )
++    
++    result_render_to_string = engine.render_to_string('test.html', context)
++    print(f"\nrender_to_string result: {result_render_to_string}")
++    print(f"render_to_string escaped: {'&lt;' in result_render_to_string}")
++    
++    # The bug: render_to_string doesn't honor autoescape=False
++    assert result_direct == result_render_to_string, \
++        f"Results differ!\nDirect: {result_direct}\nrender_to_string: {result_render_to_string}"
++
++if __name__ == "__main__":
++    test_render_to_string_autoescape_false()
+diff --git a/test_autoescape_comprehensive.py b/test_autoescape_comprehensive.py
+new file mode 100644
+index 0000000000..fafd82ede5
+--- /dev/null
++++ b/test_autoescape_comprehensive.py
+@@ -0,0 +1,60 @@
++"""Comprehensive test for autoescape in Engine.render_to_string()"""
++from django.template import Engine, Context
++
++def test_render_to_string_autoescape():
++    """Test that render_to_string honors both autoescape=True and autoescape=False"""
++    
++    template_string = "{{ content }}"
++    test_content = '<b>Hello & "World"</b>'
++    
++    # Test 1: autoescape=True (default)
++    print("Test 1: autoescape=True (default)")
++    engine_true = Engine(
++        loaders=[('django.template.loaders.locmem.Loader', {'test.html': template_string})],
++        autoescape=True
++    )
++    
++    result_true = engine_true.render_to_string('test.html', {'content': test_content})
++    print(f"Result: {result_true}")
++    assert '&lt;' in result_true and '&gt;' in result_true and '&amp;' in result_true and '&quot;' in result_true
++    print("PASS: HTML entities are properly escaped\n")
++    
++    # Test 2: autoescape=False
++    print("Test 2: autoescape=False")
++    engine_false = Engine(
++        loaders=[('django.template.loaders.locmem.Loader', {'test.html': template_string})],
++        autoescape=False
++    )
++    
++    result_false = engine_false.render_to_string('test.html', {'content': test_content})
++    print(f"Result: {result_false}")
++    assert result_false == test_content
++    print("PASS: HTML is NOT escaped\n")
++    
++    # Test 3: Verify that passing a Context object still works
++    print("Test 3: Passing a Context object")
++    context_obj = Context({'content': test_content}, autoescape=False)
++    result_context = engine_true.render_to_string('test.html', context_obj)
++    print(f"Result: {result_context}")
++    assert result_context == test_content
++    print("PASS: Context object's autoescape setting is preserved\n")
++    
++    # Test 4: Verify template.render() and render_to_string() produce same results
++    print("Test 4: Consistency between template.render() and render_to_string()")
++    template = engine_false.from_string(template_string)
++    context_dict = {'content': test_content}
++    
++    # Direct render with Context
++    direct_result = template.render(Context(context_dict, autoescape=False))
++    # render_to_string
++    rts_result = engine_false.render_to_string('test.html', context_dict)
++    
++    print(f"Direct render: {direct_result}")
++    print(f"render_to_string: {rts_result}")
++    assert direct_result == rts_result
++    print("PASS: Both methods produce identical results\n")
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_render_to_string_autoescape()
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..ea55d0c95f
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,43 @@
++"""Final verification test for the autoescape bug fix"""
++from django.template import Engine, Context
++
++def test_issue_fix():
++    """
++    Verify that Engine.render_to_string() honors the autoescape attribute.
++    This was the bug: In Engine.render_to_string, a Context is created without 
++    specifying the engine autoescape attribute.
++    """
++    
++    # Test content with HTML that needs escaping
++    test_content = '<script>alert("XSS")</script>'
++    template_string = '{{ content }}'
++    
++    # Create engine with autoescape=False
++    engine = Engine(
++        loaders=[('django.template.loaders.locmem.Loader', {'test.html': template_string})],
++        autoescape=False
++    )
++    
++    # Before the fix, this would incorrectly escape the HTML
++    result = engine.render_to_string('test.html', {'content': test_content})
++    
++    print(f"Engine autoescape setting: {engine.autoescape}")
++    print(f"Result: {result}")
++    print(f"Is escaped? {'&lt;' in result}")
++    
++    # The fix ensures that autoescape=False is honored
++    assert result == test_content, f"Expected unescaped content but got: {result}"
++    print("\nSUCCESS: Engine.render_to_string() now honors the autoescape attribute!")
++    
++    # Also verify autoescape=True still works
++    engine_escape = Engine(
++        loaders=[('django.template.loaders.locmem.Loader', {'test.html': template_string})],
++        autoescape=True
++    )
++    
++    result_escaped = engine_escape.render_to_string('test.html', {'content': test_content})
++    assert '&lt;script&gt;' in result_escaped, f"Expected escaped content but got: {result_escaped}"
++    print("SUCCESS: autoescape=True also works correctly!")
++
++if __name__ == "__main__":
++    test_issue_fix()
+diff --git a/tests/template_tests/test_engine.py b/tests/template_tests/test_engine.py
+index 2bb8601fbb..558bc20a3e 100644
+--- a/tests/template_tests/test_engine.py
++++ b/tests/template_tests/test_engine.py
+@@ -21,6 +21,59 @@ class RenderToStringTest(SimpleTestCase):
+             'obj:test\n',
+         )
+ 
++    def test_autoescape_off(self):
++        """
++        Test that render_to_string honors the engine's autoescape setting.
++        """
++        # Create an engine with autoescape=False
++        engine = Engine(
++            loaders=[
++                ('django.template.loaders.locmem.Loader', {
++                    'test.html': '{{ content }}',
++                }),
++            ],
++            autoescape=False,
++        )
++        # HTML content should not be escaped
++        result = engine.render_to_string('test.html', {'content': '<b>Hello</b>'})
++        self.assertEqual(result, '<b>Hello</b>')
++
++    def test_autoescape_on(self):
++        """
++        Test that render_to_string honors the engine's autoescape setting.
++        """
++        # Create an engine with autoescape=True (default)
++        engine = Engine(
++            loaders=[
++                ('django.template.loaders.locmem.Loader', {
++                    'test.html': '{{ content }}',
++                }),
++            ],
++            autoescape=True,
++        )
++        # HTML content should be escaped
++        result = engine.render_to_string('test.html', {'content': '<b>Hello</b>'})
++        self.assertEqual(result, '&lt;b&gt;Hello&lt;/b&gt;')
++
++    def test_autoescape_context_override(self):
++        """
++        Test that render_to_string preserves Context object's autoescape setting.
++        """
++        # Create an engine with autoescape=True
++        engine = Engine(
++            loaders=[
++                ('django.template.loaders.locmem.Loader', {
++                    'test.html': '{{ content }}',
++                }),
++            ],
++            autoescape=True,
++        )
++        # Pass a Context with autoescape=False
++        context = Context({'content': '<b>Hello</b>'}, autoescape=False)
++        result = engine.render_to_string('test.html', context)
++        # The Context's autoescape setting should be preserved
++        self.assertEqual(result, '<b>Hello</b>')
++
+ 
+ class GetDefaultTests(SimpleTestCase):

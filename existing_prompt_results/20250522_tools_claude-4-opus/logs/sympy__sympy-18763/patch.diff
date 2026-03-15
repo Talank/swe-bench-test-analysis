@@ -1,0 +1,239 @@
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 0000000000..60177cc01a
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,37 @@
++from sympy import Subs, latex, sin
++from sympy.abc import x, y
++
++print("Testing the fix for Subs LaTeX parenthesizing...")
++print()
++
++# The main issue from the problem statement
++expr1 = 3*Subs(-x+y, (x,), (1,))
++result1 = latex(expr1)
++expected1 = r'3 \left. \left(- x + y\right) \right|_{\substack{ x=1 }}'
++print(f"Test 1: {expr1}")
++print(f"  Result:   {result1}")
++print(f"  Expected: {expected1}")
++print(f"  Status:   {'PASS' if result1 == expected1 else 'FAIL'}")
++print()
++
++# Additional test cases
++test_cases = [
++    (Subs(-x+y, (x,), (1,)), r'\left. \left(- x + y\right) \right|_{\substack{ x=1 }}'),
++    (Subs(x+y, (x,), (1,)), r'\left. \left(x + y\right) \right|_{\substack{ x=1 }}'),
++    (Subs(x, (x,), (1,)), r'\left. x \right|_{\substack{ x=1 }}'),
++    (Subs(x*y, (x,), (1,)), r'\left. x y \right|_{\substack{ x=1 }}'),
++    (Subs(sin(x), (x,), (1,)), r'\left. \sin{\left(x \right)} \right|_{\substack{ x=1 }}'),
++]
++
++all_pass = result1 == expected1
++for i, (expr, expected) in enumerate(test_cases, 2):
++    result = latex(expr)
++    status = 'PASS' if result == expected else 'FAIL'
++    all_pass = all_pass and (result == expected)
++    print(f"Test {i}: {expr}")
++    print(f"  Result:   {result}")
++    print(f"  Expected: {expected}")
++    print(f"  Status:   {status}")
++    print()
++
++print(f"Overall: {'All tests PASSED!' if all_pass else 'Some tests FAILED!'}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..3567358ce6
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,23 @@
++from sympy import Subs, latex
++from sympy.abc import x, y
++
++# Reproduce the issue
++expr = 3*Subs(-x+y, (x,), (1,))
++print("Expression:", expr)
++print("LaTeX output:", latex(expr))
++print()
++
++# Let's also test some other cases
++expr2 = Subs(-x+y, (x,), (1,))
++print("Expression without multiplication:", expr2)
++print("LaTeX output:", latex(expr2))
++print()
++
++expr3 = 2*Subs(x-y, (x,), (1,))
++print("Expression with x-y:", expr3)
++print("LaTeX output:", latex(expr3))
++print()
++
++expr4 = Subs(x+y, (x,), (1,))
++print("Expression with x+y (no minus):", expr4)
++print("LaTeX output:", latex(expr4))
+diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
+index 8743723ea0..d4bda2ba70 100644
+--- a/sympy/printing/latex.py
++++ b/sympy/printing/latex.py
+@@ -698,7 +698,13 @@ def _print_Derivative(self, expr):
+ 
+     def _print_Subs(self, subs):
+         expr, old, new = subs.args
+-        latex_expr = self._print(expr)
++        # Parenthesize the expression if it's an Add (or has Add precedence)
++        # This ensures expressions like -x+y are properly grouped
++        from sympy.core.add import Add
++        if isinstance(expr, Add) or precedence_traditional(expr) <= PRECEDENCE["Add"]:
++            latex_expr = r"\left({}\right)".format(self._print(expr))
++        else:
++            latex_expr = self._print(expr)
+         latex_old = (self._print(e) for e in old)
+         latex_new = (self._print(e) for e in new)
+         latex_subs = r'\\ '.join(
+diff --git a/sympy/printing/tests/test_latex.py b/sympy/printing/tests/test_latex.py
+index 3d387cf052..c4b92d5961 100644
+--- a/sympy/printing/tests/test_latex.py
++++ b/sympy/printing/tests/test_latex.py
+@@ -675,6 +675,14 @@ def test_latex_derivatives():
+ def test_latex_subs():
+     assert latex(Subs(x*y, (
+         x, y), (1, 2))) == r'\left. x y \right|_{\substack{ x=1\\ y=2 }}'
++    # Test case from issue - Add expressions should be parenthesized
++    assert latex(3*Subs(-x+y, (x,), (1,))) == r'3 \left. \left(- x + y\right) \right|_{\substack{ x=1 }}'
++    assert latex(Subs(-x+y, (x,), (1,))) == r'\left. \left(- x + y\right) \right|_{\substack{ x=1 }}'
++    assert latex(Subs(x+y, (x,), (1,))) == r'\left. \left(x + y\right) \right|_{\substack{ x=1 }}'
++    assert latex(Subs(x-y, (x,), (1,))) == r'\left. \left(x - y\right) \right|_{\substack{ x=1 }}'
++    # Simple expressions should not be parenthesized
++    assert latex(Subs(x, (x,), (1,))) == r'\left. x \right|_{\substack{ x=1 }}'
++    assert latex(Subs(x**2, (x,), (1,))) == r'\left. x^{2} \right|_{\substack{ x=1 }}'
+ 
+ 
+ def test_latex_integrals():
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..b26cd42242
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,33 @@
++from sympy import Subs, latex, sin, cos, exp, sqrt
++from sympy.abc import x, y, z
++
++# Test various expressions
++test_cases = [
++    # Original problem case
++    (3*Subs(-x+y, (x,), (1,)), "3*Subs(-x+y, x, 1)"),
++    # Simple cases
++    (Subs(x, (x,), (1,)), "Subs(x, x, 1)"),
++    (Subs(y, (x,), (1,)), "Subs(y, x, 1)"),
++    # Addition/subtraction
++    (Subs(x+y, (x,), (1,)), "Subs(x+y, x, 1)"),
++    (Subs(x-y, (x,), (1,)), "Subs(x-y, x, 1)"),
++    (Subs(-x+y, (x,), (1,)), "Subs(-x+y, x, 1)"),
++    # Multiplication
++    (Subs(x*y, (x,), (1,)), "Subs(x*y, x, 1)"),
++    (2*Subs(x*y, (x,), (1,)), "2*Subs(x*y, x, 1)"),
++    # Powers
++    (Subs(x**2, (x,), (1,)), "Subs(x**2, x, 1)"),
++    (Subs(x**2 + y, (x,), (1,)), "Subs(x**2 + y, x, 1)"),
++    # Functions
++    (Subs(sin(x), (x,), (1,)), "Subs(sin(x), x, 1)"),
++    (Subs(sin(x) + cos(y), (x,), (1,)), "Subs(sin(x) + cos(y), x, 1)"),
++    # Nested
++    (Subs(sqrt(x+y), (x,), (1,)), "Subs(sqrt(x+y), x, 1)"),
++    # Multiple substitutions
++    (Subs(x+y+z, (x,y), (1,2)), "Subs(x+y+z, (x,y), (1,2))"),
++]
++
++for expr, desc in test_cases:
++    print(f"{desc}:")
++    print(f"  LaTeX: {latex(expr)}")
++    print()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..3aa62f2bf3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,44 @@
++from sympy import *
++from sympy.abc import x, y, z
++
++# Test edge cases and ensure nothing is broken
++test_cases = [
++    # Basic functionality
++    (Subs(x, x, 1).doit(), 1),
++    (Subs(x+y, x, 1).doit(), 1+y),
++    (Subs(x*y, (x, y), (2, 3)).doit(), 6),
++    
++    # LaTeX printing edge cases
++    (latex(Subs(1, x, 1)), r'\left. 1 \right|_{\substack{ x=1 }}'),
++    (latex(Subs(x, x, x+1)), r'\left. x \right|_{\substack{ x=x + 1 }}'),
++    (latex(Subs(sin(x), x, pi)), r'\left. \sin{\left(x \right)} \right|_{\substack{ x=\pi }}'),
++    
++    # Nested Subs - the inner Subs doesn't get evaluated in LaTeX
++    (latex(Subs(Subs(x+y, x, 1), y, 2)), latex(Subs(Subs(x+y, x, 1), y, 2))),
++    
++    # Complex expressions
++    (latex(exp(Subs(x+y, x, 1))), latex(exp(Subs(x+y, x, 1)))),
++    (latex(Subs(exp(x+y), x, 1)), r'\left. e^{x + y} \right|_{\substack{ x=1 }}'),
++]
++
++print("Running edge case tests...")
++for i, (expr, expected) in enumerate(test_cases):
++    if isinstance(expected, str):
++        result = expr
++        if result != expected:
++            print(f"Test {i} FAILED:")
++            print(f"  Expression: {test_cases[i][0]}")
++            print(f"  Expected: {expected}")
++            print(f"  Got: {result}")
++        else:
++            print(f"Test {i} passed")
++    else:
++        if expr != expected:
++            print(f"Test {i} FAILED:")
++            print(f"  Expression: {test_cases[i][0]}")
++            print(f"  Expected: {expected}")
++            print(f"  Got: {expr}")
++        else:
++            print(f"Test {i} passed")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_normal_mul.py b/test_normal_mul.py
+new file mode 100644
+index 0000000000..533b3ecd1f
+--- /dev/null
++++ b/test_normal_mul.py
+@@ -0,0 +1,9 @@
++from sympy import latex
++from sympy.abc import x, y
++
++# Test how normal multiplication handles parentheses
++print("3*(-x+y):", latex(3*(-x+y)))
++print("3*(x+y):", latex(3*(x+y)))
++print("3*(x-y):", latex(3*(x-y)))
++print("3*x:", latex(3*x))
++print("3*(x*y):", latex(3*(x*y)))
+diff --git a/test_precedence.py b/test_precedence.py
+new file mode 100644
+index 0000000000..2d6902eac8
+--- /dev/null
++++ b/test_precedence.py
+@@ -0,0 +1,19 @@
++from sympy import Subs, Add
++from sympy.abc import x, y
++from sympy.printing.precedence import precedence, precedence_traditional, PRECEDENCE
++
++# Test the precedence of Subs
++subs_expr = Subs(-x+y, (x,), (1,))
++print("Subs expression:", subs_expr)
++print("Precedence of Subs:", precedence(subs_expr))
++print("Traditional precedence of Subs:", precedence_traditional(subs_expr))
++print("PRECEDENCE['Atom']:", PRECEDENCE['Atom'])
++print("PRECEDENCE['Mul']:", PRECEDENCE['Mul'])
++print("PRECEDENCE['Add']:", PRECEDENCE['Add'])
++
++# Test the precedence of the inner expression
++inner_expr = -x + y
++print("\nInner expression:", inner_expr)
++print("Type of inner expression:", type(inner_expr))
++print("Precedence of inner expression:", precedence(inner_expr))
++print("Traditional precedence of inner expression:", precedence_traditional(inner_expr))

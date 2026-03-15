@@ -1,0 +1,591 @@
+diff --git a/debug_sql.py b/debug_sql.py
+new file mode 100644
+index 0000000000..2c03c2e649
+--- /dev/null
++++ b/debug_sql.py
+@@ -0,0 +1,74 @@
++import os
++import django
++from django.db import models
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create minimal settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(date='2023-01-01', DJR=10.0)
++TestModel.objects.create(date='2023-01-02', DJR=20.0)
++TestModel.objects.create(date='2023-01-03', DJR=30.0)
++
++# Try the problematic query
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++    )
++    
++    # Print the SQL for the annotated queryset
++    print("Annotated queryset SQL:")
++    print(queryset.query)
++    print()
++    
++    # Try to get the aggregate SQL
++    from django.db.models.sql import Query
++    from django.db import connection
++    
++    # Clone the query and try to see what SQL would be generated
++    aggregate_query = queryset.query.chain()
++    aggregate_query.add_annotation(Sum("DJR"), alias="DJR_total")
++    aggregate_query.add_annotation(Sum("cumul_DJR"), alias="cumul_DJR_total")
++    
++    print("Trying to see aggregate SQL...")
++    
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..3b639b06fc 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -436,6 +436,11 @@ class Query(BaseExpression):
+             )
+             or having
+         )
++        # Check if any annotations contain window functions
++        has_window_functions = any(
++            getattr(annotation, "contains_over_clause", False)
++            for annotation in self.annotations.values()
++        )
+         # Decide if we need to use a subquery.
+         #
+         # Existing aggregations would cause incorrect results as
+@@ -446,10 +451,14 @@ class Query(BaseExpression):
+         # those operations must be done in a subquery so that the query
+         # aggregates on the limit and/or distinct results instead of applying
+         # the distinct and limit after the aggregation.
++        #
++        # Window functions must also be wrapped in a subquery because
++        # aggregate functions cannot directly reference window functions.
+         if (
+             isinstance(self.group_by, tuple)
+             or self.is_sliced
+             or has_existing_aggregation
++            or has_window_functions
+             or refs_subquery
+             or qualify
+             or self.distinct
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..1e110abcd9
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,62 @@
++import os
++import django
++from django.db import models
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create minimal settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(date='2023-01-01', DJR=10.0)
++TestModel.objects.create(date='2023-01-02', DJR=20.0)
++TestModel.objects.create(date='2023-01-03', DJR=30.0)
++
++# Try the problematic query
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++    )
++    aggregate = queryset.aggregate(
++        DJR_total=Sum("DJR"),
++        cumul_DJR_total=Sum("cumul_DJR")
++    )
++    print("Query executed successfully!")
++    print(f"Result: {aggregate}")
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_postgres_window_aggregate.py b/test_postgres_window_aggregate.py
+new file mode 100644
+index 0000000000..c4c4c90feb
+--- /dev/null
++++ b/test_postgres_window_aggregate.py
+@@ -0,0 +1,75 @@
++import os
++import django
++from django.db import models
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++# Setup Django with PostgreSQL
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings_pg')
++
++# Create minimal settings for PostgreSQL
++with open('/testbed/test_settings_pg.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.postgresql',
++        'NAME': 'test_db',
++        'USER': 'postgres',
++        'PASSWORD': 'postgres',
++        'HOST': 'localhost',
++        'PORT': '5432',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++try:
++    django.setup()
++    
++    # Create a test model
++    class TestModel(models.Model):
++        date = models.DateField()
++        DJR = models.FloatField()
++        
++        class Meta:
++            app_label = 'test_app'
++            db_table = 'test_model'
++    
++    # Create the table
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        try:
++            schema_editor.delete_model(TestModel)
++        except:
++            pass
++        schema_editor.create_model(TestModel)
++    
++    # Insert some test data
++    TestModel.objects.create(date='2023-01-01', DJR=10.0)
++    TestModel.objects.create(date='2023-01-02', DJR=20.0)
++    TestModel.objects.create(date='2023-01-03', DJR=30.0)
++    
++    # Try the problematic query
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++    )
++    aggregate = queryset.aggregate(
++        DJR_total=Sum("DJR"),
++        cumul_DJR_total=Sum("cumul_DJR")
++    )
++    print("PostgreSQL test passed!")
++    print(f"Result: {aggregate}")
++    
++    # Clean up
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(TestModel)
++        
++except Exception as e:
++    print(f"PostgreSQL test skipped or failed: {type(e).__name__}: {e}")
++    print("This is expected if PostgreSQL is not available.")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..833d089dbb
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,13 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
+diff --git a/test_settings_pg.py b/test_settings_pg.py
+new file mode 100644
+index 0000000000..bc56c16407
+--- /dev/null
++++ b/test_settings_pg.py
+@@ -0,0 +1,17 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.postgresql',
++        'NAME': 'test_db',
++        'USER': 'postgres',
++        'PASSWORD': 'postgres',
++        'HOST': 'localhost',
++        'PORT': '5432',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
+diff --git a/test_window_aggregate.py b/test_window_aggregate.py
+new file mode 100644
+index 0000000000..254dbc1abf
+--- /dev/null
++++ b/test_window_aggregate.py
+@@ -0,0 +1,129 @@
++import os
++import django
++from django.db import models
++from django.db.models import Sum, F, Window, Avg, Count, Max, Min
++from django.db.models.functions import Coalesce, Rank, DenseRank, RowNumber
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create minimal settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++    category = models.CharField(max_length=10)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(date='2023-01-01', DJR=10.0, category='A')
++TestModel.objects.create(date='2023-01-02', DJR=20.0, category='A')
++TestModel.objects.create(date='2023-01-03', DJR=30.0, category='B')
++TestModel.objects.create(date='2023-01-04', DJR=40.0, category='B')
++
++print("Testing various window function + aggregate combinations...")
++
++# Test 1: Original issue - Sum over Window with Sum
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++    )
++    result = queryset.aggregate(
++        DJR_total=Sum("DJR"),
++        cumul_DJR_total=Sum("cumul_DJR")
++    )
++    print("✓ Test 1 passed - Sum over Window with Sum:", result)
++except Exception as e:
++    print("✗ Test 1 failed:", e)
++
++# Test 2: Multiple window functions
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        cumul_sum=Window(Sum("DJR"), order_by=F("date").asc()),
++        cumul_avg=Window(Avg("DJR"), order_by=F("date").asc()),
++        rank=Window(Rank(), order_by=F("DJR").desc())
++    )
++    result = queryset.aggregate(
++        total_cumul_sum=Sum("cumul_sum"),
++        avg_cumul_avg=Avg("cumul_avg"),
++        max_rank=Max("rank")
++    )
++    print("✓ Test 2 passed - Multiple window functions:", result)
++except Exception as e:
++    print("✗ Test 2 failed:", e)
++
++# Test 3: Window with partition
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        category_cumul=Window(
++            Sum("DJR"), 
++            partition_by=[F("category")], 
++            order_by=F("date").asc()
++        )
++    )
++    result = queryset.aggregate(
++        total_category_cumul=Sum("category_cumul")
++    )
++    print("✓ Test 3 passed - Window with partition:", result)
++except Exception as e:
++    print("✗ Test 3 failed:", e)
++
++# Test 4: Regular aggregation (no window) - should still work
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        double_djr=F("DJR") * 2
++    )
++    result = queryset.aggregate(
++        total=Sum("DJR"),
++        double_total=Sum("double_djr")
++    )
++    print("✓ Test 4 passed - Regular aggregation (no window):", result)
++except Exception as e:
++    print("✗ Test 4 failed:", e)
++
++# Test 5: Mixed window and non-window annotations
++try:
++    queryset = TestModel.objects.all()
++    queryset = queryset.annotate(
++        double_djr=F("DJR") * 2,
++        row_num=Window(RowNumber(), order_by=F("date").asc())
++    )
++    result = queryset.aggregate(
++        total=Sum("DJR"),
++        double_total=Sum("double_djr"),
++        max_row=Max("row_num")
++    )
++    print("✓ Test 5 passed - Mixed window and non-window annotations:", result)
++except Exception as e:
++    print("✗ Test 5 failed:", e)
++
++print("\nAll tests completed!")
+diff --git a/test_window_aggregate_fix.py b/test_window_aggregate_fix.py
+new file mode 100644
+index 0000000000..424e411ecd
+--- /dev/null
++++ b/test_window_aggregate_fix.py
+@@ -0,0 +1,81 @@
++"""
++Test for aggregating over window functions.
++This test ensures that aggregating over window functions works correctly
++by using a subquery, which prevents the "aggregate function calls cannot 
++contain window function calls" error.
++"""
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++from django.test import TestCase
++
++from expressions_window.models import Employee
++
++
++class WindowAggregateTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        Employee.objects.create(
++            name="Alice", salary=50000, department="IT", hire_date="2020-01-01"
++        )
++        Employee.objects.create(
++            name="Bob", salary=60000, department="IT", hire_date="2020-02-01"
++        )
++        Employee.objects.create(
++            name="Charlie", salary=55000, department="HR", hire_date="2020-03-01"
++        )
++
++    def test_aggregate_over_window_sum(self):
++        """Test aggregating a Sum over a window function."""
++        queryset = Employee.objects.annotate(
++            cumulative_salary=Window(
++                Sum("salary"),
++                order_by=F("hire_date").asc()
++            )
++        )
++        result = queryset.aggregate(
++            total_salary=Sum("salary"),
++            total_cumulative=Sum("cumulative_salary")
++        )
++        
++        # Total salary should be 50000 + 60000 + 55000 = 165000
++        self.assertEqual(result["total_salary"], 165000)
++        # Cumulative salaries: 50000, 110000, 165000
++        # Total cumulative: 50000 + 110000 + 165000 = 325000
++        self.assertEqual(result["total_cumulative"], 325000)
++
++    def test_aggregate_over_window_with_coalesce(self):
++        """Test aggregating over a window function wrapped in Coalesce."""
++        queryset = Employee.objects.annotate(
++            cumulative_salary=Coalesce(
++                Window(
++                    Sum("salary"),
++                    order_by=F("hire_date").asc()
++                ),
++                0.0
++            )
++        )
++        result = queryset.aggregate(
++            total_salary=Sum("salary"),
++            total_cumulative=Sum("cumulative_salary")
++        )
++        
++        self.assertEqual(result["total_salary"], 165000)
++        self.assertEqual(result["total_cumulative"], 325000)
++
++    def test_aggregate_over_window_with_partition(self):
++        """Test aggregating over a window function with partition."""
++        queryset = Employee.objects.annotate(
++            dept_cumulative=Window(
++                Sum("salary"),
++                partition_by=[F("department")],
++                order_by=F("hire_date").asc()
++            )
++        )
++        result = queryset.aggregate(
++            total_dept_cumulative=Sum("dept_cumulative")
++        )
++        
++        # IT department: 50000, 110000 (50000+60000)
++        # HR department: 55000
++        # Total: 50000 + 110000 + 55000 = 215000
++        self.assertEqual(result["total_dept_cumulative"], 215000)
+diff --git a/tests/expressions_window/tests.py b/tests/expressions_window/tests.py
+index 3a02a36707..cf45dc9c90 100644
+--- a/tests/expressions_window/tests.py
++++ b/tests/expressions_window/tests.py
+@@ -1577,6 +1577,62 @@ class WindowFunctionTests(TestCase):
+         with self.assertRaisesMessage(NotImplementedError, msg):
+             list(qs.exclude(window=1, department="Accounting"))
+ 
++    def test_aggregate_over_window_functions(self):
++        """Test that aggregating over window functions works correctly."""
++        from django.db.models.functions import Coalesce
++        
++        # Test aggregating a Sum over a window function
++        queryset = Employee.objects.annotate(
++            cumulative_salary=Window(
++                Sum("salary"),
++                order_by=F("hire_date").asc()
++            )
++        )
++        result = queryset.aggregate(
++            total_salary=Sum("salary"),
++            total_cumulative=Sum("cumulative_salary")
++        )
++        
++        # Total salary should be sum of all salaries
++        total_salary = Employee.objects.aggregate(Sum("salary"))["salary__sum"]
++        self.assertEqual(result["total_salary"], total_salary)
++        # The cumulative sum should be greater than the total
++        self.assertGreater(result["total_cumulative"], total_salary)
++        
++        # Test with Coalesce
++        queryset = Employee.objects.annotate(
++            cumulative_salary=Coalesce(
++                Window(
++                    Sum("salary"),
++                    order_by=F("hire_date").asc()
++                ),
++                0
++            )
++        )
++        result = queryset.aggregate(
++            total_salary=Sum("salary"),
++            total_cumulative=Sum("cumulative_salary")
++        )
++        
++        self.assertEqual(result["total_salary"], total_salary)
++        self.assertGreater(result["total_cumulative"], total_salary)
++        
++        # Test with partition
++        queryset = Employee.objects.annotate(
++            dept_cumulative=Window(
++                Sum("salary"),
++                partition_by=[F("department")],
++                order_by=F("hire_date").asc()
++            )
++        )
++        result = queryset.aggregate(
++            total_dept_cumulative=Sum("dept_cumulative")
++        )
++        
++        # The result should be a valid number
++        self.assertIsNotNone(result["total_dept_cumulative"])
++        self.assertIsInstance(result["total_dept_cumulative"], int)
++
+ 
+ class WindowUnsupportedTests(TestCase):
+     def test_unsupported_backend(self):

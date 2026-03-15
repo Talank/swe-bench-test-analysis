@@ -1,0 +1,553 @@
+diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
+index fef5532e58..c1dbcb0f78 100644
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -136,16 +136,46 @@ class ServerHandler(simple_server.ServerHandler):
+         if "Content-Length" not in self.headers:
+             self.headers["Connection"] = "close"
+         # Persistent connections require threading server.
+-        elif not isinstance(self.request_handler.server, socketserver.ThreadingMixIn):
++        elif hasattr(self, 'request_handler') and not isinstance(self.request_handler.server, socketserver.ThreadingMixIn):
+             self.headers["Connection"] = "close"
+         # Mark the connection for closing if it's set as such above or if the
+         # application sent the header.
+-        if self.headers.get("Connection") == "close":
++        if self.headers.get("Connection") == "close" and hasattr(self, 'request_handler'):
+             self.request_handler.close_connection = True
+ 
+     def close(self):
+         self.get_stdin().read()
+-        super().close()
++        # Override parent's close to handle cases where request_handler is not set
++        try:
++            if hasattr(self, 'request_handler'):
++                self.request_handler.log_request(
++                    self.status.split(' ',1)[0], self.bytes_sent
++                )
++        finally:
++            # Call grandparent's close directly to skip simple_server.ServerHandler.close
++            from wsgiref.handlers import SimpleHandler
++            SimpleHandler.close(self)
++
++    def write(self, data):
++        """
++        Override write to skip body output for HEAD requests.
++        """
++        if self.environ.get("REQUEST_METHOD") == "HEAD":
++            # For HEAD requests, track the bytes that would have been sent
++            # but don't actually write them
++            if not self.status:
++                raise AssertionError("write() before start_response()")
++            elif not self.headers_sent:
++                # Before the first output, send the stored headers
++                self.bytes_sent = len(data)    # make sure we know content-length
++                self.send_headers()
++            else:
++                self.bytes_sent += len(data)
++            # Skip the actual write for HEAD requests
++            return
++        else:
++            # For non-HEAD requests, use the default behavior
++            super().write(data)
+ 
+ 
+ class WSGIRequestHandler(simple_server.WSGIRequestHandler):
+diff --git a/test_comprehensive_head.py b/test_comprehensive_head.py
+new file mode 100644
+index 0000000000..fc288bc32b
+--- /dev/null
++++ b/test_comprehensive_head.py
+@@ -0,0 +1,139 @@
++#!/usr/bin/env python
++"""Comprehensive test for HEAD request handling."""
++import subprocess
++import time
++import sys
++import os
++import requests
++
++# Create minimal Django project structure
++os.makedirs('/testbed/testproject2', exist_ok=True)
++
++# Create settings
++with open('/testbed/testproject2/settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test-key'
++DEBUG = True
++ALLOWED_HOSTS = ['*']
++ROOT_URLCONF = 'testproject2.urls'
++INSTALLED_APPS = ['django.contrib.contenttypes', 'django.contrib.auth']
++MIDDLEWARE = []
++""")
++
++# Create URLs with various response types
++with open('/testbed/testproject2/urls.py', 'w') as f:
++    f.write("""
++from django.http import HttpResponse, JsonResponse, FileResponse, StreamingHttpResponse
++from django.urls import path
++import os
++
++def html_view(request):
++    return HttpResponse('<html><body>HTML response body</body></html>')
++
++def json_view(request):
++    return JsonResponse({'message': 'JSON response body'})
++
++def file_view(request):
++    # Create a test file
++    with open('/tmp/test_file.txt', 'w') as f:
++        f.write('This is file content')
++    return FileResponse(open('/tmp/test_file.txt', 'rb'))
++
++def streaming_view(request):
++    def generate():
++        yield b'Chunk 1\\n'
++        yield b'Chunk 2\\n'
++        yield b'Chunk 3\\n'
++    return StreamingHttpResponse(generate())
++
++def custom_headers_view(request):
++    response = HttpResponse('Response with custom headers')
++    response['X-Custom-Header'] = 'Custom Value'
++    response['Content-Length'] = '27'
++    return response
++
++urlpatterns = [
++    path('html/', html_view),
++    path('json/', json_view),
++    path('file/', file_view),
++    path('streaming/', streaming_view),
++    path('custom/', custom_headers_view),
++]
++""")
++
++# Create __init__.py
++with open('/testbed/testproject2/__init__.py', 'w') as f:
++    f.write("")
++
++# Start Django server
++env = os.environ.copy()
++env['DJANGO_SETTINGS_MODULE'] = 'testproject2.settings'
++env['PYTHONPATH'] = '/testbed'
++
++server_process = subprocess.Popen(
++    [sys.executable, '-m', 'django', 'runserver', '--noreload', '127.0.0.1:8889'],
++    stdout=subprocess.PIPE,
++    stderr=subprocess.PIPE,
++    env=env,
++    cwd='/testbed'
++)
++
++# Wait for server to start
++time.sleep(3)
++
++try:
++    test_urls = [
++        ('html/', 'HTML View'),
++        ('json/', 'JSON View'),
++        ('file/', 'File View'),
++        ('streaming/', 'Streaming View'),
++        ('custom/', 'Custom Headers View'),
++    ]
++    
++    all_passed = True
++    
++    for url, name in test_urls:
++        print(f"\\nTesting {name}...")
++        
++        # Test HEAD request
++        head_response = requests.head(f'http://127.0.0.1:8889/{url}')
++        
++        # Test GET request for comparison
++        get_response = requests.get(f'http://127.0.0.1:8889/{url}')
++        
++        print(f"  HEAD Status: {head_response.status_code}")
++        print(f"  HEAD Headers: {dict(head_response.headers)}")
++        print(f"  HEAD Body Length: {len(head_response.content)}")
++        print(f"  GET Body Length: {len(get_response.content)}")
++        
++        # Check that HEAD has no body
++        if head_response.content:
++            print(f"  ERROR: HEAD request returned body content!")
++            all_passed = False
++        else:
++            print(f"  SUCCESS: HEAD request returned no body")
++            
++        # Check that headers match (except Date)
++        head_headers = {k: v for k, v in head_response.headers.items() if k.lower() != 'date'}
++        get_headers = {k: v for k, v in get_response.headers.items() if k.lower() != 'date'}
++        
++        # Content-Length might differ for streaming responses
++        if url != 'streaming/':
++            if head_headers != get_headers:
++                print(f"  WARNING: Headers differ between HEAD and GET")
++                print(f"    HEAD: {head_headers}")
++                print(f"    GET: {get_headers}")
++    
++    print("\\n" + "="*50)
++    if all_passed:
++        print("All tests PASSED!")
++    else:
++        print("Some tests FAILED!")
++        
++finally:
++    # Clean up
++    server_process.terminate()
++    server_process.wait()
++    subprocess.run(['rm', '-rf', '/testbed/testproject2'])
++    if os.path.exists('/tmp/test_file.txt'):
++        os.remove('/tmp/test_file.txt')
+diff --git a/test_django_head.py b/test_django_head.py
+new file mode 100644
+index 0000000000..0ea2748ebd
+--- /dev/null
++++ b/test_django_head.py
+@@ -0,0 +1,60 @@
++"""
++Test HEAD requests with Django's test framework
++"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++ROOT_URLCONF = 'test_urls'
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++""")
++
++# Create test URLs
++with open('/testbed/test_urls.py', 'w') as f:
++    f.write("""
++from django.http import HttpResponse
++from django.urls import path
++
++def test_view(request):
++    return HttpResponse('<html><body>Test content</body></html>')
++
++urlpatterns = [
++    path('test/', test_view),
++]
++""")
++
++import django
++django.setup()
++
++from django.test import Client
++
++# Test with Django test client
++client = Client()
++
++print("Testing HEAD request with Django test client...")
++response = client.head('/test/')
++print(f"Status: {response.status_code}")
++print(f"Content: {repr(response.content)}")
++print(f"Content length: {len(response.content)}")
++
++# Compare with GET
++print("\nTesting GET request for comparison...")
++response_get = client.get('/test/')
++print(f"Status: {response_get.status_code}")
++print(f"Content length: {len(response_get.content)}")
++
++# Clean up
++os.remove('/testbed/test_settings.py')
++os.remove('/testbed/test_urls.py')
+diff --git a/test_head_curl.py b/test_head_curl.py
+new file mode 100644
+index 0000000000..05e08fe1e7
+--- /dev/null
++++ b/test_head_curl.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python
++"""Test HEAD request with curl to reproduce the issue."""
++import subprocess
++import time
++import sys
++import os
++import signal
++
++# Create minimal Django project structure
++os.makedirs('/testbed/testproject', exist_ok=True)
++
++# Create settings
++with open('/testbed/testproject/settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test-key'
++DEBUG = True
++ALLOWED_HOSTS = ['*']
++ROOT_URLCONF = 'testproject.urls'
++INSTALLED_APPS = ['django.contrib.contenttypes', 'django.contrib.auth']
++""")
++
++# Create URLs
++with open('/testbed/testproject/urls.py', 'w') as f:
++    f.write("""
++from django.http import HttpResponse
++from django.urls import path
++
++def test_view(request):
++    return HttpResponse('<html><body>Test response body</body></html>')
++
++urlpatterns = [
++    path('', test_view),
++]
++""")
++
++# Create __init__.py
++with open('/testbed/testproject/__init__.py', 'w') as f:
++    f.write("")
++
++# Start Django server
++env = os.environ.copy()
++env['DJANGO_SETTINGS_MODULE'] = 'testproject.settings'
++env['PYTHONPATH'] = '/testbed'
++
++server_process = subprocess.Popen(
++    [sys.executable, '-m', 'django', 'runserver', '--noreload', '127.0.0.1:8888'],
++    stdout=subprocess.PIPE,
++    stderr=subprocess.PIPE,
++    env=env,
++    cwd='/testbed'
++)
++
++# Wait for server to start
++time.sleep(3)
++
++try:
++    print("Testing HEAD request with curl...")
++    result = subprocess.run(
++        ['curl', '-iX', 'HEAD', 'http://127.0.0.1:8888/'],
++        capture_output=True,
++        text=True
++    )
++    
++    print("CURL OUTPUT:")
++    print(result.stdout)
++    
++    if '<html>' in result.stdout or 'body>' in result.stdout:
++        print("\nERROR: HEAD request returned HTML body content!")
++    else:
++        print("\nNo HTML body found in response.")
++        
++    # Also test with -I flag (proper HEAD request)
++    print("\n\nTesting with curl -I (proper HEAD request)...")
++    result2 = subprocess.run(
++        ['curl', '-I', 'http://127.0.0.1:8888/'],
++        capture_output=True,
++        text=True
++    )
++    
++    print("CURL -I OUTPUT:")
++    print(result2.stdout)
++    
++finally:
++    # Clean up
++    server_process.terminate()
++    server_process.wait()
++    subprocess.run(['rm', '-rf', '/testbed/testproject'])
+diff --git a/test_head_request.py b/test_head_request.py
+new file mode 100644
+index 0000000000..d16584280e
+--- /dev/null
++++ b/test_head_request.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python
++"""Test script to reproduce the HEAD request issue."""
++import subprocess
++import time
++import requests
++import sys
++import os
++import signal
++
++# Set up Django environment
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create minimal Django settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test-key'
++DEBUG = True
++ALLOWED_HOSTS = ['*']
++ROOT_URLCONF = 'test_urls'
++INSTALLED_APPS = ['django.contrib.contenttypes', 'django.contrib.auth']
++""")
++
++# Create minimal URL configuration
++with open('/testbed/test_urls.py', 'w') as f:
++    f.write("""
++from django.http import HttpResponse
++from django.urls import path
++
++def test_view(request):
++    return HttpResponse('<html><body>Test response body</body></html>')
++
++urlpatterns = [
++    path('', test_view),
++]
++""")
++
++# Start the Django development server
++server_process = subprocess.Popen(
++    [sys.executable, '-m', 'django', 'runserver', '--noreload', '127.0.0.1:8888'],
++    stdout=subprocess.PIPE,
++    stderr=subprocess.PIPE,
++    cwd='/testbed'
++)
++
++# Wait for server to start
++time.sleep(2)
++
++try:
++    # Test HEAD request
++    print("Testing HEAD request...")
++    response = requests.head('http://127.0.0.1:8888/')
++    
++    print(f"Status Code: {response.status_code}")
++    print(f"Headers: {dict(response.headers)}")
++    print(f"Content Length from headers: {response.headers.get('Content-Length', 'Not set')}")
++    print(f"Actual content received: {repr(response.content)}")
++    print(f"Length of actual content: {len(response.content)}")
++    
++    # For comparison, test GET request
++    print("\nTesting GET request for comparison...")
++    response_get = requests.get('http://127.0.0.1:8888/')
++    print(f"GET response body length: {len(response_get.content)}")
++    
++    # Check if HEAD response has body (it shouldn't)
++    if response.content:
++        print("\nERROR: HEAD request returned a body, which violates RFC 2616!")
++    else:
++        print("\nSUCCESS: HEAD request returned no body, as expected.")
++        
++finally:
++    # Clean up
++    server_process.terminate()
++    server_process.wait()
++    os.remove('/testbed/test_settings.py')
++    os.remove('/testbed/test_urls.py')
+diff --git a/test_head_request_fix.py b/test_head_request_fix.py
+new file mode 100644
+index 0000000000..c8bb6e8899
+--- /dev/null
++++ b/test_head_request_fix.py
+@@ -0,0 +1,108 @@
++"""
++Test to verify HEAD request handling in Django's development server.
++"""
++import os
++import sys
++from io import BytesIO
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++from django.core.servers.basehttp import ServerHandler
++from django.http import HttpResponse
++
++# Set up minimal Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test'
++DEBUG = True
++""")
++
++def test_head_request_no_body():
++    """Test that HEAD requests don't return response body."""
++    
++    # Create a mock WSGI app that returns a response
++    def app(environ, start_response):
++        status = '200 OK'
++        headers = [('Content-Type', 'text/html')]
++        start_response(status, headers)
++        return [b'<html><body>This should not be sent for HEAD</body></html>']
++    
++    # Test HEAD request
++    environ = {
++        'REQUEST_METHOD': 'HEAD',
++        'SERVER_NAME': 'testserver',
++        'SERVER_PORT': '80',
++        'SERVER_PROTOCOL': 'HTTP/1.0',
++        'wsgi.version': (1, 0),
++        'wsgi.url_scheme': 'http',
++        'wsgi.input': BytesIO(b''),
++        'wsgi.errors': sys.stderr,
++        'wsgi.multithread': False,
++        'wsgi.multiprocess': True,
++        'wsgi.run_once': False,
++    }
++    
++    output = BytesIO()
++    
++    # Create handler and run the app
++    handler = ServerHandler(
++        stdin=BytesIO(b''),
++        stdout=output,
++        stderr=sys.stderr,
++        environ=environ
++    )
++    handler.run(app)
++    
++    # Get the response
++    output.seek(0)
++    response = output.read()
++    
++    # Check that headers are present but body is not
++    response_str = response.decode('latin1')
++    print("Response for HEAD request:")
++    print(repr(response_str))
++    
++    assert 'HTTP/1.1 200 OK' in response_str
++    assert 'Content-Type: text/html' in response_str
++    assert '<html>' not in response_str
++    assert 'This should not be sent' not in response_str
++    
++    print("\nSUCCESS: HEAD request correctly omits response body")
++    
++    # Test GET request for comparison
++    environ['REQUEST_METHOD'] = 'GET'
++    output = BytesIO()
++    
++    handler = ServerHandler(
++        stdin=BytesIO(b''),
++        stdout=output,
++        stderr=sys.stderr,
++        environ=environ
++    )
++    handler.run(app)
++    
++    output.seek(0)
++    response = output.read()
++    response_str = response.decode('latin1')
++    
++    print("\nResponse for GET request:")
++    print(repr(response_str))
++    
++    assert 'HTTP/1.1 200 OK' in response_str
++    assert 'Content-Type: text/html' in response_str
++    assert '<html><body>This should not be sent for HEAD</body></html>' in response_str
++    
++    print("\nSUCCESS: GET request correctly includes response body")
++
++if __name__ == '__main__':
++    try:
++        test_head_request_no_body()
++        print("\nAll tests passed!")
++    finally:
++        # Clean up
++        if os.path.exists('/testbed/test_settings.py'):
++            os.remove('/testbed/test_settings.py')

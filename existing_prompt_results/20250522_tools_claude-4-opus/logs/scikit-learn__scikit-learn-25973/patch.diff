@@ -1,0 +1,267 @@
+diff --git a/sklearn/feature_selection/_sequential.py b/sklearn/feature_selection/_sequential.py
+index e983c55de..4705aa112 100644
+--- a/sklearn/feature_selection/_sequential.py
++++ b/sklearn/feature_selection/_sequential.py
+@@ -2,6 +2,7 @@
+ Sequential feature selection
+ """
+ from numbers import Integral, Real
++from collections.abc import Iterable
+ 
+ import numpy as np
+ 
+@@ -259,6 +260,15 @@ class SequentialFeatureSelector(SelectorMixin, MetaEstimatorMixin, BaseEstimator
+         if self.tol is not None and self.tol < 0 and self.direction == "forward":
+             raise ValueError("tol must be positive when doing forward selection")
+ 
++        # Handle the case where cv is an iterable of splits (e.g., a generator)
++        # We need to convert it to a list to avoid exhausting the generator
++        # since _get_best_new_feature_score will call cross_val_score multiple times
++        cv = self.cv
++        if cv is not None and not hasattr(cv, "split") and not isinstance(cv, (int, str)):
++            # cv is an iterable, convert to list to allow reuse
++            if isinstance(cv, Iterable) and not isinstance(cv, list):
++                cv = list(cv)
++
+         cloned_estimator = clone(self.estimator)
+ 
+         # the current mask corresponds to the set of features:
+@@ -275,7 +285,7 @@ class SequentialFeatureSelector(SelectorMixin, MetaEstimatorMixin, BaseEstimator
+         is_auto_select = self.tol is not None and self.n_features_to_select == "auto"
+         for _ in range(n_iterations):
+             new_feature_idx, new_score = self._get_best_new_feature_score(
+-                cloned_estimator, X, y, current_mask
++                cloned_estimator, X, y, current_mask, cv
+             )
+             if is_auto_select and ((new_score - old_score) < self.tol):
+                 break
+@@ -291,7 +301,7 @@ class SequentialFeatureSelector(SelectorMixin, MetaEstimatorMixin, BaseEstimator
+ 
+         return self
+ 
+-    def _get_best_new_feature_score(self, estimator, X, y, current_mask):
++    def _get_best_new_feature_score(self, estimator, X, y, current_mask, cv):
+         # Return the best new feature and its score to add to the current_mask,
+         # i.e. return the best new feature and its score to add (resp. remove)
+         # when doing forward selection (resp. backward selection).
+@@ -309,7 +319,7 @@ class SequentialFeatureSelector(SelectorMixin, MetaEstimatorMixin, BaseEstimator
+                 estimator,
+                 X_new,
+                 y,
+-                cv=self.cv,
++                cv=cv,
+                 scoring=self.scoring,
+                 n_jobs=self.n_jobs,
+             ).mean()
+diff --git a/sklearn/feature_selection/tests/test_sequential.py b/sklearn/feature_selection/tests/test_sequential.py
+index f6451a360..9ee368e31 100644
+--- a/sklearn/feature_selection/tests/test_sequential.py
++++ b/sklearn/feature_selection/tests/test_sequential.py
+@@ -314,3 +314,37 @@ def test_backward_neg_tol():
+ 
+     assert 0 < sfs.get_support().sum() < X.shape[1]
+     assert new_score < initial_score
++
++
++def test_cv_generator_support():
++    """Test that SequentialFeatureSelector works with cv generators/iterables."""
++    from sklearn.model_selection import LeaveOneGroupOut, KFold
++    
++    X, y = make_regression(n_features=10, n_samples=50, random_state=0)
++    
++    # Test with generator from LeaveOneGroupOut
++    groups = np.zeros_like(y, dtype=int)
++    groups[y.size//2:] = 1
++    
++    cv = LeaveOneGroupOut()
++    splits = cv.split(X, y, groups=groups)
++    
++    sfs = SequentialFeatureSelector(
++        LinearRegression(),
++        n_features_to_select=5,
++        cv=splits,
++    )
++    sfs.fit(X, y)
++    assert sfs.n_features_to_select_ == 5
++    
++    # Test with list of splits
++    cv = KFold(n_splits=3)
++    splits_list = list(cv.split(X, y))
++    
++    sfs = SequentialFeatureSelector(
++        LinearRegression(),
++        n_features_to_select=5,
++        cv=splits_list,
++    )
++    sfs.fit(X, y)
++    assert sfs.n_features_to_select_ == 5
+diff --git a/test_cv_iterable.py b/test_cv_iterable.py
+new file mode 100644
+index 000000000..5d83b30bd
+--- /dev/null
++++ b/test_cv_iterable.py
+@@ -0,0 +1,47 @@
++import numpy as np
++from sklearn.datasets import make_classification
++from sklearn.feature_selection import SequentialFeatureSelector
++from sklearn.neighbors import KNeighborsClassifier
++from sklearn.model_selection import LeaveOneGroupOut, KFold
++
++# Test 1: Using generator from LeaveOneGroupOut
++X, y = make_classification(n_samples=100, n_features=20, random_state=42)
++
++groups = np.zeros_like(y, dtype=int)
++groups[y.size//2:] = 1
++
++cv = LeaveOneGroupOut()
++splits = cv.split(X, y, groups=groups)
++
++clf = KNeighborsClassifier(n_neighbors=5)
++
++print("Test 1: Using generator from LeaveOneGroupOut")
++try:
++    seq = SequentialFeatureSelector(clf, n_features_to_select=5, scoring='accuracy', cv=splits)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print("FAILED:", str(e))
++
++# Test 2: Using list of splits
++print("\nTest 2: Using list of splits")
++cv = KFold(n_splits=3)
++splits_list = list(cv.split(X, y))
++
++try:
++    seq = SequentialFeatureSelector(clf, n_features_to_select=5, scoring='accuracy', cv=splits_list)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print("FAILED:", str(e))
++
++# Test 3: Using cv object directly (should work)
++print("\nTest 3: Using cv object directly")
++cv = KFold(n_splits=3)
++
++try:
++    seq = SequentialFeatureSelector(clf, n_features_to_select=5, scoring='accuracy', cv=cv)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print("FAILED:", str(e))
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..f87530be1
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,86 @@
++import numpy as np
++from sklearn.datasets import make_classification, make_regression
++from sklearn.feature_selection import SequentialFeatureSelector
++from sklearn.neighbors import KNeighborsClassifier
++from sklearn.linear_model import LinearRegression
++from sklearn.model_selection import LeaveOneGroupOut, KFold, StratifiedKFold
++from sklearn.model_selection._split import _CVIterableWrapper
++
++# Test various edge cases
++
++# Test 1: Empty generator (should fail gracefully)
++print("Test 1: Empty generator")
++X, y = make_classification(n_samples=100, n_features=20, random_state=42)
++
++def empty_generator():
++    return
++    yield  # This makes it a generator
++
++try:
++    seq = SequentialFeatureSelector(KNeighborsClassifier(), n_features_to_select=5, cv=empty_generator())
++    seq.fit(X, y)
++    print("UNEXPECTED: Should have failed with empty generator")
++except Exception as e:
++    print(f"Expected failure: {type(e).__name__}: {str(e)}")
++
++# Test 2: Single split
++print("\nTest 2: Single split")
++def single_split():
++    yield np.arange(50), np.arange(50, 100)
++
++try:
++    seq = SequentialFeatureSelector(KNeighborsClassifier(), n_features_to_select=5, cv=single_split())
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {str(e)}")
++
++# Test 3: Tuple of arrays (like train_test_split output)
++print("\nTest 3: List of tuples")
++splits = [(np.arange(50), np.arange(50, 100)), 
++          (np.arange(25, 75), np.concatenate([np.arange(25), np.arange(75, 100)]))]
++
++try:
++    seq = SequentialFeatureSelector(KNeighborsClassifier(), n_features_to_select=5, cv=splits)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {str(e)}")
++
++# Test 4: _CVIterableWrapper object
++print("\nTest 4: _CVIterableWrapper object")
++cv_wrapper = _CVIterableWrapper([(np.arange(50), np.arange(50, 100))])
++
++try:
++    seq = SequentialFeatureSelector(KNeighborsClassifier(), n_features_to_select=5, cv=cv_wrapper)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {str(e)}")
++
++# Test 5: Generator function (not generator object)
++print("\nTest 5: Generator function")
++def split_generator():
++    yield np.arange(50), np.arange(50, 100)
++    yield np.arange(25, 75), np.concatenate([np.arange(25), np.arange(75, 100)])
++
++try:
++    seq = SequentialFeatureSelector(KNeighborsClassifier(), n_features_to_select=5, cv=split_generator())
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {str(e)}")
++
++# Test 6: With different directions
++print("\nTest 6: Backward selection with generator")
++X, y = make_regression(n_features=10, n_samples=50, random_state=42)
++cv = KFold(n_splits=3)
++splits = cv.split(X, y)
++
++try:
++    seq = SequentialFeatureSelector(LinearRegression(), n_features_to_select=5, 
++                                  direction='backward', cv=splits)
++    seq.fit(X, y)
++    print("SUCCESS: Selected features:", seq.get_support(indices=True))
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {str(e)}")
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 000000000..cd49b4026
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,19 @@
++from sklearn.datasets import make_classification
++from sklearn.feature_selection import SequentialFeatureSelector
++from sklearn.neighbors import KNeighborsClassifier
++from sklearn.model_selection import LeaveOneGroupOut
++
++import numpy as np
++
++X, y = make_classification()
++
++groups = np.zeros_like(y, dtype=int)
++groups[y.size//2:] = 1
++
++cv = LeaveOneGroupOut()
++splits = cv.split(X, y, groups=groups)
++
++clf = KNeighborsClassifier(n_neighbors=5)
++
++seq = SequentialFeatureSelector(clf, n_features_to_select=5, scoring='accuracy', cv=splits)
++seq.fit(X, y)

@@ -1,0 +1,581 @@
+diff --git a/django/contrib/auth/tokens.py b/django/contrib/auth/tokens.py
+index 93e2d71af2..f433029043 100644
+--- a/django/contrib/auth/tokens.py
++++ b/django/contrib/auth/tokens.py
+@@ -85,6 +85,7 @@ class PasswordResetTokenGenerator:
+            same password is chosen, due to password salting).
+         2. The last_login field will usually be updated very shortly after
+            a password reset.
++        3. The email field will change when the user updates their email address.
+         Failing those things, settings.PASSWORD_RESET_TIMEOUT eventually
+         invalidates the token.
+ 
+@@ -94,7 +95,8 @@ class PasswordResetTokenGenerator:
+         # Truncate microseconds so that tokens are consistent even if the
+         # database doesn't support microseconds.
+         login_timestamp = '' if user.last_login is None else user.last_login.replace(microsecond=0, tzinfo=None)
+-        return str(user.pk) + user.password + str(login_timestamp) + str(timestamp)
++        email = getattr(user, user.get_email_field_name(), '') or ''
++        return str(user.pk) + user.password + str(login_timestamp) + str(timestamp) + email
+ 
+     def _num_seconds(self, dt):
+         return int((dt - datetime(2001, 1, 1)).total_seconds())
+diff --git a/test_custom_email_field.py b/test_custom_email_field.py
+new file mode 100644
+index 0000000000..0a75fbdd42
+--- /dev/null
++++ b/test_custom_email_field.py
+@@ -0,0 +1,77 @@
++"""
++Test with custom user model that has a different email field name.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    PASSWORD_RESET_TIMEOUT=60*60*24*3,  # 3 days
++)
++
++django.setup()
++
++from django.contrib.auth.tokens import default_token_generator
++from django.test import TestCase
++
++
++class CustomUserWithDifferentEmailField:
++    """Mock user with a different email field name."""
++    EMAIL_FIELD = 'email_address'  # Different from default 'email'
++    
++    def __init__(self, pk, password, email_address, last_login=None):
++        self.pk = pk
++        self.password = password
++        self.email_address = email_address
++        self.last_login = last_login
++    
++    def get_email_field_name(self):
++        return self.EMAIL_FIELD
++
++
++class CustomEmailFieldTest(TestCase):
++    def test_token_with_custom_email_field_name(self):
++        """
++        Test that token generation works with custom email field name.
++        """
++        # Create a mock user with custom email field
++        user = CustomUserWithDifferentEmailField(
++            pk=1, 
++            password='hashed_password',
++            email_address='custom@example.com'
++        )
++        
++        # Generate a token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Change the email
++        user.email_address = 'changed@example.com'
++        
++        # Token should be invalid now
++        self.assertFalse(default_token_generator.check_token(user, token))
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.CustomEmailFieldTest"])
++    sys.exit(bool(failures))
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..981b98d5e3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,137 @@
++"""
++Test edge cases for the email-based token invalidation.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        '__main__',  # For our custom model
++    ],
++    SECRET_KEY='test-secret-key',
++    PASSWORD_RESET_TIMEOUT=60*60*24*3,  # 3 days
++)
++
++django.setup()
++
++from django.contrib.auth.models import User, AbstractBaseUser, BaseUserManager
++from django.contrib.auth.tokens import default_token_generator
++from django.test import TestCase
++
++
++class CustomUserManager(BaseUserManager):
++    def create_user(self, username, password=None):
++        user = self.model(username=username)
++        user.set_password(password)
++        user.save(using=self._db)
++        return user
++
++
++class UserWithoutEmail(AbstractBaseUser):
++    """A custom user model without an email field."""
++    username = models.CharField(max_length=150, unique=True)
++    
++    USERNAME_FIELD = 'username'
++    
++    objects = CustomUserManager()
++    
++    class Meta:
++        app_label = '__main__'
++
++
++class EdgeCaseTokenTest(TestCase):
++    def test_token_with_user_without_email_field(self):
++        """
++        Test that token generation works for users without an email field.
++        """
++        # Create tables
++        from django.db import connection
++        from django.db import transaction
++        
++        # Disable foreign key checks for SQLite
++        with transaction.atomic():
++            with connection.cursor() as cursor:
++                cursor.execute("PRAGMA foreign_keys = OFF")
++            
++            with connection.schema_editor() as schema_editor:
++                schema_editor.create_model(UserWithoutEmail)
++        
++        # Create a user without email field
++        user = UserWithoutEmail.objects.create_user(
++            username='testuser',
++            password='testpass123'
++        )
++        
++        # Generate a token - should not fail
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++    
++    def test_token_with_none_email(self):
++        """
++        Test that token generation works when email is None.
++        """
++        user = User.objects.create_user(
++            username='testuser',
++            email=None,
++            password='testpass123'
++        )
++        
++        # Generate a token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Set email to a value
++        user.email = 'test@example.com'
++        user.save()
++        
++        # Token should be invalid now
++        self.assertFalse(default_token_generator.check_token(user, token))
++    
++    def test_token_with_empty_email(self):
++        """
++        Test that token generation works when email is empty string.
++        """
++        user = User.objects.create_user(
++            username='testuser',
++            email='',
++            password='testpass123'
++        )
++        
++        # Generate a token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Set email to a value
++        user.email = 'test@example.com'
++        user.save()
++        
++        # Token should be invalid now
++        self.assertFalse(default_token_generator.check_token(user, token))
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.EdgeCaseTokenTest"])
++    sys.exit(bool(failures))
+diff --git a/test_edge_cases_simple.py b/test_edge_cases_simple.py
+new file mode 100644
+index 0000000000..d1d564a060
+--- /dev/null
++++ b/test_edge_cases_simple.py
+@@ -0,0 +1,111 @@
++"""
++Test edge cases for the email-based token invalidation.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    PASSWORD_RESET_TIMEOUT=60*60*24*3,  # 3 days
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import default_token_generator
++from django.test import TestCase
++
++
++class MockUserWithoutEmail:
++    """Mock user object without email field."""
++    def __init__(self, pk, password, last_login=None):
++        self.pk = pk
++        self.password = password
++        self.last_login = last_login
++    
++    def get_email_field_name(self):
++        return 'email'
++
++
++class EdgeCaseTokenTest(TestCase):
++    def test_token_with_user_without_email_attribute(self):
++        """
++        Test that token generation works for users without an email attribute.
++        """
++        # Create a mock user without email attribute
++        user = MockUserWithoutEmail(pk=1, password='hashed_password')
++        
++        # Generate a token - should not fail
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++    
++    def test_token_with_none_email(self):
++        """
++        Test that token generation works when email is None.
++        """
++        user = User.objects.create_user(
++            username='testuser',
++            email=None,
++            password='testpass123'
++        )
++        
++        # Generate a token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Set email to a value
++        user.email = 'test@example.com'
++        user.save()
++        
++        # Token should be invalid now
++        self.assertFalse(default_token_generator.check_token(user, token))
++    
++    def test_token_with_empty_email(self):
++        """
++        Test that token generation works when email is empty string.
++        """
++        user = User.objects.create_user(
++            username='testuser',
++            email='',
++            password='testpass123'
++        )
++        
++        # Generate a token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Set email to a value
++        user.email = 'test@example.com'
++        user.save()
++        
++        # Token should be invalid now
++        self.assertFalse(default_token_generator.check_token(user, token))
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.EdgeCaseTokenTest"])
++    sys.exit(bool(failures))
+diff --git a/test_email_change_token.py b/test_email_change_token.py
+new file mode 100644
+index 0000000000..9628aba817
+--- /dev/null
++++ b/test_email_change_token.py
+@@ -0,0 +1,69 @@
++"""
++Test to reproduce the password reset token vulnerability when email changes.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    PASSWORD_RESET_TIMEOUT=60*60*24*3,  # 3 days
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import default_token_generator
++from django.test import TestCase
++
++
++class EmailChangeTokenTest(TestCase):
++    def test_token_invalidated_on_email_change(self):
++        """
++        Test that a password reset token becomes invalid when the user's email changes.
++        """
++        # Create a user with initial email
++        user = User.objects.create_user(
++            username='testuser',
++            email='foo@example.com',
++            password='testpass123'
++        )
++        
++        # Generate a password reset token
++        token = default_token_generator.make_token(user)
++        
++        # Verify the token is valid
++        self.assertTrue(default_token_generator.check_token(user, token))
++        
++        # Change the user's email
++        user.email = 'bar@example.com'
++        user.save()
++        
++        # The token should now be invalid (but currently it's not - this is the bug)
++        # This assertion should pass after the fix
++        self.assertFalse(
++            default_token_generator.check_token(user, token),
++            "Token should be invalid after email change"
++        )
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.EmailChangeTokenTest"])
++    sys.exit(bool(failures))
+diff --git a/test_full_scenario.py b/test_full_scenario.py
+new file mode 100644
+index 0000000000..0e1f5c5b5c
+--- /dev/null
++++ b/test_full_scenario.py
+@@ -0,0 +1,87 @@
++"""
++Test the full scenario described in the problem statement.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    PASSWORD_RESET_TIMEOUT=60*60*24*3,  # 3 days
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.contrib.auth.tokens import default_token_generator
++from django.test import TestCase
++
++
++class FullScenarioTest(TestCase):
++    def test_problem_statement_scenario(self):
++        """
++        Test the exact scenario from the problem statement:
++        1. Have account with email address foo@…
++        2. Password reset request for that email (unused)
++        3. foo@… account changes their email address
++        4. Password reset email is used
++        5. The password reset email's token should be rejected at that point
++        """
++        # Step 1: Create account with email foo@example.com
++        user = User.objects.create_user(
++            username='testuser',
++            email='foo@example.com',
++            password='oldpassword123'
++        )
++        
++        # Step 2: Generate password reset token (but don't use it yet)
++        reset_token = default_token_generator.make_token(user)
++        
++        # Verify token is currently valid
++        self.assertTrue(
++            default_token_generator.check_token(user, reset_token),
++            "Token should be valid initially"
++        )
++        
++        # Step 3: User changes their email address
++        user.email = 'bar@example.com'
++        user.save()
++        
++        # Step 4 & 5: Try to use the password reset token
++        # It should be rejected now
++        self.assertFalse(
++            default_token_generator.check_token(user, reset_token),
++            "Token should be invalid after email change"
++        )
++        
++        # Additional verification: a new token should work
++        new_token = default_token_generator.make_token(user)
++        self.assertTrue(
++            default_token_generator.check_token(user, new_token),
++            "New token should be valid"
++        )
++        
++        # And the new token should be different from the old one
++        self.assertNotEqual(reset_token, new_token, "Tokens should be different")
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.FullScenarioTest"])
++    sys.exit(bool(failures))
+diff --git a/tests/auth_tests/test_tokens.py b/tests/auth_tests/test_tokens.py
+index bba435be84..f46562b50f 100644
+--- a/tests/auth_tests/test_tokens.py
++++ b/tests/auth_tests/test_tokens.py
+@@ -110,3 +110,43 @@ class TokenGeneratorTest(TestCase):
+         legacy_token = p_old_generator.make_token(user)
+         self.assertIs(p_old_generator.check_token(user, legacy_token), True)
+         self.assertIs(p_new_generator.check_token(user, legacy_token), True)
++
++    def test_token_invalidated_on_email_change(self):
++        """
++        Changing the user's email address invalidates the password reset token.
++        """
++        user = User.objects.create_user('tokentestuser', 'test2@example.com', 'testpw')
++        p0 = PasswordResetTokenGenerator()
++        tk1 = p0.make_token(user)
++        self.assertIs(p0.check_token(user, tk1), True)
++        
++        # Change the email
++        user.email = 'test3@example.com'
++        user.save()
++        
++        # Token should be invalid after email change
++        self.assertIs(p0.check_token(user, tk1), False)
++
++    def test_token_with_no_email_field(self):
++        """
++        Token generation should work for users without an email field.
++        """
++        # Create a user and remove the email to simulate a user without email field
++        user = User.objects.create_user('tokentestuser', 'test2@example.com', 'testpw')
++        
++        # Mock a user without email field by creating a simple object
++        class MockUser:
++            def __init__(self, pk, password, last_login):
++                self.pk = pk
++                self.password = password
++                self.last_login = last_login
++                
++            def get_email_field_name(self):
++                return 'email'
++        
++        mock_user = MockUser(user.pk, user.password, user.last_login)
++        p0 = PasswordResetTokenGenerator()
++        
++        # Should not raise an exception
++        tk1 = p0.make_token(mock_user)
++        self.assertIs(p0.check_token(mock_user, tk1), True)

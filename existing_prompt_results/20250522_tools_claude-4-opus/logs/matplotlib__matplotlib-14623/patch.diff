@@ -1,0 +1,334 @@
+diff --git a/lib/matplotlib/scale.py b/lib/matplotlib/scale.py
+index b482a664b7..32be8d3a6a 100644
+--- a/lib/matplotlib/scale.py
++++ b/lib/matplotlib/scale.py
+@@ -425,8 +425,19 @@ class LogScale(ScaleBase):
+             minpos = 1e-300  # This value should rarely if ever
+                              # end up with a visible effect.
+ 
+-        return (minpos if vmin <= 0 else vmin,
+-                minpos if vmax <= 0 else vmax)
++        # Handle inverted limits (vmin > vmax)
++        inverted = vmin > vmax
++        if inverted:
++            vmin, vmax = vmax, vmin
++        
++        vmin = minpos if vmin <= 0 else vmin
++        vmax = minpos if vmax <= 0 else vmax
++        
++        # Restore the inversion if needed
++        if inverted:
++            vmin, vmax = vmax, vmin
++            
++        return vmin, vmax
+ 
+ 
+ class FuncScaleLog(LogScale):
+diff --git a/lib/matplotlib/ticker.py b/lib/matplotlib/ticker.py
+index 209a3f92ce..e86aca5674 100644
+--- a/lib/matplotlib/ticker.py
++++ b/lib/matplotlib/ticker.py
+@@ -2379,8 +2379,11 @@ class LogLocator(Locator):
+         if not np.isfinite(vmin) or not np.isfinite(vmax):
+             return 1, 10  # initial range, no data plotted yet
+ 
+-        if vmin > vmax:
++        # Remember if the axis was inverted
++        inverted = vmin > vmax
++        if inverted:
+             vmin, vmax = vmax, vmin
++            
+         if vmax <= 0:
+             cbook._warn_external(
+                 "Data has no positive values, and therefore cannot be "
+@@ -2395,6 +2398,11 @@ class LogLocator(Locator):
+         if vmin == vmax:
+             vmin = _decade_less(vmin, self._base)
+             vmax = _decade_greater(vmax, self._base)
++            
++        # Restore the inversion if needed
++        if inverted:
++            vmin, vmax = vmax, vmin
++            
+         return vmin, vmax
+ 
+ 
+@@ -2624,7 +2632,9 @@ class LogitLocator(Locator):
+         if not np.isfinite(vmin) or not np.isfinite(vmax):
+             return initial_range  # no data plotted yet
+ 
+-        if vmin > vmax:
++        # Remember if the axis was inverted
++        inverted = vmin > vmax
++        if inverted:
+             vmin, vmax = vmax, vmin
+ 
+         # what to do if a window beyond ]0, 1[ is chosen
+@@ -2645,7 +2655,11 @@ class LogitLocator(Locator):
+         if vmax >= 1:
+             vmax = 1 - minpos
+         if vmin == vmax:
+-            return 0.1 * vmin, 1 - 0.1 * vmin
++            vmin, vmax = 0.1 * vmin, 1 - 0.1 * vmin
++            
++        # Restore the inversion if needed
++        if inverted:
++            vmin, vmax = vmax, vmin
+ 
+         return vmin, vmax
+ 
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..0b8bd137ab
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,22 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++# Reproduce the issue
++y = np.linspace(1000e2, 1, 100)
++x = np.exp(-np.linspace(0, 1, y.size))
++
++for yscale in ('linear', 'log'):
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale(yscale)
++    ax.set_ylim(y.max(), y.min())
++    
++    # Check if the axis is inverted
++    ylim = ax.get_ylim()
++    print(f"\n{yscale} scale:")
++    print(f"  y.max() = {y.max()}, y.min() = {y.min()}")
++    print(f"  ylim = {ylim}")
++    print(f"  Is inverted? {ylim[0] > ylim[1]}")
++    
++    plt.savefig(f'test_{yscale}.png')
++    plt.close()
+diff --git a/test_linear.png b/test_linear.png
+new file mode 100644
+index 0000000000..76f2deee55
+Binary files /dev/null and b/test_linear.png differ
+diff --git a/test_log.png b/test_log.png
+new file mode 100644
+index 0000000000..715b95f849
+Binary files /dev/null and b/test_log.png differ
+diff --git a/test_log_inversion.py b/test_log_inversion.py
+new file mode 100644
+index 0000000000..448c5b9843
+--- /dev/null
++++ b/test_log_inversion.py
+@@ -0,0 +1,78 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import matplotlib
++
++print(f"Testing matplotlib version: {matplotlib.__version__}")
++
++# Test 1: Basic inversion test
++print("\nTest 1: Basic inversion with set_ylim")
++y = np.linspace(1000e2, 1, 100)
++x = np.exp(-np.linspace(0, 1, y.size))
++
++for yscale in ('linear', 'log'):
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale(yscale)
++    ax.set_ylim(y.max(), y.min())
++    
++    ylim = ax.get_ylim()
++    print(f"  {yscale} scale: ylim = {ylim}, inverted = {ylim[0] > ylim[1]}")
++    assert ylim[0] > ylim[1], f"Failed: {yscale} scale should be inverted"
++    plt.close()
++
++# Test 2: Inversion with xlim for log scale
++print("\nTest 2: Inversion with set_xlim")
++for xscale in ('linear', 'log'):
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_xscale(xscale)
++    ax.set_xlim(x.max(), x.min())
++    
++    xlim = ax.get_xlim()
++    print(f"  {xscale} scale: xlim = {xlim}, inverted = {xlim[0] > xlim[1]}")
++    assert xlim[0] > xlim[1], f"Failed: {xscale} scale should be inverted"
++    plt.close()
++
++# Test 3: Test with negative values handling
++print("\nTest 3: Handling negative values with inversion")
++y_with_neg = np.linspace(100, -10, 100)
++x_pos = np.linspace(1, 100, 100)
++
++fig, ax = plt.subplots()
++ax.plot(x_pos, y_with_neg)
++ax.set_xscale('log')
++ax.set_xlim(100, 1)  # Inverted
++
++xlim = ax.get_xlim()
++print(f"  log x-scale with inversion: xlim = {xlim}, inverted = {xlim[0] > xlim[1]}")
++assert xlim[0] > xlim[1], "Failed: log x-scale should remain inverted"
++plt.close()
++
++# Test 4: Test with very small positive values
++print("\nTest 4: Very small positive values with inversion")
++y_small = np.logspace(-10, 2, 100)
++x = np.linspace(0, 1, 100)
++
++fig, ax = plt.subplots()
++ax.plot(x, y_small)
++ax.set_yscale('log')
++ax.set_ylim(y_small.max(), y_small.min())
++
++ylim = ax.get_ylim()
++print(f"  log scale with small values: ylim = {ylim}, inverted = {ylim[0] > ylim[1]}")
++assert ylim[0] > ylim[1], "Failed: log scale with small values should be inverted"
++plt.close()
++
++# Test 5: Test that normal (non-inverted) limits still work
++print("\nTest 5: Normal (non-inverted) limits")
++fig, ax = plt.subplots()
++ax.plot(x_pos, x_pos)
++ax.set_yscale('log')
++ax.set_ylim(1, 100)
++
++ylim = ax.get_ylim()
++print(f"  log scale normal: ylim = {ylim}, inverted = {ylim[0] > ylim[1]}")
++assert ylim[0] < ylim[1], "Failed: normal log scale should not be inverted"
++plt.close()
++
++print("\nAll tests passed!")
+diff --git a/test_logit_inversion.py b/test_logit_inversion.py
+new file mode 100644
+index 0000000000..fe14cd52fd
+--- /dev/null
++++ b/test_logit_inversion.py
+@@ -0,0 +1,20 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++# Test logit scale inversion
++print("Testing logit scale inversion")
++
++x = np.linspace(0, 1, 100)
++y = np.linspace(0.01, 0.99, 100)
++
++fig, ax = plt.subplots()
++ax.plot(x, y)
++ax.set_yscale('logit')
++ax.set_ylim(0.99, 0.01)  # Inverted
++
++ylim = ax.get_ylim()
++print(f"  logit scale: ylim = {ylim}, inverted = {ylim[0] > ylim[1]}")
++assert ylim[0] > ylim[1], "Failed: logit scale should be inverted"
++
++plt.close()
++print("Logit scale inversion test passed!")
+diff --git a/test_scale_inversion.py b/test_scale_inversion.py
+new file mode 100644
+index 0000000000..9b9b90e72d
+--- /dev/null
++++ b/test_scale_inversion.py
+@@ -0,0 +1,103 @@
++"""
++Test for scale inversion bug fix.
++This test should be added to the matplotlib test suite.
++"""
++import numpy as np
++import matplotlib.pyplot as plt
++import pytest
++
++
++def test_log_scale_inversion():
++    """Test that log scale respects inverted axis limits."""
++    # Test data
++    y = np.linspace(1000e2, 1, 100)
++    x = np.exp(-np.linspace(0, 1, y.size))
++    
++    # Test y-axis inversion
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale('log')
++    ax.set_ylim(y.max(), y.min())
++    
++    ylim = ax.get_ylim()
++    assert ylim[0] > ylim[1], "Log scale y-axis should be inverted when set_ylim(max, min)"
++    plt.close()
++    
++    # Test x-axis inversion
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_xscale('log')
++    ax.set_xlim(x.max(), x.min())
++    
++    xlim = ax.get_xlim()
++    assert xlim[0] > xlim[1], "Log scale x-axis should be inverted when set_xlim(max, min)"
++    plt.close()
++
++
++def test_logit_scale_inversion():
++    """Test that logit scale respects inverted axis limits."""
++    x = np.linspace(0, 1, 100)
++    y = np.linspace(0.01, 0.99, 100)
++    
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale('logit')
++    ax.set_ylim(0.99, 0.01)
++    
++    ylim = ax.get_ylim()
++    assert ylim[0] > ylim[1], "Logit scale should be inverted when set_ylim(max, min)"
++    plt.close()
++
++
++def test_symlog_scale_inversion():
++    """Test that symlog scale respects inverted axis limits."""
++    x = np.linspace(-100, 100, 100)
++    y = np.linspace(-1000, 1000, 100)
++    
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale('symlog')
++    ax.set_ylim(1000, -1000)
++    
++    ylim = ax.get_ylim()
++    assert ylim[0] > ylim[1], "Symlog scale should be inverted when set_ylim(max, min)"
++    plt.close()
++
++
++def test_scale_inversion_with_small_positive_values():
++    """Test scale inversion with very small positive values."""
++    y = np.logspace(-10, 2, 100)
++    x = np.linspace(0, 1, 100)
++    
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale('log')
++    ax.set_ylim(y.max(), y.min())
++    
++    ylim = ax.get_ylim()
++    assert ylim[0] > ylim[1], "Log scale with small values should be inverted"
++    plt.close()
++
++
++def test_normal_scale_limits_still_work():
++    """Test that normal (non-inverted) limits still work correctly."""
++    x = np.linspace(1, 100, 100)
++    y = x
++    
++    fig, ax = plt.subplots()
++    ax.plot(x, y)
++    ax.set_yscale('log')
++    ax.set_ylim(1, 100)
++    
++    ylim = ax.get_ylim()
++    assert ylim[0] < ylim[1], "Normal log scale should not be inverted"
++    plt.close()
++
++
++if __name__ == "__main__":
++    test_log_scale_inversion()
++    test_logit_scale_inversion()
++    test_symlog_scale_inversion()
++    test_scale_inversion_with_small_positive_values()
++    test_normal_scale_limits_still_work()
++    print("All tests passed!")

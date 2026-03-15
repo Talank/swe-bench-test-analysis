@@ -1,0 +1,587 @@
+diff --git a/test_comprehensive_unsigned.py b/test_comprehensive_unsigned.py
+new file mode 100644
+index 00000000..76779be1
+--- /dev/null
++++ b/test_comprehensive_unsigned.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""Comprehensive test for unsigned/signed byte handling"""
++
++import numpy as np
++import xarray as xr
++from xarray import Variable
++from xarray.coding.variables import UnsignedIntegerCoder
++
++def test_all_cases():
++    """Test all combinations of signed/unsigned with true/false/invalid values"""
++    coder = UnsignedIntegerCoder()
++    
++    # Test 1: signed integer with _Unsigned=true (existing functionality)
++    print("Test 1: signed int8 with _Unsigned=true")
++    data = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "true"})
++    decoded = coder.decode(var, name="test1")
++    expected = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.uint8
++    print("✓ Passed")
++    
++    # Test 2: unsigned integer with _Unsigned=false (new functionality)
++    print("\nTest 2: unsigned uint8 with _Unsigned=false")
++    data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(var, name="test2")
++    expected = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int8
++    print("✓ Passed")
++    
++    # Test 3: signed integer with _Unsigned=false (should not change)
++    print("\nTest 3: signed int8 with _Unsigned=false")
++    data = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(var, name="test3")
++    assert np.array_equal(decoded.data, data)
++    assert decoded.data.dtype == np.int8
++    print("✓ Passed (no change expected)")
++    
++    # Test 4: unsigned integer with _Unsigned=true (should not change)
++    print("\nTest 4: unsigned uint8 with _Unsigned=true")
++    data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "true"})
++    decoded = coder.decode(var, name="test4")
++    assert np.array_equal(decoded.data, data)
++    assert decoded.data.dtype == np.uint8
++    print("✓ Passed (no change expected)")
++    
++    # Test 5: Different integer sizes
++    print("\nTest 5: Different integer sizes")
++    # int16 -> uint16
++    data16 = np.array([-32768, -1, 0, 1, 32767], dtype=np.int16)
++    var16 = Variable(("x",), data16, attrs={"_Unsigned": "true"})
++    decoded16 = coder.decode(var16, name="test5a")
++    expected16 = np.array([32768, 65535, 0, 1, 32767], dtype=np.uint16)
++    assert np.array_equal(decoded16.data, expected16)
++    assert decoded16.data.dtype == np.uint16
++    print("✓ int16 -> uint16 passed")
++    
++    # uint16 -> int16
++    data16u = np.array([32768, 65535, 0, 1, 32767], dtype=np.uint16)
++    var16u = Variable(("x",), data16u, attrs={"_Unsigned": "false"})
++    decoded16u = coder.decode(var16u, name="test5b")
++    expected16u = np.array([-32768, -1, 0, 1, 32767], dtype=np.int16)
++    assert np.array_equal(decoded16u.data, expected16u)
++    assert decoded16u.data.dtype == np.int16
++    print("✓ uint16 -> int16 passed")
++    
++    # Test 6: _FillValue handling
++    print("\nTest 6: _FillValue handling")
++    data = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "true", "_FillValue": -128})
++    decoded = coder.decode(var, name="test6")
++    assert decoded.attrs["_FillValue"] == 128  # Should be converted to unsigned
++    print("✓ _FillValue converted from signed to unsigned")
++    
++    data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "false", "_FillValue": 255})
++    decoded = coder.decode(var, name="test6b")
++    assert decoded.attrs["_FillValue"] == -1  # Should be converted to signed
++    print("✓ _FillValue converted from unsigned to signed")
++    
++    # Test 7: Non-integer types should trigger warning
++    print("\nTest 7: Non-integer types")
++    import warnings
++    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
++    var = Variable(("x",), data, attrs={"_Unsigned": "true"})
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        decoded = coder.decode(var, name="test7")
++        assert len(w) == 1
++        assert "has _Unsigned attribute but is not of integer type" in str(w[0].message)
++    print("✓ Warning issued for non-integer type")
++
++if __name__ == "__main__":
++    test_all_cases()
++    print("\n✅ All tests passed!")
+diff --git a/test_opendap_signed_bytes.py b/test_opendap_signed_bytes.py
+new file mode 100644
+index 00000000..4585662b
+--- /dev/null
++++ b/test_opendap_signed_bytes.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python
++"""Test script to reproduce the OPeNDAP signed bytes issue"""
++
++import numpy as np
++import xarray as xr
++from xarray import Variable
++from xarray.coding.variables import UnsignedIntegerCoder
++
++def test_unsigned_false_conversion():
++    """Test that _Unsigned=False converts unsigned bytes to signed bytes"""
++    # Create a variable with unsigned byte data
++    data = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "false"})
++    
++    # Apply the decoder
++    coder = UnsignedIntegerCoder()
++    decoded = coder.decode(var, name="test")
++    
++    # Expected: unsigned values should be interpreted as signed
++    # 128 (unsigned) -> -128 (signed)
++    # 255 (unsigned) -> -1 (signed)
++    expected = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    
++    print(f"Original data: {data}")
++    print(f"Original dtype: {data.dtype}")
++    print(f"Decoded data: {decoded.data}")
++    print(f"Decoded dtype: {decoded.data.dtype}")
++    print(f"Expected data: {expected}")
++    
++    assert np.array_equal(decoded.data, expected), f"Expected {expected}, got {decoded.data}"
++    assert decoded.data.dtype == np.int8, f"Expected dtype int8, got {decoded.data.dtype}"
++
++def test_unsigned_true_conversion():
++    """Test that _Unsigned=True converts signed bytes to unsigned bytes (existing functionality)"""
++    # Create a variable with signed byte data
++    data = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "true"})
++    
++    # Apply the decoder
++    coder = UnsignedIntegerCoder()
++    decoded = coder.decode(var, name="test")
++    
++    # Expected: signed values should be interpreted as unsigned
++    expected = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    
++    print(f"\nOriginal data: {data}")
++    print(f"Original dtype: {data.dtype}")
++    print(f"Decoded data: {decoded.data}")
++    print(f"Decoded dtype: {decoded.data.dtype}")
++    print(f"Expected data: {expected}")
++    
++    assert np.array_equal(decoded.data, expected), f"Expected {expected}, got {decoded.data}"
++    assert decoded.data.dtype == np.uint8, f"Expected dtype uint8, got {decoded.data.dtype}"
++
++if __name__ == "__main__":
++    print("Testing existing functionality (_Unsigned=True)...")
++    test_unsigned_true_conversion()
++    print("\nTesting new functionality (_Unsigned=False)...")
++    try:
++        test_unsigned_false_conversion()
++        print("\nAll tests passed!")
++    except AssertionError as e:
++        print(f"\nTest failed: {e}")
++        print("This is expected - the feature is not implemented yet.")
+diff --git a/test_opendap_simulation.py b/test_opendap_simulation.py
+new file mode 100644
+index 00000000..063f14c0
+--- /dev/null
++++ b/test_opendap_simulation.py
+@@ -0,0 +1,98 @@
++#!/usr/bin/env python
++"""Test that simulates the OPeNDAP issue with pydap"""
++
++import numpy as np
++import xarray as xr
++from xarray import Dataset, Variable
++
++def simulate_pydap_behavior():
++    """
++    Simulate what pydap returns from OPeNDAP:
++    - OPeNDAP only knows unsigned bytes
++    - When the original data has signed bytes, OPeNDAP adds _Unsigned=false
++    - pydap returns the data as uint8 (since that's what OPeNDAP sends)
++    - xarray should convert it back to int8 when _Unsigned=false
++    """
++    
++    # Original signed data: [-128, -1, 0, 1, 2, nan, 127]
++    # OPeNDAP converts to unsigned: [128, 255, 0, 1, 2, nan, 127]
++    # pydap returns this as uint8 with _Unsigned=false
++    
++    # Simulate the coordinate variable from the problem statement
++    # Note: using float32 for the coordinate since that's what's shown in the example
++    coord_data = np.array([128.0, 255.0, 0.0, 1.0, 2.0, np.nan, 127.0], dtype=np.float32)
++    
++    # But let's also test with actual uint8 data
++    uint8_data = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    
++    # Create dataset similar to what pydap would return
++    ds_pydap = Dataset({
++        "test": Variable(("test",), coord_data, attrs={"_Unsigned": "false"})
++    })
++    
++    # Also test with integer data
++    ds_uint8 = Dataset({
++        "test_int": Variable(("x",), uint8_data, attrs={"_Unsigned": "false"})
++    })
++    
++    print("Simulating pydap behavior:")
++    print(f"Float coordinate data (as in problem): {coord_data}")
++    print(f"Uint8 data: {uint8_data}")
++    
++    # Decode with CF conventions
++    decoded_float = xr.decode_cf(ds_pydap)
++    decoded_uint8 = xr.decode_cf(ds_uint8)
++    
++    print(f"\nDecoded float data: {decoded_float.test.data}")
++    print(f"Decoded uint8 data: {decoded_uint8.test_int.data}")
++    print(f"Decoded uint8 dtype: {decoded_uint8.test_int.data.dtype}")
++    
++    # For uint8 data, we expect conversion to int8
++    expected_int8 = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    assert np.array_equal(decoded_uint8.test_int.data, expected_int8)
++    assert decoded_uint8.test_int.data.dtype == np.int8
++    
++    # For float data, _Unsigned should be ignored (with a warning)
++    # The values should remain unchanged
++    assert np.allclose(decoded_float.test.data[~np.isnan(decoded_float.test.data)], 
++                      coord_data[~np.isnan(coord_data)])
++
++def test_netcdf4_vs_pydap_behavior():
++    """
++    Test that shows the difference between netcdf4 and pydap engines
++    and verifies our fix makes pydap behave correctly
++    """
++    
++    # What netcdf4 returns (it handles _Unsigned=false internally)
++    # So it returns signed values directly
++    netcdf4_values = np.array([-128.0, -1.0, 0.0, 1.0, 2.0, np.nan, 127.0], dtype=np.float32)
++    
++    # What pydap returns (unsigned values because OPeNDAP uses unsigned)
++    pydap_values = np.array([128.0, 255.0, 0.0, 1.0, 2.0, np.nan, 127.0], dtype=np.float32)
++    
++    # Create datasets
++    ds_netcdf4 = Dataset({
++        "test": Variable(("test",), netcdf4_values)
++    })
++    
++    ds_pydap = Dataset({
++        "test": Variable(("test",), pydap_values, attrs={"_Unsigned": "false"})
++    })
++    
++    print("\nComparing netcdf4 vs pydap behavior:")
++    print(f"netcdf4 returns: {netcdf4_values}")
++    print(f"pydap returns: {pydap_values} with _Unsigned=false")
++    
++    # With our fix, both should give the same result after decoding
++    decoded_pydap = xr.decode_cf(ds_pydap)
++    
++    print(f"After decoding pydap data: {decoded_pydap.test.data}")
++    
++    # Note: For float data, _Unsigned is ignored, so values remain unchanged
++    # The real fix applies to integer data types
++
++if __name__ == "__main__":
++    simulate_pydap_behavior()
++    print("\n" + "="*50 + "\n")
++    test_netcdf4_vs_pydap_behavior()
++    print("\n✅ Tests completed!")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 00000000..e1485ace
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++"""Test that reproduces and verifies the fix for the problem statement"""
++
++import numpy as np
++import xarray as xr
++from xarray import Dataset, Variable
++
++def test_opendap_pydap_simulation():
++    """
++    Simulate the exact issue from the problem statement:
++    - netCDF4 engine correctly returns negative values
++    - pydap engine should also return negative values after our fix
++    """
++    
++    # Simulate what pydap returns from the OPeNDAP server
++    # The server has signed bytes but OPeNDAP only supports unsigned
++    # So it sends unsigned bytes with _Unsigned=false
++    
++    # Create a dataset similar to what pydap would return
++    # Using float32 coordinates as shown in the problem statement
++    coord_values = np.array([128.0, 255.0, 0.0, 1.0, 2.0, np.nan, 127.0], dtype=np.float32)
++    
++    # But the real issue is with integer data
++    # Let's create a test with actual byte data
++    byte_values = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    
++    ds_pydap = Dataset({
++        "test": Variable(("test",), coord_values, attrs={"_Unsigned": "false"}),
++        "byte_var": Variable(("x",), byte_values, attrs={"_Unsigned": "false"})
++    })
++    
++    print("Before decoding (what pydap returns):")
++    print(f"test (float32): {ds_pydap.test.values}")
++    print(f"byte_var (uint8): {ds_pydap.byte_var.values}")
++    
++    # Apply CF decoding
++    decoded = xr.decode_cf(ds_pydap)
++    
++    print("\nAfter decoding with our fix:")
++    print(f"test (float32): {decoded.test.values}")
++    print(f"byte_var (now int8): {decoded.byte_var.values}")
++    
++    # Expected values for byte_var after decoding
++    expected_signed = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    
++    # Verify the fix works
++    assert np.array_equal(decoded.byte_var.values, expected_signed)
++    assert decoded.byte_var.dtype == np.int8
++    
++    # Float values should remain unchanged (with a warning)
++    assert np.allclose(decoded.test.values[~np.isnan(decoded.test.values)], 
++                      coord_values[~np.isnan(coord_values)])
++    
++    print("\n✅ Fix verified! pydap engine will now correctly handle _Unsigned=false")
++    print("   Unsigned bytes are converted to signed bytes as expected.")
++    
++    # Show what the values should look like after the fix
++    print("\nExpected output comparison:")
++    print("netCDF4 engine: [-128.0, -1.0, 0.0, 1.0, 2.0, nan, 127.0]")
++    print("pydap engine (with fix): [-128, -1, 0, 1, 2, 127] for integer data")
++
++if __name__ == "__main__":
++    test_opendap_pydap_simulation()
+diff --git a/test_unsigned_false_proper.py b/test_unsigned_false_proper.py
+new file mode 100644
+index 00000000..58e8dc7d
+--- /dev/null
++++ b/test_unsigned_false_proper.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python
++"""Test that verifies _Unsigned=false works with actual unsigned data"""
++
++import numpy as np
++import xarray as xr
++from xarray import Dataset, Variable
++from xarray.coding.variables import UnsignedIntegerCoder
++
++def test_unsigned_false_with_uint8_data():
++    """Test that uint8 data with _Unsigned=false is properly converted to int8"""
++    # Create a dataset with uint8 data that should be interpreted as signed
++    # This simulates what pydap returns from OPeNDAP
++    data = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    ds = Dataset({
++        "test": Variable(("x",), data, attrs={"_Unsigned": "false"})
++    })
++    
++    # Apply CF decoding
++    decoded = xr.decode_cf(ds)
++    
++    # Expected: unsigned values should be interpreted as signed
++    # 128 (unsigned) -> -128 (signed)
++    # 255 (unsigned) -> -1 (signed)
++    expected = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    
++    print(f"Original data: {data}")
++    print(f"Original dtype: {data.dtype}")
++    print(f"Decoded data: {decoded.test.data}")
++    print(f"Decoded dtype: {decoded.test.data.dtype}")
++    print(f"Expected data: {expected}")
++    
++    assert np.array_equal(decoded.test.data, expected), f"Expected {expected}, got {decoded.test.data}"
++    assert decoded.test.data.dtype == np.int8, f"Expected dtype int8, got {decoded.test.data.dtype}"
++    
++    # Also test that the _Unsigned attribute is removed after decoding
++    assert "_Unsigned" not in decoded.test.attrs
++
++def test_integration_with_conventions():
++    """Test that the fix integrates properly with xarray's conventions module"""
++    import xarray.conventions
++    
++    # Create a variable with uint8 data and _Unsigned=false
++    data = np.array([128, 255, 0, 1, 2, 127], dtype=np.uint8)
++    var = Variable(("x",), data, attrs={"_Unsigned": "false", "units": "m"})
++    
++    # Decode using conventions
++    decoded = xarray.conventions.decode_cf_variable("test", var)
++    
++    # Expected: unsigned values should be interpreted as signed
++    expected = np.array([-128, -1, 0, 1, 2, 127], dtype=np.int8)
++    
++    print(f"\nIntegration test:")
++    print(f"Original data: {data}")
++    print(f"Decoded data: {decoded.data}")
++    print(f"Expected data: {expected}")
++    
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int8
++    assert "units" in decoded.attrs  # Other attributes should be preserved
++    assert decoded.attrs["units"] == "m"
++
++if __name__ == "__main__":
++    print("Testing _Unsigned=false with uint8 data...")
++    test_unsigned_false_with_uint8_data()
++    print("✓ Test passed!")
++    
++    print("\nTesting integration with conventions module...")
++    test_integration_with_conventions()
++    print("✓ Integration test passed!")
++    
++    print("\n✅ All tests passed!")
+diff --git a/test_unsigned_false_unit.py b/test_unsigned_false_unit.py
+new file mode 100644
+index 00000000..f460ed79
+--- /dev/null
++++ b/test_unsigned_false_unit.py
+@@ -0,0 +1,86 @@
++"""Unit test to add to xarray's test suite for _Unsigned=false handling"""
++
++import numpy as np
++import pytest
++from xarray import Variable
++from xarray.coding.variables import UnsignedIntegerCoder
++
++
++def test_unsigned_integer_coder_unsigned_false():
++    """Test that UnsignedIntegerCoder correctly handles _Unsigned=false for unsigned data"""
++    coder = UnsignedIntegerCoder()
++    
++    # Test uint8 -> int8 conversion
++    original_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    encoded = Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    expected = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int8
++    assert "_Unsigned" not in decoded.attrs
++    
++    # Test uint16 -> int16 conversion  
++    original_data = np.array([32768, 65535, 0, 1, 32767], dtype=np.uint16)
++    encoded = Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    expected = np.array([-32768, -1, 0, 1, 32767], dtype=np.int16)
++    
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int16
++    
++    # Test with _FillValue
++    original_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    encoded = Variable(("x",), original_data, attrs={"_Unsigned": "false", "_FillValue": 255})
++    decoded = coder.decode(encoded)
++    
++    assert decoded.attrs["_FillValue"] == -1  # 255 unsigned -> -1 signed
++    
++    # Test that signed data with _Unsigned=false is not modified
++    original_data = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    encoded = Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    
++    assert np.array_equal(decoded.data, original_data)
++    assert decoded.data.dtype == np.int8
++
++
++def test_unsigned_integer_coder_roundtrip():
++    """Test roundtrip encoding/decoding for both _Unsigned=true and _Unsigned=false"""
++    coder = UnsignedIntegerCoder()
++    
++    # Test case 1: unsigned data that needs to be stored as signed (for netCDF3)
++    unsigned_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    variable = Variable(("x",), unsigned_data, encoding={"_Unsigned": "true"})
++    
++    # Encode: uint8 -> int8 (with _Unsigned=true in attrs)
++    encoded = coder.encode(variable)
++    assert encoded.data.dtype == np.int8
++    assert np.array_equal(encoded.data, np.array([-128, -1, 0, 1, 127], dtype=np.int8))
++    assert encoded.attrs.get("_Unsigned") == "true"
++    
++    # Decode: int8 + _Unsigned=true -> uint8
++    decoded = coder.decode(encoded)
++    assert np.array_equal(decoded.data, unsigned_data)
++    assert decoded.data.dtype == np.uint8
++    
++    # Test case 2: OPeNDAP case - unsigned data marked as signed
++    unsigned_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    variable = Variable(("x",), unsigned_data, attrs={"_Unsigned": "false"})
++    
++    # This simulates data from OPeNDAP via pydap
++    # Decode: uint8 + _Unsigned=false -> int8
++    decoded = coder.decode(variable)
++    expected_signed = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    assert np.array_equal(decoded.data, expected_signed)
++    assert decoded.data.dtype == np.int8
++
++
++if __name__ == "__main__":
++    test_unsigned_integer_coder_unsigned_false()
++    print("✓ test_unsigned_integer_coder_unsigned_false passed")
++    
++    test_unsigned_integer_coder_roundtrip()
++    print("✓ test_unsigned_integer_coder_roundtrip passed")
++    
++    print("\n✅ All unit tests passed!")
+diff --git a/xarray/coding/variables.py b/xarray/coding/variables.py
+index b035ff82..938752c4 100644
+--- a/xarray/coding/variables.py
++++ b/xarray/coding/variables.py
+@@ -316,6 +316,14 @@ class UnsignedIntegerCoder(VariableCoder):
+                     if "_FillValue" in attrs:
+                         new_fill = unsigned_dtype.type(attrs["_FillValue"])
+                         attrs["_FillValue"] = new_fill
++            elif data.dtype.kind == "u":
++                if unsigned == "false":
++                    signed_dtype = np.dtype("i%s" % data.dtype.itemsize)
++                    transform = partial(np.asarray, dtype=signed_dtype)
++                    data = lazy_elemwise_func(data, transform, signed_dtype)
++                    if "_FillValue" in attrs:
++                        new_fill = signed_dtype.type(attrs["_FillValue"])
++                        attrs["_FillValue"] = new_fill
+             else:
+                 warnings.warn(
+                     "variable %r has _Unsigned attribute but is not "
+diff --git a/xarray/tests/test_coding.py b/xarray/tests/test_coding.py
+index e0df7782..0861457c 100644
+--- a/xarray/tests/test_coding.py
++++ b/xarray/tests/test_coding.py
+@@ -117,3 +117,46 @@ def test_scaling_offset_as_list(scale_factor, add_offset):
+     encoded = coder.encode(original)
+     roundtripped = coder.decode(encoded)
+     assert_allclose(original, roundtripped)
++
++
++def test_unsigned_integer_coder_unsigned_false():
++    """Test that UnsignedIntegerCoder correctly handles _Unsigned=false for unsigned data.
++    
++    This is needed for OPeNDAP compatibility where unsigned bytes are marked with
++    _Unsigned=false to indicate they should be interpreted as signed bytes.
++    """
++    coder = variables.UnsignedIntegerCoder()
++    
++    # Test uint8 -> int8 conversion
++    original_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    encoded = xr.Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    expected = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int8
++    assert "_Unsigned" not in decoded.attrs
++    
++    # Test uint16 -> int16 conversion  
++    original_data = np.array([32768, 65535, 0, 1, 32767], dtype=np.uint16)
++    encoded = xr.Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    expected = np.array([-32768, -1, 0, 1, 32767], dtype=np.int16)
++    
++    assert np.array_equal(decoded.data, expected)
++    assert decoded.data.dtype == np.int16
++    
++    # Test with _FillValue
++    original_data = np.array([128, 255, 0, 1, 127], dtype=np.uint8)
++    encoded = xr.Variable(("x",), original_data, attrs={"_Unsigned": "false", "_FillValue": 255})
++    decoded = coder.decode(encoded)
++    
++    assert decoded.attrs["_FillValue"] == -1  # 255 unsigned -> -1 signed
++    
++    # Test that signed data with _Unsigned=false is not modified
++    original_data = np.array([-128, -1, 0, 1, 127], dtype=np.int8)
++    encoded = xr.Variable(("x",), original_data, attrs={"_Unsigned": "false"})
++    decoded = coder.decode(encoded)
++    
++    assert np.array_equal(decoded.data, original_data)
++    assert decoded.data.dtype == np.int8

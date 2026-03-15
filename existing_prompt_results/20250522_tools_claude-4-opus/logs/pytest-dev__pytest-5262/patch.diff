@@ -1,0 +1,645 @@
+diff --git a/src/_pytest/capture.py b/src/_pytest/capture.py
+index 25eab7fdf..f5808cf75 100644
+--- a/src/_pytest/capture.py
++++ b/src/_pytest/capture.py
+@@ -447,6 +447,13 @@ class EncodedFile(object):
+         """Ensure that file.name is a string."""
+         return repr(self.buffer)
+ 
++    @property
++    def mode(self):
++        """Ensure that mode does not include 'b' since EncodedFile accepts text."""
++        mode = getattr(self.buffer, "mode", "w")
++        # Remove 'b' from mode string to indicate text mode
++        return mode.replace("b", "")
++
+     def __getattr__(self, name):
+         return getattr(object.__getattribute__(self, "buffer"), name)
+ 
+diff --git a/test_capsys_investigation.py b/test_capsys_investigation.py
+new file mode 100644
+index 000000000..5d158ce1a
+--- /dev/null
++++ b/test_capsys_investigation.py
+@@ -0,0 +1,34 @@
++"""Investigate capsys fixture."""
++import pytest
++import sys
++
++
++def test_capsys_investigation(capsys):
++    """Investigate the capsys fixture to understand how it works."""
++    # Check what sys.stdout is when using capsys
++    print(f"sys.stdout type: {type(sys.stdout)}")
++    print(f"sys.stdout class: {sys.stdout.__class__}")
++    
++    # Check if it has a mode attribute
++    if hasattr(sys.stdout, 'mode'):
++        print(f"sys.stdout.mode: {sys.stdout.mode}")
++        print(f"'b' in mode: {'b' in sys.stdout.mode}")
++    
++    # Check the underlying buffer
++    if hasattr(sys.stdout, 'buffer'):
++        print(f"sys.stdout.buffer: {sys.stdout.buffer}")
++        if hasattr(sys.stdout.buffer, 'mode'):
++            print(f"sys.stdout.buffer.mode: {sys.stdout.buffer.mode}")
++    
++    # Let's also check sys.stderr
++    print(f"\nsys.stderr type: {type(sys.stderr)}")
++    if hasattr(sys.stderr, 'mode'):
++        print(f"sys.stderr.mode: {sys.stderr.mode}")
++    
++    # Get the captured output
++    captured = capsys.readouterr()
++    print("Captured output:", captured.out)
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v", "-s"])
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..2e71f57aa
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,95 @@
++"""Test edge cases for the EncodedFile mode fix."""
++from _pytest.capture import EncodedFile
++from io import BytesIO, StringIO
++
++
++def test_buffer_without_mode():
++    """Test EncodedFile when buffer has no mode attribute."""
++    buffer = BytesIO()
++    # Don't set mode attribute
++    delattr(buffer, 'mode') if hasattr(buffer, 'mode') else None
++    
++    encoded_file = EncodedFile(buffer, "utf-8")
++    # Should default to 'w'
++    assert encoded_file.mode == "w"
++
++
++def test_text_mode_unchanged():
++    """Test that text modes remain unchanged."""
++    buffer = BytesIO()
++    buffer.mode = "w+"  # No 'b' in mode
++    
++    encoded_file = EncodedFile(buffer, "utf-8")
++    assert encoded_file.mode == "w+"
++
++
++def test_mode_with_b_in_middle():
++    """Test mode strings with 'b' in various positions."""
++    test_cases = [
++        ("rb", "r"),
++        ("r+b", "r+"),
++        ("w+b", "w+"),
++        ("wb+", "w+"),
++        ("ab+", "a+"),
++        ("a+b", "a+"),
++    ]
++    
++    for buffer_mode, expected_mode in test_cases:
++        buffer = BytesIO()
++        buffer.mode = buffer_mode
++        encoded_file = EncodedFile(buffer, "utf-8")
++        assert encoded_file.mode == expected_mode
++
++
++def test_multiple_b_in_mode():
++    """Test mode with multiple 'b' characters (edge case)."""
++    buffer = BytesIO()
++    buffer.mode = "rb+b"  # Weird but possible
++    
++    encoded_file = EncodedFile(buffer, "utf-8")
++    assert encoded_file.mode == "r+"
++    assert "b" not in encoded_file.mode
++
++
++def test_empty_mode():
++    """Test empty mode string."""
++    buffer = BytesIO()
++    buffer.mode = ""
++    
++    encoded_file = EncodedFile(buffer, "utf-8")
++    assert encoded_file.mode == ""
++
++
++def test_mode_property_read_only():
++    """Test that mode property cannot be set."""
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    try:
++        encoded_file.mode = "w"
++        assert False, "Should not be able to set mode"
++    except AttributeError:
++        pass  # Expected
++
++
++if __name__ == "__main__":
++    test_buffer_without_mode()
++    print("✓ Buffer without mode test passed")
++    
++    test_text_mode_unchanged()
++    print("✓ Text mode unchanged test passed")
++    
++    test_mode_with_b_in_middle()
++    print("✓ Mode with 'b' in various positions test passed")
++    
++    test_multiple_b_in_mode()
++    print("✓ Multiple 'b' in mode test passed")
++    
++    test_empty_mode()
++    print("✓ Empty mode test passed")
++    
++    test_mode_property_read_only()
++    print("✓ Mode property read-only test passed")
++    
++    print("\nAll edge case tests passed!")
+diff --git a/test_encodedfile_mode.py b/test_encodedfile_mode.py
+new file mode 100644
+index 000000000..f3a78d92b
+--- /dev/null
++++ b/test_encodedfile_mode.py
+@@ -0,0 +1,67 @@
++import pytest
++import sys
++from _pytest.capture import EncodedFile
++from io import BytesIO
++
++
++def test_encodedfile_mode_without_binary():
++    """Test that EncodedFile.mode does not include 'b' (binary) flag."""
++    # Create a BytesIO buffer with binary mode
++    buffer = BytesIO()
++    buffer.mode = "rb+"  # This is what the underlying buffer might have
++    
++    # Create an EncodedFile
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # The mode should not include 'b' since EncodedFile accepts text, not bytes
++    assert hasattr(encoded_file, "mode")
++    assert "b" not in encoded_file.mode
++    
++
++def test_encodedfile_write_text():
++    """Test that EncodedFile accepts text strings."""
++    buffer = BytesIO()
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Should accept text
++    encoded_file.write("Hello, world!")
++    assert buffer.getvalue() == b"Hello, world!"
++
++
++def test_encodedfile_write_bytes_raises():
++    """Test that EncodedFile raises TypeError when writing bytes."""
++    buffer = BytesIO()
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Should raise TypeError for bytes
++    if sys.version_info[0] >= 3:
++        with pytest.raises(TypeError, match="write\\(\\) argument must be str"):
++            encoded_file.write(b"Hello, world!")
++
++
++def test_youtube_dl_scenario():
++    """Simulate the youtube-dl scenario where it checks mode for 'b'."""
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Simulate what youtube-dl does
++    if 'b' in encoded_file.mode:
++        # youtube-dl would try to write bytes
++        try:
++            encoded_file.write(b"[generic] example: Requesting header\n")
++            assert False, "Should have raised TypeError"
++        except TypeError as e:
++            assert "write() argument must be str" in str(e)
++    else:
++        # youtube-dl would write text
++        encoded_file.write("[generic] example: Requesting header\n")
++        assert buffer.getvalue() == b"[generic] example: Requesting header\n"
++
++
++if __name__ == "__main__":
++    test_encodedfile_mode_without_binary()
++    test_encodedfile_write_text()
++    test_encodedfile_write_bytes_raises()
++    test_youtube_dl_scenario()
++    print("All tests passed!")
+diff --git a/test_encodedfile_mode_fix.py b/test_encodedfile_mode_fix.py
+new file mode 100644
+index 000000000..c2768258f
+--- /dev/null
++++ b/test_encodedfile_mode_fix.py
+@@ -0,0 +1,101 @@
++"""Test for the EncodedFile mode fix."""
++import pytest
++from _pytest.capture import EncodedFile
++from io import BytesIO
++import sys
++
++
++def test_encodedfile_mode_without_binary():
++    """Test that EncodedFile.mode does not include 'b' (binary) flag."""
++    # Create a BytesIO buffer with binary mode
++    buffer = BytesIO()
++    buffer.mode = "rb+"  # This is what the underlying buffer might have
++    
++    # Create an EncodedFile
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # The mode should not include 'b' since EncodedFile accepts text, not bytes
++    assert hasattr(encoded_file, "mode")
++    assert "b" not in encoded_file.mode
++    assert encoded_file.mode == "r+"
++
++
++def test_encodedfile_mode_various_modes():
++    """Test that EncodedFile.mode removes 'b' from various mode strings."""
++    test_cases = [
++        ("rb", "r"),
++        ("wb", "w"),
++        ("ab", "a"),
++        ("rb+", "r+"),
++        ("wb+", "w+"),
++        ("ab+", "a+"),
++        ("r+b", "r+"),
++        ("w+b", "w+"),
++        ("a+b", "a+"),
++    ]
++    
++    for buffer_mode, expected_mode in test_cases:
++        buffer = BytesIO()
++        buffer.mode = buffer_mode
++        encoded_file = EncodedFile(buffer, "utf-8")
++        assert encoded_file.mode == expected_mode, f"Expected {expected_mode} for buffer mode {buffer_mode}, got {encoded_file.mode}"
++
++
++def test_encodedfile_mode_no_mode_attribute():
++    """Test that EncodedFile.mode works when buffer has no mode attribute."""
++    buffer = BytesIO()
++    # Don't set mode attribute
++    encoded_file = EncodedFile(buffer, "utf-8")
++    assert encoded_file.mode == "w"  # Default mode
++
++
++def test_encodedfile_write_text():
++    """Test that EncodedFile accepts text strings."""
++    buffer = BytesIO()
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Should accept text
++    encoded_file.write("Hello, world!")
++    assert buffer.getvalue() == b"Hello, world!"
++
++
++def test_encodedfile_write_bytes_raises():
++    """Test that EncodedFile raises TypeError when writing bytes."""
++    buffer = BytesIO()
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Should raise TypeError for bytes
++    if sys.version_info[0] >= 3:
++        with pytest.raises(TypeError, match="write\\(\\) argument must be str"):
++            encoded_file.write(b"Hello, world!")
++
++
++def test_youtube_dl_scenario():
++    """Simulate the youtube-dl scenario where it checks mode for 'b'."""
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Simulate what youtube-dl does
++    if 'b' in encoded_file.mode:
++        # youtube-dl would try to write bytes
++        pytest.fail("EncodedFile.mode should not contain 'b'")
++    else:
++        # youtube-dl would write text
++        encoded_file.write("[generic] example: Requesting header\n")
++        assert buffer.getvalue() == b"[generic] example: Requesting header\n"
++
++
++def test_encodedfile_other_attributes_delegated():
++    """Test that other attributes are still delegated to the buffer."""
++    buffer = BytesIO()
++    buffer.custom_attr = "test"
++    encoded_file = EncodedFile(buffer, "utf-8")
++    
++    # Other attributes should still be delegated
++    assert encoded_file.custom_attr == "test"
++    assert encoded_file.closed == buffer.closed
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/test_fd_capture_youtube_dl.py b/test_fd_capture_youtube_dl.py
+new file mode 100644
+index 000000000..84c295929
+--- /dev/null
++++ b/test_fd_capture_youtube_dl.py
+@@ -0,0 +1,57 @@
++"""Test FD capture with youtube-dl scenario."""
++import pytest
++import sys
++import os
++
++
++def test_fd_capture_youtube_dl_scenario(capfd):
++    """Test that FD capture works with youtube-dl's mode checking."""
++    # When using capfd, sys.stdout should be an EncodedFile
++    # Let's check what youtube-dl would see
++    
++    # Simulate youtube-dl's behavior
++    def youtube_dl_write(out, message):
++        # youtube-dl checks if 'b' is in mode to decide whether to write bytes or str
++        if hasattr(out, 'mode') and 'b' in out.mode:
++            # Write bytes
++            out.write(message.encode('utf-8'))
++        else:
++            # Write str
++            out.write(message)
++    
++    # Write to stdout like youtube-dl would
++    message = "[generic] example: Requesting header\n"
++    youtube_dl_write(sys.stdout, message)
++    
++    # Capture the output
++    captured = capfd.readouterr()
++    assert message in captured.out
++
++
++def test_sys_capture_youtube_dl_scenario(capsys):
++    """Test that sys capture also works (for comparison)."""
++    # When using capsys, sys.stdout should be a CaptureIO
++    # Let's check what youtube-dl would see
++    
++    # Simulate youtube-dl's behavior
++    def youtube_dl_write(out, message):
++        # youtube-dl checks if 'b' is in mode to decide whether to write bytes or str
++        if hasattr(out, 'mode') and 'b' in out.mode:
++            # Write bytes
++            out.write(message.encode('utf-8'))
++        else:
++            # Write str
++            out.write(message)
++    
++    # Write to stdout like youtube-dl would
++    message = "[generic] example: Requesting header\n"
++    youtube_dl_write(sys.stdout, message)
++    
++    # Capture the output
++    captured = capsys.readouterr()
++    assert message in captured.out
++
++
++if __name__ == "__main__":
++    # Run with FD capture by default
++    pytest.main([__file__, "-v", "--capture=fd"])
+diff --git a/test_final_integration.py b/test_final_integration.py
+new file mode 100644
+index 000000000..cfa4dc294
+--- /dev/null
++++ b/test_final_integration.py
+@@ -0,0 +1,50 @@
++"""Final integration test simulating the exact problem statement scenario."""
++import subprocess
++import sys
++import os
++
++
++# Create the test.py file from the problem statement
++test_content = """import youtube_dl
++def test_foo():
++    youtube_dl.YoutubeDL().extract_info('http://example.com/')
++"""
++
++with open("test_youtube_dl_integration.py", "w") as f:
++    f.write(test_content)
++
++# First, let's check if youtube-dl is available
++try:
++    import youtube_dl
++    print("youtube-dl is available, running integration test...")
++    
++    # Run pytest on the test file
++    result = subprocess.run(
++        [sys.executable, "-m", "pytest", "test_youtube_dl_integration.py", "-v"],
++        capture_output=True,
++        text=True
++    )
++    
++    print("Return code:", result.returncode)
++    print("\nSTDOUT:")
++    print(result.stdout)
++    print("\nSTDERR:")
++    print(result.stderr)
++    
++    # Check if the test passed (should pass with our fix)
++    if result.returncode == 0:
++        print("\n✓ SUCCESS: The youtube-dl integration test passed!")
++    else:
++        # Check if it's the specific error from the problem statement
++        if "TypeError: write() argument must be str, not bytes" in result.stdout:
++            print("\n✗ FAILURE: Got the original error - our fix didn't work!")
++        else:
++            print("\n✗ FAILURE: Test failed for a different reason")
++    
++except ImportError:
++    print("youtube-dl is not installed, skipping integration test")
++    print("To test with youtube-dl, run: pip install youtube-dl")
++
++# Clean up
++if os.path.exists("test_youtube_dl_integration.py"):
++    os.remove("test_youtube_dl_integration.py")
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 000000000..53e2028bf
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,24 @@
++"""Test case from the original issue."""
++import pytest
++
++
++def test_foo(capsys):
++    """Test that simulates the youtube-dl issue."""
++    # Simulate what youtube-dl does
++    out = capsys.readouterr().out  # Get the captured output object
++    
++    # This is what youtube-dl checks
++    if hasattr(out, 'mode'):
++        # The mode should not contain 'b'
++        assert 'b' not in out.mode
++    
++    # Write some output like youtube-dl would
++    print("[generic] example: Requesting header")
++    
++    # Verify the output was captured
++    captured = capsys.readouterr()
++    assert "[generic] example: Requesting header" in captured.out
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/test_youtube_dl_repro.py b/test_youtube_dl_repro.py
+new file mode 100644
+index 000000000..c232d5814
+--- /dev/null
++++ b/test_youtube_dl_repro.py
+@@ -0,0 +1,94 @@
++"""Direct reproduction of the youtube-dl issue."""
++import sys
++from _pytest.capture import FDCaptureBinary, EncodedFile
++from tempfile import TemporaryFile
++import os
++
++
++def test_youtube_dl_exact_repro():
++    """Exact reproduction of the youtube-dl issue without our fix."""
++    from io import BytesIO
++    
++    # Create a buffer with binary mode like pytest would
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    
++    # Create an EncodedFile-like object without our fix
++    class OldEncodedFile:
++        def __init__(self, buffer, encoding):
++            self.buffer = buffer
++            self.encoding = encoding
++        
++        def write(self, obj):
++            if isinstance(obj, str):
++                obj = obj.encode(self.encoding, "replace")
++            elif sys.version_info[0] >= 3:
++                raise TypeError(
++                    "write() argument must be str, not {}".format(type(obj).__name__)
++                )
++            self.buffer.write(obj)
++        
++        def __getattr__(self, name):
++            # This is the old behavior - delegating mode to buffer
++            return getattr(self.buffer, name)
++    
++    tmpfile = OldEncodedFile(buffer, "utf-8")
++    
++    # Simulate youtube-dl's code from utils.py
++    def write_string(s, out=None, encoding=None):
++        """Simplified version of youtube-dl's write_string function."""
++        if 'b' in out.mode:
++            # youtube-dl would encode to bytes
++            byt = s.encode(encoding or 'utf-8')
++            out.write(byt)
++        else:
++            out.write(s)
++    
++    # This should raise TypeError without our fix
++    try:
++        write_string("[generic] example: Requesting header\n", out=tmpfile)
++        print("ERROR: Should have raised TypeError!")
++        assert False
++    except TypeError as e:
++        assert "write() argument must be str" in str(e)
++        print("Got expected TypeError:", e)
++
++
++def test_youtube_dl_with_fix():
++    """Test that our fix prevents the youtube-dl issue."""
++    # Set up FD capture like pytest does
++    from io import BytesIO
++    
++    # Create a buffer with binary mode
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    
++    # Create an EncodedFile
++    tmpfile = EncodedFile(buffer, "utf-8")
++    
++    # With our fix, mode should not contain 'b'
++    assert 'b' not in tmpfile.mode
++    
++    # Simulate youtube-dl's code
++    def write_string(s, out=None, encoding=None):
++        """Simplified version of youtube-dl's write_string function."""
++        if hasattr(out, 'mode') and 'b' in out.mode:
++            # youtube-dl would encode to bytes
++            byt = s.encode(encoding or 'utf-8')
++            out.write(byt)
++        else:
++            out.write(s)
++    
++    # This should work with our fix
++    write_string("[generic] example: Requesting header\n", out=tmpfile)
++    
++    # Verify the content was written
++    assert buffer.getvalue() == b"[generic] example: Requesting header\n"
++    print("Success! youtube-dl scenario works with our fix")
++
++
++if __name__ == "__main__":
++    print("Testing exact youtube-dl reproduction...")
++    test_youtube_dl_exact_repro()
++    print("\nTesting with our fix...")
++    test_youtube_dl_with_fix()
+diff --git a/testing/test_capture.py b/testing/test_capture.py
+index 5d80eb63d..0e585114b 100644
+--- a/testing/test_capture.py
++++ b/testing/test_capture.py
+@@ -1461,6 +1461,52 @@ def test_pickling_and_unpickling_encoded_file():
+     pickle.loads(ef_as_str)
+ 
+ 
++def test_encoded_file_mode_no_binary():
++    """Test that EncodedFile.mode does not include 'b' (binary) flag.
++    
++    This is important for tools like youtube-dl that check the mode
++    to determine whether to write bytes or text.
++    """
++    from io import BytesIO
++    
++    # Create a buffer with binary mode
++    buffer = BytesIO()
++    buffer.mode = "rb+"
++    
++    # Create an EncodedFile
++    encoded_file = capture.EncodedFile(buffer, "utf-8")
++    
++    # The mode should not include 'b' since EncodedFile accepts text, not bytes
++    assert hasattr(encoded_file, "mode")
++    assert "b" not in encoded_file.mode
++    assert encoded_file.mode == "r+"
++    
++    # Test various mode strings
++    test_cases = [
++        ("rb", "r"),
++        ("wb", "w"),
++        ("ab", "a"),
++        ("rb+", "r+"),
++        ("wb+", "w+"),
++        ("ab+", "a+"),
++        ("r+b", "r+"),
++        ("w+b", "w+"),
++        ("a+b", "a+"),
++    ]
++    
++    for buffer_mode, expected_mode in test_cases:
++        buffer = BytesIO()
++        buffer.mode = buffer_mode
++        encoded_file = capture.EncodedFile(buffer, "utf-8")
++        assert encoded_file.mode == expected_mode
++    
++    # Test buffer without mode attribute
++    buffer = BytesIO()
++    delattr(buffer, 'mode') if hasattr(buffer, 'mode') else None
++    encoded_file = capture.EncodedFile(buffer, "utf-8")
++    assert encoded_file.mode == "w"  # Default mode
++
++
+ def test_global_capture_with_live_logging(testdir):
+     # Issue 3819
+     # capture should work with live cli logging

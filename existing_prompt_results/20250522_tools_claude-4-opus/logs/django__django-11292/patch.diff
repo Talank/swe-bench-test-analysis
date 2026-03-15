@@ -1,0 +1,517 @@
+diff --git a/django/core/management/base.py b/django/core/management/base.py
+index 0c3a981290..dc646cb781 100644
+--- a/django/core/management/base.py
++++ b/django/core/management/base.py
+@@ -95,7 +95,7 @@ class DjangoHelpFormatter(HelpFormatter):
+     """
+     show_last = {
+         '--version', '--verbosity', '--traceback', '--settings', '--pythonpath',
+-        '--no-color', '--force-color',
++        '--no-color', '--force-color', '--skip-checks',
+     }
+ 
+     def _reordered_actions(self, actions):
+@@ -286,6 +286,10 @@ class BaseCommand:
+             '--force-color', action='store_true',
+             help='Force colorization of the command output.',
+         )
++        parser.add_argument(
++            '--skip-checks', action='store_true',
++            help='Skip system checks.',
++        )
+         self.add_arguments(parser)
+         return parser
+ 
+diff --git a/fix_remaining_tests.py b/fix_remaining_tests.py
+new file mode 100644
+index 0000000000..704d8ad13a
+--- /dev/null
++++ b/fix_remaining_tests.py
+@@ -0,0 +1,36 @@
++#!/usr/bin/env python
++"""Fix remaining test cases"""
++import re
++
++# Read the test file
++with open('/testbed/tests/admin_scripts/tests.py', 'r', encoding='utf-8') as f:
++    lines = f.readlines()
++
++# Track if we're in a multi-line string that needs fixing
++in_noargs_output = False
++fixed_lines = []
++
++for i, line in enumerate(lines):
++    # Check if this is the start of a noargs_command output assertion
++    if '"EXECUTE: noargs_command options=[' in line and 'skip_checks' not in line:
++        in_noargs_output = True
++    
++    # If we're in a noargs output and find the traceback line, add skip_checks
++    if in_noargs_output and "('traceback', False)" in line and 'skip_checks' not in line:
++        line = line.replace("('settings', None), ('traceback', False)", 
++                          "('settings', None), ('skip_checks', False), ('traceback', False)")
++        line = line.replace("('settings', 'alternate_settings'), ('traceback', False)", 
++                          "('settings', 'alternate_settings'), ('skip_checks', False), ('traceback', False)")
++        in_noargs_output = False
++    
++    # Reset flag if we reach the end of the assertion
++    if in_noargs_output and '")' in line:
++        in_noargs_output = False
++    
++    fixed_lines.append(line)
++
++# Write back
++with open('/testbed/tests/admin_scripts/tests.py', 'w', encoding='utf-8') as f:
++    f.writelines(fixed_lines)
++
++print("Fixed remaining test cases")
+diff --git a/fix_tests.py b/fix_tests.py
+new file mode 100644
+index 0000000000..6255327d99
+--- /dev/null
++++ b/fix_tests.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python
++"""Fix the admin_scripts tests to include skip_checks option"""
++import re
++
++# Read the test file
++with open('/testbed/tests/admin_scripts/tests.py', 'r', encoding='utf-8') as f:
++    content = f.read()
++
++# Pattern to match the options list that needs updating
++# This pattern matches options lists that have settings, traceback but no skip_checks
++pattern = r"(\('settings', [^)]+\), )(\('traceback', [^)]+\))"
++replacement = r"\1('skip_checks', False), \2"
++
++# Apply the replacement
++new_content = re.sub(pattern, replacement, content)
++
++# Write back
++with open('/testbed/tests/admin_scripts/tests.py', 'w', encoding='utf-8') as f:
++    f.write(new_content)
++
++print("Updated admin_scripts/tests.py")
++
++# Count how many replacements were made
++original_count = len(re.findall(pattern, content))
++print(f"Made {original_count} replacements")
+diff --git a/test_output.py b/test_output.py
+new file mode 100644
+index 0000000000..ea6c5df4a3
+--- /dev/null
++++ b/test_output.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++import os
++import sys
++import subprocess
++
++# Run the app_command and see what it outputs
++result = subprocess.run(
++    [sys.executable, '/testbed/tests/admin_scripts/test_project/manage.py', 'app_command', 'auth'],
++    stdout=subprocess.PIPE,
++    stderr=subprocess.PIPE,
++    universal_newlines=True,
++    cwd='/testbed/tests/admin_scripts'
++)
++
++print("STDOUT:")
++print(result.stdout)
++print("\nSTDERR:")
++print(result.stderr)
+diff --git a/test_skip_checks.py b/test_skip_checks.py
+new file mode 100644
+index 0000000000..bd4268b79b
+--- /dev/null
++++ b/test_skip_checks.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python
++"""Test script to verify skip_checks functionality"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management import execute_from_command_line
++from django.core.management.base import BaseCommand
++from django.core import checks
++
++# Configure Django settings
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ]
++)
++django.setup()
++
++# Create a test command that has system checks
++class TestCommand(BaseCommand):
++    help = 'Test command for skip_checks'
++    
++    def add_arguments(self, parser):
++        parser.add_argument('--test-arg', help='Test argument')
++    
++    def handle(self, *args, **options):
++        self.stdout.write("Command executed successfully!")
++        self.stdout.write(f"skip_checks option value: {options.get('skip_checks', 'NOT FOUND')}")
++        return "Done"
++
++# Test 1: Try to use --skip-checks from command line (should fail before fix)
++print("Test 1: Testing --skip-checks from command line")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('manage.py', 'test_command')
++    # Check if --skip-checks is in the parser
++    help_text = parser.format_help()
++    if '--skip-checks' in help_text:
++        print("PASS: --skip-checks is available in command line options")
++    else:
++        print("FAIL: --skip-checks is NOT available in command line options")
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test 2: Check if skip_checks works programmatically (should work)
++print("\nTest 2: Testing skip_checks programmatically")
++try:
++    cmd = TestCommand()
++    # Provide all required options
++    output = cmd.execute(
++        skip_checks=True,
++        force_color=False,
++        no_color=False,
++        verbosity=1,
++        settings=None,
++        pythonpath=None,
++        traceback=False,
++        test_arg=None
++    )
++    print("PASS: skip_checks works programmatically")
++except Exception as e:
++    print(f"FAIL Error: {e}")
++
++# Test 3: Check base_stealth_options
++print("\nTest 3: Checking base_stealth_options")
++print(f"base_stealth_options: {BaseCommand.base_stealth_options}")
++if 'skip_checks' in BaseCommand.base_stealth_options:
++    print("PASS: skip_checks is in base_stealth_options")
++else:
++    print("FAIL: skip_checks is NOT in base_stealth_options")
+diff --git a/test_skip_checks_comprehensive.py b/test_skip_checks_comprehensive.py
+new file mode 100644
+index 0000000000..2c717e74e6
+--- /dev/null
++++ b/test_skip_checks_comprehensive.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++"""Comprehensive test for skip_checks functionality"""
++import os
++import sys
++import subprocess
++from django.conf import settings
++from django.core.management.base import BaseCommand, CommandError
++from django.core import checks
++import django
++
++# Configure Django settings
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ]
++)
++django.setup()
++
++# Create a test command that will fail system checks
++class FailingCheckCommand(BaseCommand):
++    help = 'Test command that fails system checks'
++    
++    def handle(self, *args, **options):
++        self.stdout.write("Command executed successfully!")
++        return "Done"
++
++# Override _run_checks to simulate a failing check
++original_run_checks = FailingCheckCommand._run_checks
++
++def failing_run_checks(self, **kwargs):
++    # Return a critical error
++    return [
++        checks.Error(
++            'Test system check failure',
++            id='test.E001',
++        )
++    ]
++
++FailingCheckCommand._run_checks = failing_run_checks
++
++# Test 1: Command should fail without --skip-checks
++print("Test 1: Running command without --skip-checks (should fail)")
++try:
++    cmd = FailingCheckCommand()
++    cmd.execute(
++        force_color=False,
++        no_color=False,
++        verbosity=1,
++        settings=None,
++        pythonpath=None,
++        traceback=False,
++    )
++    print("FAIL: Command should have failed due to system check error")
++except CommandError as e:
++    print("PASS: Command failed as expected with system check error")
++    print(f"  Error message: {str(e)[:50]}...")
++
++# Test 2: Command should succeed with skip_checks=True (programmatically)
++print("\nTest 2: Running command with skip_checks=True programmatically")
++try:
++    cmd = FailingCheckCommand()
++    output = cmd.execute(
++        skip_checks=True,
++        force_color=False,
++        no_color=False,
++        verbosity=1,
++        settings=None,
++        pythonpath=None,
++        traceback=False,
++    )
++    print("PASS: Command succeeded with skip_checks=True")
++except Exception as e:
++    print(f"FAIL: Command failed even with skip_checks=True: {e}")
++
++# Test 3: Test argument parser accepts --skip-checks
++print("\nTest 3: Testing argument parser with --skip-checks")
++cmd = FailingCheckCommand()
++parser = cmd.create_parser('manage.py', 'test_command')
++try:
++    args = parser.parse_args(['--skip-checks'])
++    if hasattr(args, 'skip_checks') and args.skip_checks:
++        print("PASS: Parser correctly parsed --skip-checks")
++    else:
++        print("FAIL: Parser did not correctly parse --skip-checks")
++except Exception as e:
++    print(f"FAIL: Parser failed to parse --skip-checks: {e}")
++
++# Test 4: Test that --skip-checks appears in help
++print("\nTest 4: Testing --skip-checks appears in help")
++help_text = parser.format_help()
++if '--skip-checks' in help_text and 'Skip system checks' in help_text:
++    print("PASS: --skip-checks appears in help with correct description")
++else:
++    print("FAIL: --skip-checks does not appear correctly in help")
++
++print("\nAll tests completed!")
+diff --git a/test_skip_checks_final.py b/test_skip_checks_final.py
+new file mode 100644
+index 0000000000..f25fea570c
+--- /dev/null
++++ b/test_skip_checks_final.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python
++"""Final test to verify skip_checks functionality works correctly"""
++import os
++import sys
++import subprocess
++import tempfile
++
++# Create a test Django project
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create a minimal Django project structure
++os.makedirs('testproject/management/commands', exist_ok=True)
++
++# Create __init__.py files
++for path in ['testproject/__init__.py', 'testproject/management/__init__.py', 'testproject/management/commands/__init__.py']:
++    open(path, 'w').close()
++
++# Create a test command that will fail system checks
++with open('testproject/management/commands/testcmd.py', 'w') as f:
++    f.write('''
++from django.core.management.base import BaseCommand
++from django.core import checks
++
++class Command(BaseCommand):
++    help = 'Test command'
++    
++    def add_arguments(self, parser):
++        parser.add_argument('--custom-arg', help='Custom argument')
++    
++    def handle(self, *args, **options):
++        self.stdout.write(f"Command executed! skip_checks={options.get('skip_checks', 'NOT SET')}")
++        self.stdout.write(f"custom_arg={options.get('custom_arg', 'NOT SET')}")
++
++# Override _run_checks to simulate a failing check
++def failing_run_checks(self, **kwargs):
++    return [
++        checks.Error(
++            'Simulated system check failure',
++            id='test.E001',
++        )
++    ]
++
++Command._run_checks = failing_run_checks
++''')
++
++# Create a manage.py script
++with open('manage.py', 'w') as f:
++    f.write('''#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == "__main__":
++    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
++''')
++
++# Create minimal settings
++with open('settings.py', 'w') as f:
++    f.write('''
++SECRET_KEY = 'test-key'
++DEBUG = True
++INSTALLED_APPS = ['testproject']
++''')
++
++os.chmod('manage.py', 0o755)
++
++print("=== Test 1: Run command without --skip-checks (should fail) ===")
++result = subprocess.run([sys.executable, 'manage.py', 'testcmd'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
++print(f"Exit code: {result.returncode}")
++print(f"Stderr preview: {result.stderr[:200]}...")
++
++print("\n=== Test 2: Run command with --skip-checks (should succeed) ===")
++result = subprocess.run([sys.executable, 'manage.py', 'testcmd', '--skip-checks'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
++print(f"Exit code: {result.returncode}")
++print(f"Stdout: {result.stdout}")
++print(f"Stderr: {result.stderr}")
++
++print("\n=== Test 3: Check that --skip-checks appears in help ===")
++result = subprocess.run([sys.executable, 'manage.py', 'testcmd', '--help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
++if '--skip-checks' in result.stdout:
++    print("PASS: --skip-checks appears in help")
++else:
++    print("FAIL: --skip-checks does NOT appear in help")
++
++print("\n=== Test 4: Test with custom arguments ===")
++result = subprocess.run([sys.executable, 'manage.py', 'testcmd', '--skip-checks', '--custom-arg', 'test-value'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
++print(f"Exit code: {result.returncode}")
++print(f"Stdout: {result.stdout}")
++
++# Cleanup
++os.chdir('/')
++import shutil
++shutil.rmtree(test_dir)
+diff --git a/tests/admin_scripts/tests.py b/tests/admin_scripts/tests.py
+index d6ea84da7a..e0673c3db9 100644
+--- a/tests/admin_scripts/tests.py
++++ b/tests/admin_scripts/tests.py
+@@ -911,7 +911,7 @@ class ManageAlternateSettings(AdminScriptTestCase):
+             out,
+             "EXECUTE: noargs_command options=[('force_color', False), "
+             "('no_color', False), ('pythonpath', None), ('settings', "
+-            "'alternate_settings'), ('traceback', False), ('verbosity', 1)]"
++            "'alternate_settings'), ('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+         self.assertNoOutput(err)
+ 
+@@ -935,7 +935,7 @@ class ManageAlternateSettings(AdminScriptTestCase):
+             out,
+             "EXECUTE: noargs_command options=[('force_color', False), "
+             "('no_color', True), ('pythonpath', None), ('settings', "
+-            "'alternate_settings'), ('traceback', False), ('verbosity', 1)]"
++            "'alternate_settings'), ('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+         self.assertNoOutput(err)
+ 
+@@ -1612,7 +1612,7 @@ class CommandTypes(AdminScriptTestCase):
+             "EXECUTE:BaseCommand labels=%s, "
+             "options=[('force_color', False), ('no_color', False), "
+             "('option_a', %s), ('option_b', %s), ('option_c', '3'), "
+-            "('pythonpath', None), ('settings', None), ('traceback', False), "
++            "('pythonpath', None), ('settings', None), ('skip_checks', False), ('traceback', False), "
+             "('verbosity', 1)]") % (labels, option_a, option_b)
+         self.assertNoOutput(err)
+         self.assertOutput(out, expected_out)
+@@ -1689,7 +1689,7 @@ class CommandTypes(AdminScriptTestCase):
+             out,
+             "EXECUTE: noargs_command options=[('force_color', False), "
+             "('no_color', False), ('pythonpath', None), ('settings', None), "
+-            "('traceback', False), ('verbosity', 1)]"
++            "('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+ 
+     def test_noargs_with_args(self):
+@@ -1707,7 +1707,7 @@ class CommandTypes(AdminScriptTestCase):
+         self.assertOutput(
+             out,
+             ", options=[('force_color', False), ('no_color', False), "
+-            "('pythonpath', None), ('settings', None), ('traceback', False), "
++            "('pythonpath', None), ('settings', None), ('skip_checks', False), ('traceback', False), "
+             "('verbosity', 1)]"
+         )
+ 
+@@ -1726,14 +1726,14 @@ class CommandTypes(AdminScriptTestCase):
+         self.assertOutput(
+             out,
+             ", options=[('force_color', False), ('no_color', False), "
+-            "('pythonpath', None), ('settings', None), ('traceback', False), "
++            "('pythonpath', None), ('settings', None), ('skip_checks', False), ('traceback', False), "
+             "('verbosity', 1)]"
+         )
+         self.assertOutput(out, "EXECUTE:AppCommand name=django.contrib.contenttypes, options=")
+         self.assertOutput(
+             out,
+             ", options=[('force_color', False), ('no_color', False), "
+-            "('pythonpath', None), ('settings', None), ('traceback', False), "
++            "('pythonpath', None), ('settings', None), ('skip_checks', False), ('traceback', False), "
+             "('verbosity', 1)]"
+         )
+ 
+@@ -1758,7 +1758,7 @@ class CommandTypes(AdminScriptTestCase):
+             out,
+             "EXECUTE:LabelCommand label=testlabel, options=[('force_color', "
+             "False), ('no_color', False), ('pythonpath', None), ('settings', "
+-            "None), ('traceback', False), ('verbosity', 1)]"
++            "None), ('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+ 
+     def test_label_command_no_label(self):
+@@ -1776,13 +1776,13 @@ class CommandTypes(AdminScriptTestCase):
+             out,
+             "EXECUTE:LabelCommand label=testlabel, options=[('force_color', "
+             "False), ('no_color', False), ('pythonpath', None), "
+-            "('settings', None), ('traceback', False), ('verbosity', 1)]"
++            "('settings', None), ('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+         self.assertOutput(
+             out,
+             "EXECUTE:LabelCommand label=anotherlabel, options=[('force_color', "
+             "False), ('no_color', False), ('pythonpath', None), "
+-            "('settings', None), ('traceback', False), ('verbosity', 1)]"
++            "('settings', None), ('skip_checks', False), ('traceback', False), ('verbosity', 1)]"
+         )
+ 
+ 
+@@ -1856,7 +1856,7 @@ class ArgumentOrder(AdminScriptTestCase):
+             "EXECUTE:BaseCommand labels=('testlabel',), options=["
+             "('force_color', False), ('no_color', False), ('option_a', 'x'), "
+             "('option_b', %s), ('option_c', '3'), ('pythonpath', None), "
+-            "('settings', 'alternate_settings'), ('traceback', False), "
++            "('settings', 'alternate_settings'), ('skip_checks', False), ('traceback', False), "
+             "('verbosity', 1)]" % option_b
+         )

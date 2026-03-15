@@ -1,0 +1,368 @@
+diff --git a/astropy/table/table.py b/astropy/table/table.py
+index 5afe2127a3..63bed65969 100644
+--- a/astropy/table/table.py
++++ b/astropy/table/table.py
+@@ -1243,6 +1243,24 @@ class Table:
+         # mixin class
+         if (not isinstance(data, Column) and not data_is_mixin
+                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):
++            # Determine appropriate stacklevel based on call path
++            import inspect
++            frame = inspect.currentframe()
++            stacklevel = 4  # Default for add_column path
++            # Check if we're being called from _init_from_list
++            if frame and frame.f_back and frame.f_back.f_code.co_name == '_init_from_list':
++                stacklevel = 5  # For Table initialization path
++            
++            warnings.warn(
++                "In the future, structured arrays will be added as a Column "
++                "instead of as an NdarrayMixin. To retain the current behavior, "
++                "explicitly convert the array to an NdarrayMixin using "
++                "`data.view(NdarrayMixin)` before adding to the table. "
++                "To adopt the future behavior, wrap the array in a Column using "
++                "`Column(data)` before adding to the table.",
++                FutureWarning,
++                stacklevel=stacklevel
++            )
+             data = data.view(NdarrayMixin)
+             data_is_mixin = True
+ 
+diff --git a/astropy/table/tests/test_mixin.py b/astropy/table/tests/test_mixin.py
+index 2fdcd20d8f..bdcff11ed3 100644
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -712,9 +712,13 @@ def test_ndarray_mixin():
+     d = np.arange(8, dtype='i8').reshape(4, 2).view(NdarrayMixin)
+ 
+     # Add one during initialization and the next as a new column.
+-    t = Table([a], names=['a'])
+-    t['b'] = b
+-    t['c'] = c
++    # Expect FutureWarning for structured arrays
++    import warnings
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore", FutureWarning)
++        t = Table([a], names=['a'])
++        t['b'] = b
++        t['c'] = c
+     t['d'] = d
+ 
+     assert isinstance(t['a'], NdarrayMixin)
+diff --git a/test_comprehensive_structured_array.py b/test_comprehensive_structured_array.py
+new file mode 100644
+index 0000000000..071135dd60
+--- /dev/null
++++ b/test_comprehensive_structured_array.py
+@@ -0,0 +1,83 @@
++import numpy as np
++import warnings
++from astropy.table import Table, Column, NdarrayMixin
++
++print("=== Testing FutureWarning for structured arrays ===\n")
++
++# Test 1: Direct assignment should trigger warning
++print("Test 1: Direct assignment of structured array")
++dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t = Table()
++    t['struct_col'] = data
++    
++    # Check that warning was issued
++    assert len(w) == 1
++    assert issubclass(w[0].category, FutureWarning)
++    assert "structured arrays will be added as a Column" in str(w[0].message)
++    print(f"✓ FutureWarning issued: {w[0].message}")
++
++print(f"✓ Column type: {type(t['struct_col'])} (still NdarrayMixin)")
++print()
++
++# Test 2: Wrapped in Column should NOT trigger warning
++print("Test 2: Structured array wrapped in Column")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t2 = Table()
++    t2['struct_col'] = Column(data)
++    
++    # Check that NO warning was issued
++    assert len(w) == 0
++    print("✓ No warning issued (as expected)")
++
++print(f"✓ Column type: {type(t2['struct_col'])} (Column)")
++print()
++
++# Test 3: Already NdarrayMixin should NOT trigger warning
++print("Test 3: Already converted to NdarrayMixin")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t3 = Table()
++    t3['struct_col'] = data.view(NdarrayMixin)
++    
++    # Check that NO warning was issued
++    assert len(w) == 0
++    print("✓ No warning issued (as expected)")
++
++print(f"✓ Column type: {type(t3['struct_col'])} (NdarrayMixin)")
++print()
++
++# Test 4: Non-structured ndarray should NOT trigger warning
++print("Test 4: Non-structured ndarray")
++simple_data = np.array([1, 2, 3])
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t4 = Table()
++    t4['simple_col'] = simple_data
++    
++    # Check that NO warning was issued
++    assert len(w) == 0
++    print("✓ No warning issued (as expected)")
++
++print(f"✓ Column type: {type(t4['simple_col'])} (Column)")
++print()
++
++# Test 5: Table initialization with structured array
++print("Test 5: Table initialization with structured array")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t5 = Table({'struct_col': data})
++    
++    # Check that warning was issued
++    assert len(w) == 1
++    assert issubclass(w[0].category, FutureWarning)
++    print(f"✓ FutureWarning issued during Table init")
++
++print(f"✓ Column type: {type(t5['struct_col'])} (NdarrayMixin)")
++print()
++
++print("All tests passed! ✓")
+diff --git a/test_final_behavior.py b/test_final_behavior.py
+new file mode 100644
+index 0000000000..02c3595cf6
+--- /dev/null
++++ b/test_final_behavior.py
+@@ -0,0 +1,58 @@
++"""
++Test to document the expected behavior of structured arrays in Tables
++with the FutureWarning implementation.
++"""
++import numpy as np
++import warnings
++from astropy.table import Table, Column, NdarrayMixin
++
++print("=== Structured Array Behavior with FutureWarning ===\n")
++
++# Create a structured array
++dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++
++print("1. Direct assignment (triggers warning):")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t1 = Table()
++    t1['struct'] = data
++    print(f"   Warning issued: {len(w) > 0}")
++    print(f"   Result type: {type(t1['struct']).__name__}")
++    print(f"   Data preserved: {np.array_equal(t1['struct'], data)}")
++
++print("\n2. Wrapped in Column (no warning):")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t2 = Table()
++    t2['struct'] = Column(data)
++    print(f"   Warning issued: {len(w) > 0}")
++    print(f"   Result type: {type(t2['struct']).__name__}")
++    print(f"   Data preserved: {np.array_equal(t2['struct'], data)}")
++
++print("\n3. Pre-converted to NdarrayMixin (no warning):")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t3 = Table()
++    t3['struct'] = data.view(NdarrayMixin)
++    print(f"   Warning issued: {len(w) > 0}")
++    print(f"   Result type: {type(t3['struct']).__name__}")
++    print(f"   Data preserved: {np.array_equal(t3['struct'], data)}")
++
++print("\n4. Table initialization (triggers warning):")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t4 = Table({'struct': data})
++    print(f"   Warning issued: {len(w) > 0}")
++    print(f"   Result type: {type(t4['struct']).__name__}")
++    print(f"   Data preserved: {np.array_equal(t4['struct'], data)}")
++
++print("\n5. Non-structured array (no warning):")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t5 = Table()
++    t5['normal'] = np.array([1, 2, 3])
++    print(f"   Warning issued: {len(w) > 0}")
++    print(f"   Result type: {type(t5['normal']).__name__}")
++
++print("\n✓ All behaviors are as expected!")
+diff --git a/test_structured_array.py b/test_structured_array.py
+new file mode 100644
+index 0000000000..fb95203c19
+--- /dev/null
++++ b/test_structured_array.py
+@@ -0,0 +1,28 @@
++import numpy as np
++from astropy.table import Table, Column, NdarrayMixin
++
++# Test current behavior with structured array
++print("Testing current behavior with structured arrays:")
++
++# Create a structured array
++dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++
++print(f"Original data type: {type(data)}")
++print(f"Original data: {data}")
++
++# Add to table
++t = Table()
++t['struct_col'] = data
++
++print(f"\nColumn type after adding to table: {type(t['struct_col'])}")
++print(f"Is NdarrayMixin? {isinstance(t['struct_col'], NdarrayMixin)}")
++print(f"Is Column? {isinstance(t['struct_col'], Column)}")
++
++# Test with Column wrapper
++t2 = Table()
++t2['struct_col'] = Column(data)
++
++print(f"\nColumn type when wrapped in Column: {type(t2['struct_col'])}")
++print(f"Is NdarrayMixin? {isinstance(t2['struct_col'], NdarrayMixin)}")
++print(f"Is Column? {isinstance(t2['struct_col'], Column)}")
+diff --git a/test_structured_array_warning.py b/test_structured_array_warning.py
+new file mode 100644
+index 0000000000..0a72d2b693
+--- /dev/null
++++ b/test_structured_array_warning.py
+@@ -0,0 +1,61 @@
++import pytest
++import numpy as np
++import warnings
++from astropy.table import Table, Column, NdarrayMixin
++
++
++def test_structured_array_futurewarning():
++    """Test that FutureWarning is issued when adding structured arrays to Table."""
++    
++    # Create a structured array
++    dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++    data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++    
++    # Test 1: Direct assignment should trigger warning
++    with pytest.warns(FutureWarning, match="structured arrays will be added as a Column"):
++        t = Table()
++        t['struct_col'] = data
++    
++    # Verify it's still NdarrayMixin (current behavior)
++    assert isinstance(t['struct_col'], NdarrayMixin)
++    assert not isinstance(t['struct_col'], Column)
++    
++    # Test 2: Wrapped in Column should NOT trigger warning
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", FutureWarning)
++        t2 = Table()
++        t2['struct_col'] = Column(data)
++    
++    # Verify it's a Column
++    assert isinstance(t2['struct_col'], Column)
++    assert not isinstance(t2['struct_col'], NdarrayMixin)
++    
++    # Test 3: Already NdarrayMixin should NOT trigger warning
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", FutureWarning)
++        t3 = Table()
++        t3['struct_col'] = data.view(NdarrayMixin)
++    
++    # Verify it's NdarrayMixin
++    assert isinstance(t3['struct_col'], NdarrayMixin)
++    
++    # Test 4: Non-structured ndarray should NOT trigger warning
++    simple_data = np.array([1, 2, 3])
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", FutureWarning)
++        t4 = Table()
++        t4['simple_col'] = simple_data
++    
++    # Verify it's a Column
++    assert isinstance(t4['simple_col'], Column)
++    
++    # Test 5: Table initialization with structured array
++    with pytest.warns(FutureWarning, match="structured arrays will be added as a Column"):
++        t5 = Table({'struct_col': data})
++    
++    assert isinstance(t5['struct_col'], NdarrayMixin)
++
++
++if __name__ == "__main__":
++    test_structured_array_futurewarning()
++    print("All tests passed!")
+diff --git a/test_warning_stacklevel.py b/test_warning_stacklevel.py
+new file mode 100644
+index 0000000000..f64559a9ae
+--- /dev/null
++++ b/test_warning_stacklevel.py
+@@ -0,0 +1,25 @@
++import numpy as np
++import warnings
++from astropy.table import Table
++
++# Create a structured array
++dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++
++# Capture warnings with full details
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t = Table()
++    t['struct_col'] = data  # This line should be reported as the source
++    
++    if w:
++        print(f"Warning message: {w[0].message}")
++        print(f"Warning category: {w[0].category}")
++        print(f"Warning filename: {w[0].filename}")
++        print(f"Warning lineno: {w[0].lineno}")
++        
++        # Check that the warning points to this file, not internal astropy code
++        import os
++        assert os.path.basename(w[0].filename) == 'test_warning_stacklevel.py'
++        assert w[0].lineno == 13  # The line where we assign to t['struct_col']
++        print("\n✓ Warning stacklevel is correct - points to user code!")
+diff --git a/test_warning_stacklevel_init.py b/test_warning_stacklevel_init.py
+new file mode 100644
+index 0000000000..5b6837a9e7
+--- /dev/null
++++ b/test_warning_stacklevel_init.py
+@@ -0,0 +1,27 @@
++import numpy as np
++import warnings
++from astropy.table import Table
++
++# Create a structured array
++dtype = np.dtype([('x', 'i4'), ('y', 'f4')])
++data = np.array([(1, 1.5), (2, 2.5), (3, 3.5)], dtype=dtype)
++
++# Capture warnings with full details
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    t = Table({'struct_col': data})  # This line should be reported as the source
++    
++    if w:
++        print(f"Warning message: {w[0].message}")
++        print(f"Warning category: {w[0].category}")
++        print(f"Warning filename: {w[0].filename}")
++        print(f"Warning lineno: {w[0].lineno}")
++        
++        # Check that the warning points to this file, not internal astropy code
++        import os
++        if os.path.basename(w[0].filename) == 'test_warning_stacklevel_init.py':
++            assert w[0].lineno == 12  # The line where we create Table
++            print("\n✓ Warning stacklevel is correct - points to user code!")
++        else:
++            print(f"\n✗ Warning points to wrong file: {w[0].filename}")
++            print("  Need to adjust stacklevel for Table initialization case")

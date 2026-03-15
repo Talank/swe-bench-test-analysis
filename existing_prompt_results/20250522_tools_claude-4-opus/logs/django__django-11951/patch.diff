@@ -1,0 +1,324 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 794e0faae7..92349cd0c5 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -1209,7 +1209,8 @@ class QuerySet:
+         if ignore_conflicts and not connections[self.db].features.supports_ignore_conflicts:
+             raise NotSupportedError('This database backend does not support ignoring conflicts.')
+         ops = connections[self.db].ops
+-        batch_size = (batch_size or max(ops.bulk_batch_size(fields, objs), 1))
++        max_batch_size = max(ops.bulk_batch_size(fields, objs), 1)
++        batch_size = min(batch_size, max_batch_size) if batch_size else max_batch_size
+         inserted_rows = []
+         bulk_return = connections[self.db].features.can_return_rows_from_bulk_insert
+         for item in [objs[i:i + batch_size] for i in range(0, len(objs), batch_size)]:
+diff --git a/test_bulk_create_batch_size.py b/test_bulk_create_batch_size.py
+new file mode 100644
+index 0000000000..f939adcdce
+--- /dev/null
++++ b/test_bulk_create_batch_size.py
+@@ -0,0 +1,106 @@
++"""
++Test script to reproduce the bulk_create batch_size issue
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from unittest.mock import patch, MagicMock
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def test_bulk_create_batch_size():
++    """Test that bulk_create respects max_batch_size when batch_size is provided"""
++    
++    # Create the table
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    
++    # Create test objects
++    objs = [TestModel(name=f'test{i}', value=i) for i in range(100)]
++    
++    # Mock the bulk_batch_size method to return a small value
++    original_bulk_batch_size = connection.ops.bulk_batch_size
++    
++    def mock_bulk_batch_size(fields, objs):
++        # Simulate a database that can only handle 10 items at a time
++        return 10
++    
++    connection.ops.bulk_batch_size = mock_bulk_batch_size
++    
++    # Track how many times _insert is called
++    insert_call_count = 0
++    items_per_batch = []
++    
++    from django.db.models import QuerySet
++    original_insert = QuerySet._insert
++    
++    def mock_insert(self, objs, *args, **kwargs):
++        nonlocal insert_call_count
++        insert_call_count += 1
++        # Check that we're not inserting more than 10 items
++        print(f"_insert called with {len(objs)} objects")
++        items_per_batch.append(len(objs))
++        return original_insert(self, objs, *args, **kwargs)
++    
++    QuerySet._insert = mock_insert
++    
++    try:
++        # Test with batch_size=50 (which is larger than max_batch_size=10)
++        # The current bug would use batch_size=50 and ignore max_batch_size
++        # The fix should use min(50, 10) = 10
++        TestModel.objects.bulk_create(objs, batch_size=50)
++        
++        # Check the results
++        print(f"Total insert calls: {insert_call_count}")
++        print(f"Items per batch: {items_per_batch}")
++        
++        # With the bug, we would see batches of 50 items (the provided batch_size)
++        # With the fix, we should see batches of 10 items (the max_batch_size)
++        for batch_size in items_per_batch:
++            if batch_size > 10:
++                print(f"BUG CONFIRMED: batch size {batch_size} exceeds max_batch_size of 10")
++                break
++        else:
++            print("Test passed! bulk_create correctly respects max_batch_size")
++        
++    finally:
++        # Restore original methods
++        connection.ops.bulk_batch_size = original_bulk_batch_size
++        QuerySet._insert = original_insert
++        
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(TestModel)
++
++
++if __name__ == '__main__':
++    test_bulk_create_batch_size()
+diff --git a/test_bulk_create_edge_cases.py b/test_bulk_create_edge_cases.py
+new file mode 100644
+index 0000000000..eb7f4dacac
+--- /dev/null
++++ b/test_bulk_create_edge_cases.py
+@@ -0,0 +1,142 @@
++"""
++Test edge cases for the bulk_create batch_size fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def test_edge_cases():
++    """Test edge cases for bulk_create batch_size"""
++    
++    # Create the table
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    
++    # Save original method
++    original_bulk_batch_size = connection.ops.bulk_batch_size
++    
++    try:
++        # Test 1: batch_size=None (should use max_batch_size)
++        print("\nTest 1: batch_size=None")
++        connection.ops.bulk_batch_size = lambda fields, objs: 5
++        objs = [TestModel(name=f'test{i}', value=i) for i in range(10)]
++        
++        batch_sizes = []
++        from django.db.models import QuerySet
++        original_insert = QuerySet._insert
++        
++        def track_insert(self, objs, *args, **kwargs):
++            batch_sizes.append(len(objs))
++            return original_insert(self, objs, *args, **kwargs)
++        
++        QuerySet._insert = track_insert
++        TestModel.objects.bulk_create(objs, batch_size=None)
++        QuerySet._insert = original_insert
++        
++        print(f"Batch sizes: {batch_sizes}")
++        assert batch_sizes == [5, 5], f"Expected [5, 5] but got {batch_sizes}"
++        print("PASSED")
++        
++        # Test 2: batch_size < max_batch_size (should use batch_size)
++        print("\nTest 2: batch_size < max_batch_size")
++        connection.ops.bulk_batch_size = lambda fields, objs: 10
++        objs = [TestModel(name=f'test{i}', value=i) for i in range(20)]
++        
++        batch_sizes = []
++        QuerySet._insert = track_insert
++        TestModel.objects.bulk_create(objs, batch_size=3)
++        QuerySet._insert = original_insert
++        
++        print(f"Batch sizes: {batch_sizes}")
++        assert all(size == 3 for size in batch_sizes[:-1]), "All batches except last should be 3"
++        assert batch_sizes[-1] <= 3, "Last batch should be <= 3"
++        print("PASSED")
++        
++        # Test 3: batch_size > max_batch_size (should use max_batch_size)
++        print("\nTest 3: batch_size > max_batch_size")
++        connection.ops.bulk_batch_size = lambda fields, objs: 5
++        objs = [TestModel(name=f'test{i}', value=i) for i in range(15)]
++        
++        batch_sizes = []
++        QuerySet._insert = track_insert
++        TestModel.objects.bulk_create(objs, batch_size=20)
++        QuerySet._insert = original_insert
++        
++        print(f"Batch sizes: {batch_sizes}")
++        assert batch_sizes == [5, 5, 5], f"Expected [5, 5, 5] but got {batch_sizes}"
++        print("PASSED")
++        
++        # Test 4: max_batch_size returns 0 (should use 1)
++        print("\nTest 4: max_batch_size returns 0")
++        connection.ops.bulk_batch_size = lambda fields, objs: 0
++        objs = [TestModel(name=f'test{i}', value=i) for i in range(3)]
++        
++        batch_sizes = []
++        QuerySet._insert = track_insert
++        TestModel.objects.bulk_create(objs, batch_size=None)
++        QuerySet._insert = original_insert
++        
++        print(f"Batch sizes: {batch_sizes}")
++        assert batch_sizes == [1, 1, 1], f"Expected [1, 1, 1] but got {batch_sizes}"
++        print("PASSED")
++        
++        # Test 5: batch_size=0 with max_batch_size > 0 (should use max_batch_size)
++        print("\nTest 5: batch_size=0")
++        connection.ops.bulk_batch_size = lambda fields, objs: 5
++        objs = [TestModel(name=f'test{i}', value=i) for i in range(10)]
++        
++        batch_sizes = []
++        QuerySet._insert = track_insert
++        # batch_size=0 is invalid and should raise an assertion error
++        try:
++            TestModel.objects.bulk_create(objs, batch_size=0)
++            assert False, "Should have raised AssertionError"
++        except AssertionError as e:
++            print("PASSED - correctly raised AssertionError for batch_size=0")
++        finally:
++            QuerySet._insert = original_insert
++        
++        print("\nAll edge case tests passed!")
++        
++    finally:
++        # Restore original method
++        connection.ops.bulk_batch_size = original_bulk_batch_size
++        
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(TestModel)
++
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/tests/bulk_create/tests.py b/tests/bulk_create/tests.py
+index 47aa7afcdc..5d1dec8ec0 100644
+--- a/tests/bulk_create/tests.py
++++ b/tests/bulk_create/tests.py
+@@ -305,3 +305,45 @@ class BulkCreateTests(TestCase):
+         # Without ignore_conflicts=True, there's a problem.
+         with self.assertRaises(IntegrityError):
+             TwoFields.objects.bulk_create(conflicting_objects)
++
++    def test_batch_size_respects_max_batch_size(self):
++        """
++        batch_size should respect the database's max batch size limit.
++        """
++        # Mock the bulk_batch_size to return a small value
++        original_bulk_batch_size = connection.ops.bulk_batch_size
++        
++        def mock_bulk_batch_size(fields, objs):
++            return 10
++        
++        connection.ops.bulk_batch_size = mock_bulk_batch_size
++        
++        try:
++            objs = [Country(name=f"Country {i}", iso_two_letter=f"C{i}") for i in range(50)]
++            
++            # Track batch sizes used
++            batch_sizes = []
++            from django.db.models import QuerySet
++            original_insert = QuerySet._insert
++            
++            def track_insert(self, objs_to_insert, *args, **kwargs):
++                batch_sizes.append(len(objs_to_insert))
++                return original_insert(self, objs_to_insert, *args, **kwargs)
++            
++            QuerySet._insert = track_insert
++            
++            # Test with batch_size > max_batch_size
++            # Should use max_batch_size (10) not the provided batch_size (30)
++            Country.objects.bulk_create(objs, batch_size=30)
++            
++            # All batches should be <= 10
++            for batch_size in batch_sizes:
++                self.assertLessEqual(batch_size, 10)
++            
++            # We should have 5 batches of 10
++            self.assertEqual(len(batch_sizes), 5)
++            self.assertEqual(batch_sizes, [10, 10, 10, 10, 10])
++            
++        finally:
++            connection.ops.bulk_batch_size = original_bulk_batch_size
++            QuerySet._insert = original_insert

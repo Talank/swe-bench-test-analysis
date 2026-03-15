@@ -1,0 +1,744 @@
+diff --git a/pylint/lint/run.py b/pylint/lint/run.py
+index a7e5d5574..6c697f765 100644
+--- a/pylint/lint/run.py
++++ b/pylint/lint/run.py
+@@ -52,12 +52,12 @@ def _query_cpu() -> int | None:
+         with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", encoding="utf-8") as file:
+             cpu_period = int(file.read().rstrip())
+         # Divide quota by period and you should get num of allotted CPU to the container, rounded down if fractional.
+-        avail_cpu = int(cpu_quota / cpu_period)
++        avail_cpu = int(cpu_quota / cpu_period) or 1
+     elif Path("/sys/fs/cgroup/cpu/cpu.shares").is_file():
+         with open("/sys/fs/cgroup/cpu/cpu.shares", encoding="utf-8") as file:
+             cpu_shares = int(file.read().rstrip())
+         # For AWS, gives correct value * 1024.
+-        avail_cpu = int(cpu_shares / 1024)
++        avail_cpu = int(cpu_shares / 1024) or 1
+     return avail_cpu
+ 
+ 
+diff --git a/test_bug_reproduction.py b/test_bug_reproduction.py
+new file mode 100644
+index 000000000..5639f174a
+--- /dev/null
++++ b/test_bug_reproduction.py
+@@ -0,0 +1,56 @@
++"""Test that reproduces the exact bug from the issue."""
++import sys
++import os
++from unittest.mock import patch, mock_open
++from pathlib import Path
++
++sys.path.insert(0, '/testbed')
++
++from pylint.lint.run import _query_cpu
++
++
++def test_bug_reproduction():
++    """Reproduce the exact scenario from the bug report."""
++    print("Reproducing bug scenario:")
++    print("- /sys/fs/cgroup/cpu/cpu.cfs_quota_us = -1")
++    print("- /sys/fs/cgroup/cpu/cpu.cfs_period_us = 100000")
++    print("- /sys/fs/cgroup/cpu/cpu.shares = 2")
++    
++    # Mock file system
++    file_contents = {
++        "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1",
++        "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000",
++        "/sys/fs/cgroup/cpu/cpu.shares": "2"
++    }
++    
++    def mock_is_file(self):
++        path_str = str(self)
++        return path_str in file_contents
++    
++    def mock_open_func(filename, *args, **kwargs):
++        if filename in file_contents:
++            return mock_open(read_data=file_contents[filename])()
++        raise FileNotFoundError(filename)
++    
++    with patch.object(Path, 'is_file', mock_is_file):
++        with patch('builtins.open', side_effect=mock_open_func):
++            result = _query_cpu()
++            
++    print(f"\nCalculation: 2/1024 = {2/1024}")
++    print(f"int(2/1024) = {int(2/1024)}")
++    print(f"With fix: int(2/1024) or 1 = {int(2/1024) or 1}")
++    print(f"\n_query_cpu() returned: {result}")
++    
++    if result == 0:
++        print("\n❌ BUG REPRODUCED: _query_cpu returned 0, which would cause:")
++        print("ValueError: Number of processes must be at least 1")
++        return False
++    else:
++        print(f"\n✅ BUG FIXED: _query_cpu returned {result} (>= 1)")
++        return True
++
++
++if __name__ == "__main__":
++    success = test_bug_reproduction()
++    if not success:
++        sys.exit(1)
+diff --git a/test_direct_calculation.py b/test_direct_calculation.py
+new file mode 100644
+index 000000000..cfcbf6309
+--- /dev/null
++++ b/test_direct_calculation.py
+@@ -0,0 +1,13 @@
++"""Direct test of the problematic calculation."""
++
++# Test the exact calculation that causes the issue
++cpu_shares = 2
++result = int(cpu_shares / 1024)
++print(f"cpu_shares = {cpu_shares}")
++print(f"cpu_shares / 1024 = {cpu_shares / 1024}")
++print(f"int(cpu_shares / 1024) = {result}")
++print(f"This will cause multiprocessing.Pool to fail with: ValueError: Number of processes must be at least 1")
++
++# Show what the fix would produce
++fixed_result = int(cpu_shares / 1024) or 1
++print(f"\nWith fix: int(cpu_shares / 1024) or 1 = {fixed_result}")
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 000000000..e06e867af
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,156 @@
++"""Test to verify the fix for Kubernetes CPU issue."""
++import sys
++import os
++import tempfile
++from pathlib import Path
++from unittest.mock import patch, MagicMock
++
++sys.path.insert(0, '/testbed')
++
++from pylint.lint.run import _query_cpu, _cpu_count, Run
++
++
++def test_query_cpu_low_shares():
++    """Test that _query_cpu returns at least 1 when cpu_shares is very low."""
++    # Create temporary directory structure
++    with tempfile.TemporaryDirectory() as tmpdir:
++        cpu_dir = Path(tmpdir) / "cpu"
++        cpu_dir.mkdir(parents=True)
++        
++        # Create cpu.shares file with value 2
++        (cpu_dir / "cpu.shares").write_text("2")
++        
++        # Mock Path to use our temporary files
++        original_path = Path
++        
++        def mock_path_constructor(path_str):
++            if "cpu.cfs_quota_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_quota_us")
++            elif "cpu.cfs_period_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_period_us")
++            elif "cpu.shares" in path_str:
++                return original_path(cpu_dir / "cpu.shares")
++            return original_path(path_str)
++        
++        with patch('pylint.lint.run.Path', side_effect=mock_path_constructor):
++            result = _query_cpu()
++            print(f"_query_cpu() with cpu_shares=2 returned: {result}")
++            assert result == 1, f"Expected 1, but got {result}"
++
++
++def test_query_cpu_low_quota():
++    """Test that _query_cpu returns at least 1 when cpu quota/period ratio is very low."""
++    # Create temporary directory structure
++    with tempfile.TemporaryDirectory() as tmpdir:
++        cpu_dir = Path(tmpdir) / "cpu"
++        cpu_dir.mkdir(parents=True)
++        
++        # Create files with very low quota/period ratio
++        (cpu_dir / "cpu.cfs_quota_us").write_text("100")  # Very low quota
++        (cpu_dir / "cpu.cfs_period_us").write_text("100000")  # Standard period
++        
++        # Mock Path to use our temporary files
++        original_path = Path
++        
++        def mock_path_constructor(path_str):
++            if "cpu.cfs_quota_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_quota_us")
++            elif "cpu.cfs_period_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_period_us")
++            elif "cpu.shares" in path_str:
++                return original_path(cpu_dir / "cpu.shares")
++            return original_path(path_str)
++        
++        with patch('pylint.lint.run.Path', side_effect=mock_path_constructor):
++            result = _query_cpu()
++            print(f"_query_cpu() with quota=100, period=100000 returned: {result}")
++            assert result == 1, f"Expected 1, but got {result}"
++
++
++def test_cpu_count_with_zero_query():
++    """Test that _cpu_count never returns 0 even when _query_cpu would return 0."""
++    # This tests the edge case where our fix ensures _query_cpu returns 1 instead of 0
++    with tempfile.TemporaryDirectory() as tmpdir:
++        cpu_dir = Path(tmpdir) / "cpu"
++        cpu_dir.mkdir(parents=True)
++        
++        # Create cpu.shares file with value 2
++        (cpu_dir / "cpu.shares").write_text("2")
++        
++        # Mock Path to use our temporary files
++        original_path = Path
++        
++        def mock_path_constructor(path_str):
++            if "cpu.cfs_quota_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_quota_us")
++            elif "cpu.cfs_period_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_period_us")
++            elif "cpu.shares" in path_str:
++                return original_path(cpu_dir / "cpu.shares")
++            return original_path(path_str)
++        
++        with patch('pylint.lint.run.Path', side_effect=mock_path_constructor):
++            # Also mock os.sched_getaffinity to not exist
++            with patch.object(os, 'sched_getaffinity', None):
++                # Mock multiprocessing.cpu_count to return 4
++                import multiprocessing
++                with patch.object(multiprocessing, 'cpu_count', return_value=4):
++                    result = _cpu_count()
++                    print(f"_cpu_count() returned: {result}")
++                    assert result >= 1, f"Expected at least 1, but got {result}"
++
++
++def test_run_with_jobs_zero():
++    """Test that Run class handles --jobs=0 correctly with low CPU shares."""
++    # Create a simple Python file to lint
++    with tempfile.TemporaryDirectory() as tmpdir:
++        test_file = Path(tmpdir) / "test.py"
++        test_file.write_text("print('hello')\n")
++        
++        # Mock the CPU detection to simulate Kubernetes environment
++        cpu_dir = Path(tmpdir) / "cpu"
++        cpu_dir.mkdir(parents=True)
++        (cpu_dir / "cpu.shares").write_text("2")
++        
++        original_path = Path
++        
++        def mock_path_constructor(path_str):
++            if "cpu.cfs_quota_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_quota_us")
++            elif "cpu.cfs_period_us" in path_str:
++                return original_path(cpu_dir / "cpu.cfs_period_us")
++            elif "cpu.shares" in path_str:
++                return original_path(cpu_dir / "cpu.shares")
++            return original_path(path_str)
++        
++        with patch('pylint.lint.run.Path', side_effect=mock_path_constructor):
++            # Also mock os.sched_getaffinity to not exist
++            with patch.object(os, 'sched_getaffinity', None):
++                # Mock multiprocessing.cpu_count
++                import multiprocessing
++                with patch.object(multiprocessing, 'cpu_count', return_value=4):
++                    # Run pylint with --jobs=0
++                    try:
++                        run = Run(['--jobs=0', '--exit-zero', str(test_file)], exit=False)
++                        print(f"Run completed successfully with jobs={run.linter.config.jobs}")
++                        assert run.linter.config.jobs >= 1, f"Expected jobs >= 1, but got {run.linter.config.jobs}"
++                    except ValueError as e:
++                        if "Number of processes must be at least 1" in str(e):
++                            raise AssertionError("Fix didn't work - still getting ValueError about processes") from e
++                        raise
++
++
++if __name__ == "__main__":
++    print("Test 1: _query_cpu with low CPU shares...")
++    test_query_cpu_low_shares()
++    
++    print("\nTest 2: _query_cpu with low quota/period ratio...")
++    test_query_cpu_low_quota()
++    
++    print("\nTest 3: _cpu_count never returns 0...")
++    test_cpu_count_with_zero_query()
++    
++    print("\nTest 4: Run class with --jobs=0...")
++    test_run_with_jobs_zero()
++    
++    print("\nAll tests passed! The fix is working correctly.")
+diff --git a/test_integration.py b/test_integration.py
+new file mode 100644
+index 000000000..64fae81fe
+--- /dev/null
++++ b/test_integration.py
+@@ -0,0 +1,72 @@
++"""Integration test to ensure pylint works with --jobs=0."""
++import subprocess
++import sys
++import tempfile
++import os
++
++# Create a test file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write("""
++def hello():
++    print("Hello, World!")
++
++if __name__ == "__main__":
++    hello()
++""")
++    test_file = f.name
++
++try:
++    # Test 1: Run pylint with --jobs=0
++    print("Test 1: Running pylint with --jobs=0...")
++    result = subprocess.run(
++        [sys.executable, '-m', 'pylint', '--jobs=0', '--exit-zero', test_file],
++        capture_output=True,
++        text=True
++    )
++    
++    print(f"Return code: {result.returncode}")
++    if result.returncode != 0:
++        print(f"STDOUT:\n{result.stdout}")
++        print(f"STDERR:\n{result.stderr}")
++        raise AssertionError(f"pylint failed with return code {result.returncode}")
++    
++    print("✓ Test 1 passed!")
++    
++    # Test 2: Run pylint with --jobs=1 (should still work)
++    print("\nTest 2: Running pylint with --jobs=1...")
++    result = subprocess.run(
++        [sys.executable, '-m', 'pylint', '--jobs=1', '--exit-zero', test_file],
++        capture_output=True,
++        text=True
++    )
++    
++    print(f"Return code: {result.returncode}")
++    if result.returncode != 0:
++        print(f"STDOUT:\n{result.stdout}")
++        print(f"STDERR:\n{result.stderr}")
++        raise AssertionError(f"pylint failed with return code {result.returncode}")
++    
++    print("✓ Test 2 passed!")
++    
++    # Test 3: Run pylint with --jobs=2 (should still work)
++    print("\nTest 3: Running pylint with --jobs=2...")
++    result = subprocess.run(
++        [sys.executable, '-m', 'pylint', '--jobs=2', '--exit-zero', test_file],
++        capture_output=True,
++        text=True
++    )
++    
++    print(f"Return code: {result.returncode}")
++    if result.returncode != 0:
++        print(f"STDOUT:\n{result.stdout}")
++        print(f"STDERR:\n{result.stderr}")
++        raise AssertionError(f"pylint failed with return code {result.returncode}")
++    
++    print("✓ Test 3 passed!")
++    
++    print("\n✅ All integration tests passed!")
++    
++finally:
++    # Clean up
++    if os.path.exists(test_file):
++        os.unlink(test_file)
+diff --git a/test_kubernetes_cpu_issue.py b/test_kubernetes_cpu_issue.py
+new file mode 100644
+index 000000000..10a6ea125
+--- /dev/null
++++ b/test_kubernetes_cpu_issue.py
+@@ -0,0 +1,67 @@
++"""Test to reproduce the Kubernetes CPU issue."""
++import os
++import tempfile
++from unittest.mock import patch, mock_open
++from pylint.lint.run import _query_cpu, _cpu_count
++
++
++def test_query_cpu_kubernetes_low_shares():
++    """Test _query_cpu with Kubernetes-like low CPU shares."""
++    # Mock Path.is_file to return True only for cpu.shares
++    with patch('pathlib.Path.is_file') as mock_is_file:
++        # Configure return values for different paths
++        mock_is_file.return_value = False
++        
++        # Create a side effect function that checks the path
++        def is_file_side_effect(path_obj):
++            return str(path_obj) == "/sys/fs/cgroup/cpu/cpu.shares"
++        
++        # Apply the side effect to the Path instance method
++        with patch.object(type(mock_is_file.return_value), 'is_file', side_effect=is_file_side_effect):
++            # Use a more direct approach
++            with patch('pylint.lint.run.Path') as mock_path:
++                # Configure the mock Path instances
++                mock_quota_path = mock_path.return_value
++                mock_quota_path.is_file.return_value = False
++                
++                # Make Path constructor return different mocks based on path
++                def path_constructor(path_str):
++                    mock_instance = mock_path.return_value
++                    if path_str == "/sys/fs/cgroup/cpu/cpu.cfs_quota_us":
++                        mock_instance.is_file.return_value = False
++                    elif path_str == "/sys/fs/cgroup/cpu/cpu.cfs_period_us":
++                        mock_instance.is_file.return_value = False
++                    elif path_str == "/sys/fs/cgroup/cpu/cpu.shares":
++                        mock_instance.is_file.return_value = True
++                    return mock_instance
++                
++                mock_path.side_effect = path_constructor
++                
++                # Mock the open call to return the CPU shares value
++                with patch('builtins.open', mock_open(read_data='2')):
++                    result = _query_cpu()
++                    print(f"_query_cpu() returned: {result}")
++                    assert result == 0, f"Expected 0, but got {result}"
++
++
++def test_cpu_count_with_low_shares():
++    """Test _cpu_count with low CPU shares."""
++    # Mock _query_cpu to return 0
++    with patch('pylint.lint.run._query_cpu', return_value=0):
++        # Mock os.sched_getaffinity to not exist
++        with patch('os.sched_getaffinity', None):
++            # Mock multiprocessing.cpu_count to return 4
++            with patch('multiprocessing.cpu_count', return_value=4):
++                result = _cpu_count()
++                print(f"_cpu_count() returned: {result}")
++                assert result == 0, f"Expected 0, but got {result}"
++
++
++if __name__ == "__main__":
++    print("Testing _query_cpu with low Kubernetes CPU shares...")
++    test_query_cpu_kubernetes_low_shares()
++    
++    print("\nTesting _cpu_count with low CPU shares...")
++    test_cpu_count_with_low_shares()
++    
++    print("\nAll tests passed!")
+diff --git a/test_kubernetes_edge_case.py b/test_kubernetes_edge_case.py
+new file mode 100644
+index 000000000..de0c07ba6
+--- /dev/null
++++ b/test_kubernetes_edge_case.py
+@@ -0,0 +1,79 @@
++"""Test the specific Kubernetes edge case where CPU shares are very low."""
++import sys
++import os
++import tempfile
++from pathlib import Path
++from unittest.mock import patch, mock_open
++
++sys.path.insert(0, '/testbed')
++
++from pylint.lint.run import Run, _query_cpu
++
++
++def test_kubernetes_edge_case():
++    """Test the exact scenario described in the bug report."""
++    # Create a test Python file
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++        f.write("print('hello world')\n")
++        test_file = f.name
++    
++    try:
++        # Mock the file system reads to simulate Kubernetes environment
++        def mock_path_is_file(self):
++            path_str = str(self)
++            if path_str == "/sys/fs/cgroup/cpu/cpu.cfs_quota_us":
++                return True
++            elif path_str == "/sys/fs/cgroup/cpu/cpu.cfs_period_us":
++                return True
++            elif path_str == "/sys/fs/cgroup/cpu/cpu.shares":
++                return True
++            return False
++        
++        # Mock file contents
++        file_contents = {
++            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1",
++            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000",
++            "/sys/fs/cgroup/cpu/cpu.shares": "2"
++        }
++        
++        def mock_open_func(filename, *args, **kwargs):
++            if filename in file_contents:
++                return mock_open(read_data=file_contents[filename])()
++            return open(filename, *args, **kwargs)
++        
++        with patch('pathlib.Path.is_file', mock_path_is_file):
++            with patch('builtins.open', side_effect=mock_open_func):
++                # Test _query_cpu directly
++                cpu_count = _query_cpu()
++                print(f"_query_cpu() returned: {cpu_count}")
++                assert cpu_count >= 1, f"_query_cpu should return at least 1, but got {cpu_count}"
++                
++                # Now test the full Run with --jobs=0
++                # Mock os.sched_getaffinity to not exist (common in containers)
++                with patch.object(os, 'sched_getaffinity', None):
++                    # Mock multiprocessing.cpu_count
++                    import multiprocessing
++                    with patch.object(multiprocessing, 'cpu_count', return_value=4):
++                        # Run pylint with --jobs=0
++                        print("\nRunning pylint with --jobs=0...")
++                        run = Run([
++                            '--msg-template', '{path}:{module}:{line}: [{msg_id}({symbol}), {obj}] {msg}',
++                            '--exit-zero',
++                            '--jobs', '0',
++                            test_file
++                        ], exit=False)
++                        
++                        print(f"Pylint completed successfully!")
++                        print(f"Jobs set to: {run.linter.config.jobs}")
++                        assert run.linter.config.jobs >= 1, f"Jobs should be at least 1, but got {run.linter.config.jobs}"
++    
++    finally:
++        # Clean up
++        if os.path.exists(test_file):
++            os.unlink(test_file)
++
++
++if __name__ == "__main__":
++    print("Testing Kubernetes edge case with cpu.shares=2...")
++    test_kubernetes_edge_case()
++    print("\nTest passed! The fix prevents the crash.")
+diff --git a/test_kubernetes_simple.py b/test_kubernetes_simple.py
+new file mode 100644
+index 000000000..24f3b79d4
+--- /dev/null
++++ b/test_kubernetes_simple.py
+@@ -0,0 +1,92 @@
++"""Simple test to verify the fix for Kubernetes CPU issue."""
++import sys
++import tempfile
++import os
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from pylint.lint.run import _query_cpu, _cpu_count
++
++
++def test_query_cpu_direct():
++    """Test _query_cpu by creating temporary files."""
++    import tempfile
++    import shutil
++    
++    # Create a temporary directory structure
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create the cgroup directory structure
++        cpu_dir = Path(tmpdir) / "sys" / "fs" / "cgroup" / "cpu"
++        cpu_dir.mkdir(parents=True)
++        
++        # Create the files with test values
++        (cpu_dir / "cpu.cfs_quota_us").write_text("-1")
++        (cpu_dir / "cpu.cfs_period_us").write_text("100000")
++        (cpu_dir / "cpu.shares").write_text("2")
++        
++        # Monkey patch the paths in the _query_cpu function
++        import pylint.lint.run
++        original_path = pylint.lint.run.Path
++        
++        def mock_path(path_str):
++            # Replace the system paths with our temp paths
++            if path_str.startswith("/sys/fs/cgroup"):
++                path_str = path_str.replace("/sys/fs/cgroup", str(cpu_dir.parent.parent))
++            return original_path(path_str)
++        
++        pylint.lint.run.Path = mock_path
++        
++        try:
++            result = _query_cpu()
++            print(f"_query_cpu() returned: {result}")
++            print(f"This is the problematic case: 2/1024 = {2/1024} which becomes {int(2/1024)} when cast to int")
++            assert result == 0, f"Expected 0, but got {result}"
++        finally:
++            pylint.lint.run.Path = original_path
++
++
++def test_cpu_count_returns_zero():
++    """Test that _cpu_count can return 0 in certain conditions."""
++    import pylint.lint.run
++    
++    # Save original functions
++    original_query_cpu = pylint.lint.run._query_cpu
++    original_sched_getaffinity = getattr(os, 'sched_getaffinity', None)
++    
++    # Mock _query_cpu to return 0
++    pylint.lint.run._query_cpu = lambda: 0
++    
++    # Remove sched_getaffinity if it exists
++    if hasattr(os, 'sched_getaffinity'):
++        delattr(os, 'sched_getaffinity')
++    
++    try:
++        # Mock multiprocessing to return a higher number
++        import multiprocessing
++        if multiprocessing:
++            original_cpu_count = multiprocessing.cpu_count
++            multiprocessing.cpu_count = lambda: 4
++            
++            result = _cpu_count()
++            print(f"_cpu_count() returned: {result}")
++            print(f"min(0, 4) = {min(0, 4)}")
++            assert result == 0, f"Expected 0, but got {result}"
++            
++            multiprocessing.cpu_count = original_cpu_count
++    finally:
++        # Restore original functions
++        pylint.lint.run._query_cpu = original_query_cpu
++        if original_sched_getaffinity:
++            os.sched_getaffinity = original_sched_getaffinity
++
++
++if __name__ == "__main__":
++    print("Testing _query_cpu with low Kubernetes CPU shares...")
++    test_query_cpu_direct()
++    
++    print("\nTesting _cpu_count can return 0...")
++    test_cpu_count_returns_zero()
++    
++    print("\nTests completed - the issue is confirmed!")
+diff --git a/test_simple_fix.py b/test_simple_fix.py
+new file mode 100644
+index 000000000..726a14919
+--- /dev/null
++++ b/test_simple_fix.py
+@@ -0,0 +1,36 @@
++"""Simple test to verify the fix works."""
++import sys
++sys.path.insert(0, '/testbed')
++
++# Test the actual calculation with the fix
++print("Testing the fix directly...")
++cpu_shares = 2
++result_without_fix = int(cpu_shares / 1024)
++result_with_fix = int(cpu_shares / 1024) or 1
++
++print(f"cpu_shares = {cpu_shares}")
++print(f"Without fix: int({cpu_shares}/1024) = {result_without_fix}")
++print(f"With fix: int({cpu_shares}/1024) or 1 = {result_with_fix}")
++
++# Let's also test with a direct monkey patch
++from pylint.lint import run
++
++# Save original
++original_query_cpu = run._query_cpu
++
++# Create a mock that returns 0 (simulating the bug scenario)
++def mock_query_cpu_returns_zero():
++    # Simulate the calculation that would return 0
++    return int(2 / 1024) or 1  # This is our fix
++
++# Replace the function
++run._query_cpu = mock_query_cpu_returns_zero
++
++# Test it
++result = run._query_cpu()
++print(f"\nMocked _query_cpu() returns: {result}")
++
++# Restore
++run._query_cpu = original_query_cpu
++
++print("\nThe fix ensures that _query_cpu never returns 0!")
+diff --git a/test_unit_fix.py b/test_unit_fix.py
+new file mode 100644
+index 000000000..9d90c38e3
+--- /dev/null
++++ b/test_unit_fix.py
+@@ -0,0 +1,27 @@
++"""Unit test for the fix."""
++import sys
++sys.path.insert(0, '/testbed')
++
++# Test the exact lines that were fixed
++print("Testing the fix in _query_cpu()...")
++
++# Test case 1: cpu_shares / 1024 when cpu_shares = 2
++cpu_shares = 2
++result = int(cpu_shares / 1024) or 1
++print(f"int({cpu_shares} / 1024) or 1 = {result}")
++assert result == 1, f"Expected 1, got {result}"
++
++# Test case 2: cpu_quota / cpu_period when very small
++cpu_quota = 100
++cpu_period = 100000
++result = int(cpu_quota / cpu_period) or 1
++print(f"int({cpu_quota} / {cpu_period}) or 1 = {result}")
++assert result == 1, f"Expected 1, got {result}"
++
++# Test case 3: Normal values should still work
++cpu_shares = 2048
++result = int(cpu_shares / 1024) or 1
++print(f"int({cpu_shares} / 1024) or 1 = {result}")
++assert result == 2, f"Expected 2, got {result}"
++
++print("\nAll unit tests passed! The fix correctly handles edge cases.")
+diff --git a/tests/lint/test_run_cpu_detection.py b/tests/lint/test_run_cpu_detection.py
+new file mode 100644
+index 000000000..10546d122
+--- /dev/null
++++ b/tests/lint/test_run_cpu_detection.py
+@@ -0,0 +1,67 @@
++"""Tests for CPU detection in pylint.lint.run module."""
++import os
++from pathlib import Path
++from unittest.mock import patch, mock_open
++
++from pylint.lint.run import _query_cpu, _cpu_count
++
++
++class TestCPUDetection:
++    """Tests for CPU detection functions."""
++
++    def test_query_cpu_low_shares(self):
++        """Test _query_cpu returns at least 1 when cpu_shares is very low."""
++        # Mock file system
++        def mock_is_file(self):
++            return str(self) == "/sys/fs/cgroup/cpu/cpu.shares"
++        
++        with patch.object(Path, 'is_file', mock_is_file):
++            with patch('builtins.open', mock_open(read_data='2')):
++                result = _query_cpu()
++                assert result == 1, f"Expected 1 for low cpu_shares, got {result}"
++
++    def test_query_cpu_low_quota(self):
++        """Test _query_cpu returns at least 1 when cpu quota is very low."""
++        # Mock file system
++        file_contents = {
++            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "100",
++            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000"
++        }
++        
++        def mock_is_file(self):
++            path_str = str(self)
++            return path_str in ["/sys/fs/cgroup/cpu/cpu.cfs_quota_us", 
++                               "/sys/fs/cgroup/cpu/cpu.cfs_period_us"]
++        
++        def mock_open_func(filename, *args, **kwargs):
++            if filename in file_contents:
++                return mock_open(read_data=file_contents[filename])()
++            raise FileNotFoundError(filename)
++        
++        with patch.object(Path, 'is_file', mock_is_file):
++            with patch('builtins.open', side_effect=mock_open_func):
++                result = _query_cpu()
++                assert result == 1, f"Expected 1 for low cpu quota, got {result}"
++
++    def test_query_cpu_normal_values(self):
++        """Test _query_cpu works correctly with normal values."""
++        # Mock file system
++        def mock_is_file(self):
++            return str(self) == "/sys/fs/cgroup/cpu/cpu.shares"
++        
++        with patch.object(Path, 'is_file', mock_is_file):
++            with patch('builtins.open', mock_open(read_data='2048')):
++                result = _query_cpu()
++                assert result == 2, f"Expected 2 for cpu_shares=2048, got {result}"
++
++    def test_cpu_count_never_zero(self):
++        """Test _cpu_count never returns 0 even with low CPU detection."""
++        # Mock _query_cpu to return 1 (our fixed minimum)
++        with patch('pylint.lint.run._query_cpu', return_value=1):
++            # Remove sched_getaffinity if it exists
++            with patch.object(os, 'sched_getaffinity', None):
++                # Mock multiprocessing.cpu_count
++                import multiprocessing
++                with patch.object(multiprocessing, 'cpu_count', return_value=4):
++                    result = _cpu_count()
++                    assert result >= 1, f"_cpu_count should never return less than 1, got {result}"

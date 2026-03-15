@@ -1,0 +1,744 @@
+diff --git a/check_output.py b/check_output.py
+new file mode 100644
+index 000000000..4e76d3524
+--- /dev/null
++++ b/check_output.py
+@@ -0,0 +1,19 @@
++"""Check the actual output."""
++import re
++
++html = '''<div class="highlight-xml notranslate"><div class="highlight"><pre><span></span><span class="nt">&lt;plugin&gt;</span>
++<span class="w">        </span><span class="nt">&lt;groupId&gt;</span>com.github.ekryd.sortpom<span class="nt">&lt;/groupId&gt;</span>'''
++
++# Extract the text between the pre tags
++pre_match = re.search(r'<pre>(.*?)</pre>', html, re.DOTALL)
++if pre_match:
++    pre_content = pre_match.group(1)
++    # Remove all span tags
++    text_only = re.sub(r'<[^>]+>', '', pre_content)
++    print("Text content:")
++    print(repr(text_only))
++    
++    # Check line by line
++    lines = text_only.split('\n')
++    for i, line in enumerate(lines):
++        print(f"Line {i}: {repr(line)}")
+diff --git a/sphinx/directives/code.py b/sphinx/directives/code.py
+index dc44ed314..9437fe9a5 100644
+--- a/sphinx/directives/code.py
++++ b/sphinx/directives/code.py
+@@ -224,9 +224,9 @@ class LiteralIncludeReader:
+                        self.start_filter,
+                        self.end_filter,
+                        self.lines_filter,
++                       self.dedent_filter,
+                        self.prepend_filter,
+-                       self.append_filter,
+-                       self.dedent_filter]
++                       self.append_filter]
+             lines = self.read_file(self.filename, location=location)
+             for func in filters:
+                 lines = func(lines, location=location)
+diff --git a/test_dedent_issue.py b/test_dedent_issue.py
+new file mode 100644
+index 000000000..d1598afbb
+--- /dev/null
++++ b/test_dedent_issue.py
+@@ -0,0 +1,54 @@
++"""Test to understand the dedent issue with prepend/append."""
++
++import os
++import tempfile
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++
++def test_dedent_with_prepend():
++    """Test how dedent interacts with prepend."""
++    
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test file
++        test_file = os.path.join(tmpdir, 'test.xml')
++        content = """      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>"""
++        
++        with open(test_file, 'w') as f:
++            f.write(content)
++        
++        # Test without dedent
++        config = Config({}, {})
++        options = {
++            'prepend': '      <plugin>',
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-at': '</plugin>'
++        }
++        
++        reader = LiteralIncludeReader(test_file, options, config)
++        text, lines = reader.read()
++        print("Without dedent:")
++        print(repr(text))
++        print()
++        
++        # Test with dedent
++        options_with_dedent = {
++            'prepend': '      <plugin>',
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-at': '</plugin>',
++            'dedent': 6
++        }
++        
++        reader2 = LiteralIncludeReader(test_file, options_with_dedent, config)
++        text2, lines2 = reader2.read()
++        print("With dedent=6:")
++        print(repr(text2))
++
++if __name__ == '__main__':
++    test_dedent_with_prepend()
+diff --git a/test_dedent_warning.py b/test_dedent_warning.py
+new file mode 100644
+index 000000000..a000b50a2
+--- /dev/null
++++ b/test_dedent_warning.py
+@@ -0,0 +1,50 @@
++"""Test the dedent warning case."""
++
++import os
++import tempfile
++import warnings
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++from sphinx.util import logging
++
++DUMMY_CONFIG = Config({}, {})
++
++def test_dedent_warning_not_triggered_with_fix():
++    """Test that the dedent warning is not triggered when prepend has whitespace."""
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
++        # Content with 8 spaces indentation
++        f.write("""        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>""")
++        f.flush()
++        
++        # Before our fix, this would trigger a warning because dedent would try to
++        # remove 5 characters from "_____</plugin>" which has non-whitespace
++        options = {
++            'prepend': '_____</plugin>',  # 5 underscores (non-whitespace)
++            'dedent': 5
++        }
++        
++        # Capture warnings
++        with warnings.catch_warnings(record=True) as w:
++            warnings.simplefilter("always")
++            
++            reader = LiteralIncludeReader(f.name, options, DUMMY_CONFIG)
++            content, lines = reader.read()
++            
++            # With our fix, prepend is not affected by dedent, so no warning
++            assert len(w) == 0, f"Expected no warnings, but got: {[str(warning.message) for warning in w]}"
++            
++            # The prepend should keep its content unchanged
++            assert content.startswith('_____</plugin>')
++            
++        os.unlink(f.name)
++        
++        print("SUCCESS: No warning triggered because prepend is not affected by dedent")
++
++if __name__ == '__main__':
++    test_dedent_warning_not_triggered_with_fix()
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 000000000..4aa0d1e3d
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,87 @@
++"""Test the specific issue from the problem statement."""
++
++import os
++import tempfile
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++
++DUMMY_CONFIG = Config({}, {})
++
++def test_issue_prepend_with_leading_whitespace():
++    """Test the exact scenario from the problem statement."""
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
++        # Create the exact pom.xml content from the problem statement
++        f.write("""<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>""")
++        f.flush()
++        
++        # Test the exact scenario from the problem statement
++        options = {
++            'prepend': '      <plugin>',  # 6 spaces to match indentation
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-at': '</plugin>'
++        }
++        reader = LiteralIncludeReader(f.name, options, DUMMY_CONFIG)
++        content, lines = reader.read()
++        
++        print("Result without dedent:")
++        print(content)
++        print()
++        
++        # Check that the prepended line has the correct indentation
++        lines_list = content.split('\n')
++        assert lines_list[0] == '      <plugin>', f"First line should be '      <plugin>' but got {repr(lines_list[0])}"
++        assert lines_list[1] == '        <groupId>com.github.ekryd.sortpom</groupId>', f"Second line should have 8 spaces"
++        
++        # Now test the workaround mentioned in the problem statement
++        options_with_dedent = {
++            'prepend': '      <plugin>',  # Keep 6 spaces
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-before': '</plugin>',
++            'dedent': 6  # Remove 6 spaces from content only
++        }
++        reader2 = LiteralIncludeReader(f.name, options_with_dedent, DUMMY_CONFIG)
++        content2, lines2 = reader2.read()
++        
++        print("Result with dedent=6:")
++        print(content2)
++        print()
++        
++        # Check that dedent doesn't affect the prepended content
++        lines_list2 = content2.split('\n')
++        assert lines_list2[0] == '      <plugin>', f"First line should still be '      <plugin>' but got {repr(lines_list2[0])}"
++        assert lines_list2[1] == '  <groupId>com.github.ekryd.sortpom</groupId>', f"Second line should have 2 spaces (8-6)"
++        
++        os.unlink(f.name)
++        
++        print("SUCCESS: The fix works correctly!")
++        print("- Prepended content preserves its leading whitespace")
++        print("- Dedent only affects the content from the file, not prepend/append")
++
++if __name__ == '__main__':
++    test_issue_prepend_with_leading_whitespace()
+diff --git a/test_literalinclude_prepend.py b/test_literalinclude_prepend.py
+new file mode 100644
+index 000000000..6df9857e7
+--- /dev/null
++++ b/test_literalinclude_prepend.py
+@@ -0,0 +1,93 @@
++"""Test script to reproduce the literalinclude prepend whitespace issue."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++def test_literalinclude_prepend_whitespace():
++    """Test that prepend preserves leading whitespace."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = os.path.join(tmpdir, 'source')
++        outdir = os.path.join(tmpdir, 'build')
++        doctreedir = os.path.join(outdir, '.doctrees')
++        os.makedirs(srcdir)
++        
++        # Create conf.py
++        conf_content = """
++project = 'Test'
++extensions = []
++master_doc = 'index'
++exclude_patterns = []
++html_theme = 'basic'
++"""
++        with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++            f.write(conf_content)
++        
++        # Create pom.xml
++        pom_content = """<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>"""
++        with open(os.path.join(srcdir, 'pom.xml'), 'w') as f:
++            f.write(pom_content)
++        
++        # Create index.rst
++        index_content = """Test
++====
++
++Code examples:
++
++.. literalinclude:: pom.xml
++   :language: xml
++   :prepend:       <plugin>
++   :start-at: <groupId>com.github.ekryd.sortpom</groupId>
++   :end-at: </plugin>
++"""
++        with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++            f.write(index_content)
++        
++        # Build the documentation
++        with docutils_namespace():
++            app = Sphinx(srcdir, srcdir, outdir, doctreedir, 'html')
++            app.build()
++        
++        # Read the output HTML
++        with open(os.path.join(outdir, 'index.html'), 'r') as f:
++            html_content = f.read()
++        
++        print("HTML Output:")
++        print(html_content)
++        
++        # Check if the prepended content has proper indentation
++        # The prepended <plugin> should have the same indentation as the included content
++        assert '      <plugin>' in html_content or '      &lt;plugin&gt;' in html_content, \
++            "Prepended content should preserve leading whitespace"
++
++if __name__ == '__main__':
++    test_literalinclude_prepend_whitespace()
+diff --git a/test_literalinclude_prepend2.py b/test_literalinclude_prepend2.py
+new file mode 100644
+index 000000000..e58e34ca5
+--- /dev/null
++++ b/test_literalinclude_prepend2.py
+@@ -0,0 +1,107 @@
++"""Test script to reproduce the literalinclude prepend whitespace issue."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++import re
++
++def test_literalinclude_prepend_whitespace():
++    """Test that prepend preserves leading whitespace."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = os.path.join(tmpdir, 'source')
++        outdir = os.path.join(tmpdir, 'build')
++        doctreedir = os.path.join(outdir, '.doctrees')
++        os.makedirs(srcdir)
++        
++        # Create conf.py
++        conf_content = """
++project = 'Test'
++extensions = []
++master_doc = 'index'
++exclude_patterns = []
++html_theme = 'basic'
++"""
++        with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++            f.write(conf_content)
++        
++        # Create pom.xml
++        pom_content = """<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>"""
++        with open(os.path.join(srcdir, 'pom.xml'), 'w') as f:
++            f.write(pom_content)
++        
++        # Create index.rst
++        index_content = """Test
++====
++
++Code examples:
++
++.. literalinclude:: pom.xml
++   :language: xml
++   :prepend:       <plugin>
++   :start-at: <groupId>com.github.ekryd.sortpom</groupId>
++   :end-at: </plugin>
++"""
++        with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++            f.write(index_content)
++        
++        # Build the documentation
++        with docutils_namespace():
++            app = Sphinx(srcdir, srcdir, outdir, doctreedir, 'html')
++            app.build()
++        
++        # Read the output HTML
++        with open(os.path.join(outdir, 'index.html'), 'r') as f:
++            html_content = f.read()
++        
++        # Extract the pre content
++        pre_match = re.search(r'<pre[^>]*>(.*?)</pre>', html_content, re.DOTALL)
++        if pre_match:
++            pre_content = pre_match.group(1)
++            # Remove HTML tags
++            text_only = re.sub(r'<[^>]+>', '', pre_content)
++            print("Extracted text:")
++            print(repr(text_only))
++            
++            lines = text_only.split('\n')
++            print("\nLine by line:")
++            for i, line in enumerate(lines):
++                print(f"Line {i}: {repr(line)}")
++            
++            # Check if first line has proper indentation
++            if lines and lines[0].startswith('      '):
++                print("\nSUCCESS: First line has proper indentation!")
++            else:
++                print("\nFAILED: First line doesn't have proper indentation")
++                print(f"First line starts with: {repr(lines[0][:10] if lines else '')}")
++
++if __name__ == '__main__':
++    test_literalinclude_prepend_whitespace()
+diff --git a/test_no_dedent.py b/test_no_dedent.py
+new file mode 100644
+index 000000000..0a32ba901
+--- /dev/null
++++ b/test_no_dedent.py
+@@ -0,0 +1,62 @@
++"""Test without dedent option."""
++
++import os
++import tempfile
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++
++def test_no_dedent_with_prepend():
++    """Test prepend without dedent."""
++    
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test file
++        test_file = os.path.join(tmpdir, 'pom.xml')
++        content = """<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>"""
++        
++        with open(test_file, 'w') as f:
++            f.write(content)
++        
++        # Test without dedent
++        config = Config({}, {})
++        options = {
++            'prepend': '      <plugin>',  # 6 spaces
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-at': '</plugin>'
++        }
++        
++        reader = LiteralIncludeReader(test_file, options, config)
++        text, lines = reader.read()
++        print("Without dedent, prepend with 6 spaces:")
++        print(repr(text))
++        print()
++        print("Line by line:")
++        for i, line in enumerate(text.split('\n')):
++            print(f"Line {i}: {repr(line)}")
++
++if __name__ == '__main__':
++    test_no_dedent_with_prepend()
+diff --git a/test_prepend_dedent.py b/test_prepend_dedent.py
+new file mode 100644
+index 000000000..3d3c18869
+--- /dev/null
++++ b/test_prepend_dedent.py
+@@ -0,0 +1,91 @@
++"""Test prepend with dedent to verify our fix."""
++
++import os
++import tempfile
++import pytest
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++
++DUMMY_CONFIG = Config({}, {})
++
++def test_prepend_with_dedent():
++    """Test that prepend content is not affected by dedent."""
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
++        # Write content with 8 spaces indentation
++        f.write("""        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>""")
++        f.flush()
++        
++        # Test with dedent and prepend with whitespace
++        options = {
++            'prepend': '      <plugin>',  # 6 spaces
++            'dedent': 6
++        }
++        reader = LiteralIncludeReader(f.name, options, DUMMY_CONFIG)
++        content, lines = reader.read()
++        
++        print("Content with dedent=6 and prepend with 6 spaces:")
++        print(repr(content))
++        
++        # The prepend should keep its 6 spaces
++        # The content should have 6 spaces removed (8-6=2)
++        expected = """      <plugin>
++  <groupId>com.github.ekryd.sortpom</groupId>
++  <artifactId>sortpom-maven-plugin</artifactId>
++  <version>2.15.0</version>
++  <configuration>
++    <verifyFailOn>strict</verifyFailOn>
++  </configuration>"""
++        
++        assert content == expected
++        
++        os.unlink(f.name)
++
++def test_append_with_dedent():
++    """Test that append content is not affected by dedent."""
++    
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
++        # Write content with 8 spaces indentation
++        f.write("""        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>""")
++        f.flush()
++        
++        # Test with dedent and append with whitespace
++        options = {
++            'append': '      </plugin>',  # 6 spaces
++            'dedent': 6
++        }
++        reader = LiteralIncludeReader(f.name, options, DUMMY_CONFIG)
++        content, lines = reader.read()
++        
++        print("\nContent with dedent=6 and append with 6 spaces:")
++        print(repr(content))
++        
++        # The content should have 6 spaces removed (8-6=2)
++        # The append should keep its 6 spaces
++        # Note: append is added on the same line if content doesn't end with newline
++        expected = """  <groupId>com.github.ekryd.sortpom</groupId>
++  <artifactId>sortpom-maven-plugin</artifactId>
++  <version>2.15.0</version>
++  <configuration>
++    <verifyFailOn>strict</verifyFailOn>
++  </configuration>      </plugin>
++"""
++        
++        assert content == expected
++        
++        os.unlink(f.name)
++
++if __name__ == '__main__':
++    test_prepend_with_dedent()
++    test_append_with_dedent()
++    print("\nAll tests passed!")
+diff --git a/test_prepend_parsing.py b/test_prepend_parsing.py
+new file mode 100644
+index 000000000..1d2abbadc
+--- /dev/null
++++ b/test_prepend_parsing.py
+@@ -0,0 +1,19 @@
++"""Test how prepend value is parsed."""
++
++import os
++import tempfile
++from docutils.parsers.rst import directives
++
++# Test the unchanged_required parser
++test_values = [
++    "      <plugin>",
++    "       <plugin>",
++    "\t<plugin>",
++    "  \t  <plugin>",
++]
++
++for val in test_values:
++    parsed = directives.unchanged_required(val)
++    print(f"Input: {repr(val)}")
++    print(f"Output: {repr(parsed)}")
++    print()
+diff --git a/test_with_dedent.py b/test_with_dedent.py
+new file mode 100644
+index 000000000..918dc4acc
+--- /dev/null
++++ b/test_with_dedent.py
+@@ -0,0 +1,63 @@
++"""Test with dedent option."""
++
++import os
++import tempfile
++from sphinx.directives.code import LiteralIncludeReader
++from sphinx.config import Config
++
++def test_dedent_with_prepend():
++    """Test how dedent interacts with prepend."""
++    
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test file - note the included content has 6 spaces of indentation
++        test_file = os.path.join(tmpdir, 'pom.xml')
++        content = """<?xml version="1.0" encoding="UTF-8"?>
++<project>
++  <build>
++    <plugins>
++      <plugin>
++        <groupId>org.apache.maven.plugins</groupId>
++        <artifactId>maven-compiler-plugin</artifactId>
++        <version>3.8.0</version>
++        <configuration>
++          <source>1.8</source>
++          <target>1.8</target>
++          <debug>true</debug>
++          <encoding>UTF-8</encoding>
++        </configuration>
++      </plugin>
++      <plugin>
++        <groupId>com.github.ekryd.sortpom</groupId>
++        <artifactId>sortpom-maven-plugin</artifactId>
++        <version>2.15.0</version>
++        <configuration>
++          <verifyFailOn>strict</verifyFailOn>
++        </configuration>
++      </plugin>
++    </plugins>
++  </build>
++</project>"""
++        
++        with open(test_file, 'w') as f:
++            f.write(content)
++        
++        # Test with dedent - the user wants to use dedent creatively
++        config = Config({}, {})
++        options = {
++            'prepend': '      <plugin>',  # 6 spaces to match the indentation
++            'start-at': '<groupId>com.github.ekryd.sortpom</groupId>',
++            'end-before': '</plugin>',
++            'dedent': 6
++        }
++        
++        reader = LiteralIncludeReader(test_file, options, config)
++        text, lines = reader.read()
++        print("With dedent=6 and prepend with 6 spaces:")
++        print(repr(text))
++        print()
++        print("Line by line:")
++        for i, line in enumerate(text.split('\n')):
++            print(f"Line {i}: {repr(line)}")
++
++if __name__ == '__main__':
++    test_dedent_with_prepend()
+diff --git a/tests/test_directive_code.py b/tests/test_directive_code.py
+index 98a9aa899..faea8ec26 100644
+--- a/tests/test_directive_code.py
++++ b/tests/test_directive_code.py
+@@ -216,6 +216,18 @@ def test_LiteralIncludeReader_prepend(literal_inc_path):
+                        "Sphinx\n")
+ 
+ 
++@pytest.mark.xfail(os.name != 'posix', reason="Not working on windows")
++def test_LiteralIncludeReader_prepend_dedent(literal_inc_path):
++    # Test that dedent doesn't affect prepend/append content
++    options = {'lines': '9-11', 'prepend': '      def foo():', 'dedent': 4}
++    reader = LiteralIncludeReader(literal_inc_path, options, DUMMY_CONFIG)
++    content, lines = reader.read()
++    assert content == ("      def foo():\n"  # prepend keeps its 6 spaces
++                       "def baz():\n"         # dedented from 4 to 0 spaces
++                       "    pass\n"           # dedented from 8 to 4 spaces
++                       "\n")
++
++
+ @pytest.mark.xfail(os.name != 'posix', reason="Not working on windows")
+ def test_LiteralIncludeReader_dedent(literal_inc_path):
+     # dedent: 2

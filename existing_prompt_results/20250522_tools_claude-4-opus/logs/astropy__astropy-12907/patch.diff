@@ -1,0 +1,394 @@
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e27297..45bea36085 100644
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -242,7 +242,7 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+ 
+diff --git a/astropy/modeling/tests/test_separable.py b/astropy/modeling/tests/test_separable.py
+index 8dfe5c8626..3768916d53 100644
+--- a/astropy/modeling/tests/test_separable.py
++++ b/astropy/modeling/tests/test_separable.py
+@@ -148,3 +148,37 @@ def test_custom_model_separable():
+ 
+     assert not model_c().separable
+     assert np.all(separability_matrix(model_c()) == [True, True])
++
++
++def test_nested_compound_models():
++    """
++    Test that nested compound models maintain correct separability.
++    
++    Regression test for issue where separability_matrix incorrectly
++    computed separability for nested CompoundModels.
++    """
++    # Create a simple compound model
++    cm = models.Linear1D(10) & models.Linear1D(5)
++    
++    # Create the same structure without nesting
++    model_flat = models.Pix2Sky_TAN() & models.Linear1D(10) & models.Linear1D(5)
++    
++    # Create the nested version
++    model_nested = models.Pix2Sky_TAN() & cm
++    
++    # Get separability matrices
++    sep_flat = separability_matrix(model_flat)
++    sep_nested = separability_matrix(model_nested)
++    
++    # They should be identical
++    assert np.array_equal(sep_flat, sep_nested)
++    
++    # Check the expected structure
++    expected = np.array([
++        [True, True, False, False],
++        [True, True, False, False],
++        [False, False, True, False],
++        [False, False, False, True]
++    ])
++    
++    assert np.array_equal(sep_nested, expected)
+diff --git a/debug_cstack.py b/debug_cstack.py
+new file mode 100644
+index 0000000000..7b68299a6b
+--- /dev/null
++++ b/debug_cstack.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++"""Debug the _cstack function to understand the issue"""
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import _separable, _cstack, _coord_matrix
++import numpy as np
++
++# Create the models
++cm = m.Linear1D(10) & m.Linear1D(5)
++pix2sky = m.Pix2Sky_TAN()
++
++print("Debugging _cstack behavior")
++print("=" * 60)
++
++# First, let's see what _separable returns for each model
++sep_cm = _separable(cm)
++sep_pix2sky = _separable(pix2sky)
++
++print("_separable(Linear1D & Linear1D):")
++print(sep_cm)
++print(f"Shape: {sep_cm.shape}")
++print()
++
++print("_separable(Pix2Sky_TAN):")
++print(sep_pix2sky)
++print(f"Shape: {sep_pix2sky.shape}")
++print()
++
++# Now let's manually call _cstack to see what happens
++print("Manual _cstack(pix2sky, cm):")
++result = _cstack(pix2sky, sep_cm)
++print(result)
++print()
++
++# Let's also check what _coord_matrix produces for a simple model
++print("_coord_matrix for Linear1D in 'right' position with noutp=4:")
++coord = _coord_matrix(m.Linear1D(5), 'right', 4)
++print(coord)
++print()
++
++# The issue is in line 245 of _cstack where it sets the right part to 1
++# instead of copying the actual values from the right array
+diff --git a/test_both_nested.py b/test_both_nested.py
+new file mode 100644
+index 0000000000..09eedc192f
+--- /dev/null
++++ b/test_both_nested.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++"""Test both left and right nested compound models"""
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix
++import numpy as np
++
++print("Testing both left and right nested compound models")
++print("=" * 60)
++
++# Test 1: Right side nested (original issue)
++cm_right = m.Linear1D(10) & m.Linear1D(5)
++model_right_nested = m.Pix2Sky_TAN() & cm_right
++sep_right = separability_matrix(model_right_nested)
++
++print("Test 1: Pix2Sky_TAN() & (Linear1D & Linear1D)")
++print("Separability matrix:")
++print(sep_right)
++print()
++
++# Test 2: Left side nested
++cm_left = m.Shift(1) & m.Scale(2)
++model_left_nested = cm_left & m.Rotation2D(45)
++sep_left = separability_matrix(model_left_nested)
++
++print("Test 2: (Shift & Scale) & Rotation2D")
++print("Separability matrix:")
++print(sep_left)
++print()
++
++# Test 3: Both sides nested
++cm1 = m.Linear1D(1) & m.Linear1D(2)
++cm2 = m.Shift(3) & m.Scale(4)
++model_both_nested = cm1 & cm2
++sep_both = separability_matrix(model_both_nested)
++
++print("Test 3: (Linear1D & Linear1D) & (Shift & Scale)")
++print("Separability matrix:")
++print(sep_both)
++print()
++
++# Test 4: Compare nested vs flat
++flat_model = m.Linear1D(1) & m.Linear1D(2) & m.Shift(3) & m.Scale(4)
++sep_flat = separability_matrix(flat_model)
++
++print("Test 4: Flat version - Linear1D & Linear1D & Shift & Scale")
++print("Separability matrix:")
++print(sep_flat)
++print()
++
++print("Are nested and flat versions equal?", np.array_equal(sep_both, sep_flat))
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..71e5f6a1b4
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++"""Comprehensive test of separability_matrix with various model combinations"""
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix, is_separable
++import numpy as np
++
++def test_model(desc, model, expected_separable=None):
++    """Test a model and print results"""
++    print(f"\n{desc}")
++    print("-" * len(desc))
++    sep_matrix = separability_matrix(model)
++    is_sep = is_separable(model)
++    print(f"Model: n_inputs={model.n_inputs}, n_outputs={model.n_outputs}")
++    print("Separability matrix:")
++    print(sep_matrix)
++    print(f"Is separable: {is_sep}")
++    if expected_separable is not None:
++        print(f"Expected separable: {expected_separable}")
++        assert np.array_equal(is_sep, expected_separable), f"Mismatch! Got {is_sep}, expected {expected_separable}"
++    return sep_matrix
++
++print("Comprehensive separability tests")
++print("=" * 60)
++
++# Test 1: Simple models
++test_model("1. Single Linear1D", m.Linear1D(10), [True])
++test_model("2. Single Polynomial1D", m.Polynomial1D(2), [True])
++
++# Test 2: Simple compound models
++test_model("3. Linear1D & Linear1D", m.Linear1D(10) & m.Linear1D(5), [True, True])
++test_model("4. Shift & Scale", m.Shift(1) & m.Scale(2), [True, True])
++
++# Test 3: Non-separable models
++test_model("5. Rotation2D", m.Rotation2D(45), [False, False])
++test_model("6. Polynomial2D", m.Polynomial2D(2), [False])
++
++# Test 4: Pipe operations
++test_model("7. Shift | Scale", m.Shift(1) | m.Scale(2), [True])
++test_model("8. (Shift & Shift) | Rotation2D", m.Shift(1) & m.Shift(2) | m.Rotation2D(45), [False, False])
++
++# Test 5: Nested compound models (the original issue)
++cm = m.Linear1D(10) & m.Linear1D(5)
++test_model("9. Pix2Sky_TAN & (Linear1D & Linear1D)", m.Pix2Sky_TAN() & cm, [False, False, True, True])
++
++# Test 6: More complex nested models
++cm2 = m.Shift(1) & m.Scale(2) & m.Shift(3)
++test_model("10. Rotation2D & (Shift & Scale & Shift)", m.Rotation2D(45) & cm2, [False, False, True, True, True])
++
++# Test 7: Triple nesting
++inner = m.Linear1D(1) & m.Linear1D(2)
++middle = m.Polynomial1D(1) & inner
++outer = m.Shift(1) & middle
++test_model("11. Shift & (Poly1D & (Linear1D & Linear1D))", outer, [True, True, True, True])
++
++# Test 8: Mapping
++mapping = m.Mapping([0, 1, 0, 1])
++test_model("12. Shift & Shift | Mapping", m.Shift(1) & m.Shift(2) | mapping, [True, True, True, True])
++
++# Test 9: Arithmetic operations
++test_model("13. Linear1D + Linear1D", m.Linear1D(1) + m.Linear1D(2), [False])
++test_model("14. (Linear1D & Linear1D) + (Scale & Scale)", 
++           (m.Linear1D(1) & m.Linear1D(2)) + (m.Scale(1) & m.Scale(2)), [False, False])
++
++print("\n\nAll tests passed!")
+diff --git a/test_nested_compound.py b/test_nested_compound.py
+new file mode 100644
+index 0000000000..7a6e2f3754
+--- /dev/null
++++ b/test_nested_compound.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/env python
++"""Test for the nested compound model separability issue"""
++
++import pytest
++import numpy as np
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix, is_separable
++
++
++def test_nested_compound_separability():
++    """Test that nested compound models maintain correct separability."""
++    
++    # Create a simple compound model
++    cm = m.Linear1D(10) & m.Linear1D(5)
++    
++    # Create the same structure without nesting
++    model_flat = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++    
++    # Create the nested version
++    model_nested = m.Pix2Sky_TAN() & cm
++    
++    # Get separability matrices
++    sep_flat = separability_matrix(model_flat)
++    sep_nested = separability_matrix(model_nested)
++    
++    # They should be identical
++    assert np.array_equal(sep_flat, sep_nested), \
++        f"Separability matrices differ:\nFlat:\n{sep_flat}\nNested:\n{sep_nested}"
++    
++    # Check the expected structure
++    expected = np.array([
++        [True, True, False, False],
++        [True, True, False, False],
++        [False, False, True, False],
++        [False, False, False, True]
++    ])
++    
++    assert np.array_equal(sep_nested, expected), \
++        f"Unexpected separability matrix:\n{sep_nested}"
++    
++    # Also check is_separable
++    is_sep_flat = is_separable(model_flat)
++    is_sep_nested = is_separable(model_nested)
++    
++    assert np.array_equal(is_sep_flat, is_sep_nested), \
++        f"is_separable results differ: flat={is_sep_flat}, nested={is_sep_nested}"
++    
++    # The first two outputs should be non-separable (Pix2Sky_TAN)
++    # The last two should be separable (Linear1D models)
++    expected_is_sep = np.array([False, False, True, True])
++    assert np.array_equal(is_sep_nested, expected_is_sep), \
++        f"Unexpected is_separable result: {is_sep_nested}"
++
++
++def test_deeply_nested_compound():
++    """Test more complex nested structures."""
++    
++    # Create a deeply nested model
++    inner = m.Shift(1) & m.Scale(2)
++    middle = m.Linear1D(3) & inner
++    outer = m.Polynomial1D(1) & middle
++    
++    sep = separability_matrix(outer)
++    
++    # Check dimensions
++    assert sep.shape == (4, 4), f"Unexpected shape: {sep.shape}"
++    
++    # Check that it's block diagonal (each model is separable)
++    expected = np.array([
++        [True, False, False, False],
++        [False, True, False, False],
++        [False, False, True, False],
++        [False, False, False, True]
++    ])
++    
++    assert np.array_equal(sep, expected), \
++        f"Unexpected separability matrix for deeply nested model:\n{sep}"
++
++
++def test_nested_with_non_separable():
++    """Test nested models where some components are non-separable."""
++    
++    # Rotation2D is non-separable
++    inner = m.Rotation2D(45) & m.Linear1D(1)
++    outer = m.Shift(1) & inner
++    
++    sep = separability_matrix(outer)
++    is_sep = is_separable(outer)
++    
++    # Expected: first output is separable (Shift)
++    # Next two are not separable (Rotation2D)
++    # Last one is separable (Linear1D)
++    expected_is_sep = np.array([True, False, False, True])
++    
++    assert np.array_equal(is_sep, expected_is_sep), \
++        f"Unexpected is_separable result: {is_sep}"
++
++
++if __name__ == "__main__":
++    test_nested_compound_separability()
++    test_deeply_nested_compound()
++    test_nested_with_non_separable()
++    print("All tests passed!")
+diff --git a/test_separability_issue.py b/test_separability_issue.py
+new file mode 100644
+index 0000000000..f03309e26c
+--- /dev/null
++++ b/test_separability_issue.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python
++"""Test script to reproduce the separability matrix issue with nested CompoundModels"""
++
++from astropy.modeling import models as m
++from astropy.modeling.separable import separability_matrix
++import numpy as np
++
++print("Testing separability_matrix with nested CompoundModels")
++print("=" * 60)
++
++# Test 1: Simple compound model
++cm = m.Linear1D(10) & m.Linear1D(5)
++sep1 = separability_matrix(cm)
++print("Test 1: Linear1D(10) & Linear1D(5)")
++print("Separability matrix:")
++print(sep1)
++print("Expected: diagonal matrix (separable)")
++print()
++
++# Test 2: More complex model (not nested)
++model2 = m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5)
++sep2 = separability_matrix(model2)
++print("Test 2: Pix2Sky_TAN() & Linear1D(10) & Linear1D(5)")
++print("Separability matrix:")
++print(sep2)
++print("Expected: block diagonal matrix (separable)")
++print()
++
++# Test 3: Nested compound model (the problematic case)
++model3 = m.Pix2Sky_TAN() & cm
++sep3 = separability_matrix(model3)
++print("Test 3: Pix2Sky_TAN() & (Linear1D(10) & Linear1D(5))")
++print("Separability matrix:")
++print(sep3)
++print("Expected: block diagonal matrix (separable)")
++print("Actual: Last two outputs are NOT separable (bug!)")
++print()
++
++# Let's also check the internal representation
++print("Debugging information:")
++print(f"cm (Linear1D & Linear1D): n_inputs={cm.n_inputs}, n_outputs={cm.n_outputs}")
++print(f"model3 (Pix2Sky_TAN & cm): n_inputs={model3.n_inputs}, n_outputs={model3.n_outputs}")
++
++# Check if the issue is consistent
++print("\nChecking consistency:")
++print("Are sep2 and sep3 equal?", np.array_equal(sep2, sep3))
++print("Difference (XOR):")
++print(sep3 ^ sep2)

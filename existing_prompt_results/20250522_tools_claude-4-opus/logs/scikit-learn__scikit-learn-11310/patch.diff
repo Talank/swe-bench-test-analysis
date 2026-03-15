@@ -1,0 +1,378 @@
+diff --git a/sklearn/model_selection/_search.py b/sklearn/model_selection/_search.py
+index 99d6096af..c34432a2e 100644
+--- a/sklearn/model_selection/_search.py
++++ b/sklearn/model_selection/_search.py
+@@ -17,6 +17,7 @@ from collections import Mapping, namedtuple, defaultdict, Sequence, Iterable
+ from functools import partial, reduce
+ from itertools import product
+ import operator
++import time
+ import warnings
+ 
+ import numpy as np
+@@ -766,10 +767,12 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+         if self.refit:
+             self.best_estimator_ = clone(base_estimator).set_params(
+                 **self.best_params_)
++            refit_start_time = time.time()
+             if y is not None:
+                 self.best_estimator_.fit(X, y, **fit_params)
+             else:
+                 self.best_estimator_.fit(X, **fit_params)
++            self.refit_time_ = time.time() - refit_start_time
+ 
+         # Store the only scorer not as a dict for single metric evaluation
+         self.scorer_ = scorers if self.multimetric_ else scorers['score']
+@@ -1076,6 +1079,11 @@ class GridSearchCV(BaseSearchCV):
+     n_splits_ : int
+         The number of cross-validation splits (folds/iterations).
+ 
++    refit_time_ : float
++        Seconds used for refitting the best model on the whole dataset.
++
++        This is present only if ``refit`` is not False.
++
+     Notes
+     ------
+     The parameters selected are those that maximize the score of the left out
+@@ -1387,6 +1395,11 @@ class RandomizedSearchCV(BaseSearchCV):
+     n_splits_ : int
+         The number of cross-validation splits (folds/iterations).
+ 
++    refit_time_ : float
++        Seconds used for refitting the best model on the whole dataset.
++
++        This is present only if ``refit`` is not False.
++
+     Notes
+     -----
+     The parameters selected are those that maximize the score of the held-out
+diff --git a/sklearn/model_selection/tests/test_search.py b/sklearn/model_selection/tests/test_search.py
+index f436c7b55..10596fffa 100644
+--- a/sklearn/model_selection/tests/test_search.py
++++ b/sklearn/model_selection/tests/test_search.py
+@@ -640,6 +640,48 @@ def test_refit():
+     clf.fit(X, y)
+ 
+ 
++def test_refit_time():
++    # Test that refit_time_ attribute is correctly set
++    X, y = make_classification(n_samples=50, n_features=4, random_state=42)
++    
++    # Test GridSearchCV with refit=True
++    gs = GridSearchCV(SVC(gamma='scale'), {'C': [0.1, 1.0]}, cv=3, refit=True)
++    gs.fit(X, y)
++    assert_true(hasattr(gs, 'refit_time_'))
++    assert_true(isinstance(gs.refit_time_, float))
++    assert_true(gs.refit_time_ > 0)
++    
++    # Test GridSearchCV with refit=False
++    gs_no_refit = GridSearchCV(SVC(gamma='scale'), {'C': [0.1, 1.0]}, cv=3, refit=False)
++    gs_no_refit.fit(X, y)
++    assert_false(hasattr(gs_no_refit, 'refit_time_'))
++    
++    # Test RandomizedSearchCV with refit=True
++    rs = RandomizedSearchCV(SVC(gamma='scale'), {'C': [0.1, 0.5, 1.0, 2.0]},
++                            n_iter=2, cv=3, refit=True, random_state=42)
++    rs.fit(X, y)
++    assert_true(hasattr(rs, 'refit_time_'))
++    assert_true(isinstance(rs.refit_time_, float))
++    assert_true(rs.refit_time_ > 0)
++    
++    # Test with multi-metric scoring
++    scoring = {'accuracy': 'accuracy', 'f1_macro': 'f1_macro'}
++    gs_multi = GridSearchCV(SVC(gamma='scale'), {'C': [0.1, 1.0]}, cv=3,
++                            scoring=scoring, refit='accuracy')
++    gs_multi.fit(X, y)
++    assert_true(hasattr(gs_multi, 'refit_time_'))
++    assert_true(isinstance(gs_multi.refit_time_, float))
++    assert_true(gs_multi.refit_time_ > 0)
++    
++    # Test with n_jobs != 1
++    gs_parallel = GridSearchCV(SVC(gamma='scale'), {'C': [0.1, 1.0]}, cv=3,
++                               refit=True, n_jobs=2)
++    gs_parallel.fit(X, y)
++    assert_true(hasattr(gs_parallel, 'refit_time_'))
++    assert_true(isinstance(gs_parallel.refit_time_, float))
++    assert_true(gs_parallel.refit_time_ > 0)
++
++
+ def test_gridsearch_nd():
+     # Pass X as list in GridSearchCV
+     X_4d = np.arange(10 * 5 * 3 * 2).reshape(10, 5, 3, 2)
+diff --git a/test_refit_time.py b/test_refit_time.py
+new file mode 100644
+index 000000000..a7dd9abcc
+--- /dev/null
++++ b/test_refit_time.py
+@@ -0,0 +1,56 @@
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++# Test script to verify refit_time_ attribute
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++# Test with GridSearchCV
++print("Testing GridSearchCV...")
++gs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3
++)
++gs.fit(X, y)
++print("Mean fit times:", gs.cv_results_['mean_fit_time'])
++print("Mean score times:", gs.cv_results_['mean_score_time'])
++
++# Check if refit_time_ attribute exists
++if hasattr(gs, 'refit_time_'):
++    print("Refit time:", gs.refit_time_)
++else:
++    print("refit_time_ attribute not found")
++
++# Test with RandomizedSearchCV
++print("\nTesting RandomizedSearchCV...")
++rs = sklearn.model_selection.RandomizedSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_distributions={'n_estimators': [2, 3, 4, 5, 6, 7, 8, 9, 10]},
++    n_iter=5,
++    cv=3,
++    random_state=42
++)
++rs.fit(X, y)
++print("Mean fit times:", rs.cv_results_['mean_fit_time'])
++print("Mean score times:", rs.cv_results_['mean_score_time'])
++
++# Check if refit_time_ attribute exists
++if hasattr(rs, 'refit_time_'):
++    print("Refit time:", rs.refit_time_)
++else:
++    print("refit_time_ attribute not found")
++
++# Test with refit=False
++print("\nTesting with refit=False...")
++gs_no_refit = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4]},
++    cv=3,
++    refit=False
++)
++gs_no_refit.fit(X, y)
++if hasattr(gs_no_refit, 'refit_time_'):
++    print("Refit time (should not exist):", gs_no_refit.refit_time_)
++else:
++    print("refit_time_ attribute correctly not present when refit=False")
+diff --git a/test_refit_time_comprehensive.py b/test_refit_time_comprehensive.py
+new file mode 100644
+index 000000000..c406be99d
+--- /dev/null
++++ b/test_refit_time_comprehensive.py
+@@ -0,0 +1,85 @@
++import numpy as np
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
++from sklearn.svm import SVC
++
++def test_refit_time_attribute():
++    """Test that refit_time_ attribute is correctly set"""
++    X, y = sklearn.datasets.load_iris(return_X_y=True)
++    
++    # Test 1: GridSearchCV with refit=True
++    print("Test 1: GridSearchCV with refit=True")
++    gs = GridSearchCV(
++        estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++        param_grid={'n_estimators': [2, 3, 4]},
++        cv=3,
++        refit=True
++    )
++    gs.fit(X, y)
++    assert hasattr(gs, 'refit_time_'), "refit_time_ attribute should exist when refit=True"
++    assert isinstance(gs.refit_time_, float), "refit_time_ should be a float"
++    assert gs.refit_time_ > 0, "refit_time_ should be positive"
++    print(f"  [OK] refit_time_ = {gs.refit_time_:.6f} seconds")
++    
++    # Test 2: GridSearchCV with refit=False
++    print("\nTest 2: GridSearchCV with refit=False")
++    gs_no_refit = GridSearchCV(
++        estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++        param_grid={'n_estimators': [2, 3]},
++        cv=3,
++        refit=False
++    )
++    gs_no_refit.fit(X, y)
++    assert not hasattr(gs_no_refit, 'refit_time_'), "refit_time_ should not exist when refit=False"
++    print("  [OK] refit_time_ correctly not present")
++    
++    # Test 3: RandomizedSearchCV with refit=True
++    print("\nTest 3: RandomizedSearchCV with refit=True")
++    rs = RandomizedSearchCV(
++        estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++        param_distributions={'n_estimators': [2, 3, 4, 5, 6]},
++        n_iter=3,
++        cv=3,
++        refit=True,
++        random_state=42
++    )
++    rs.fit(X, y)
++    assert hasattr(rs, 'refit_time_'), "refit_time_ attribute should exist when refit=True"
++    assert isinstance(rs.refit_time_, float), "refit_time_ should be a float"
++    assert rs.refit_time_ > 0, "refit_time_ should be positive"
++    print(f"  [OK] refit_time_ = {rs.refit_time_:.6f} seconds")
++    
++    # Test 4: Multi-metric evaluation with refit
++    print("\nTest 4: Multi-metric evaluation with refit")
++    scoring = {'accuracy': 'accuracy', 'f1_macro': 'f1_macro'}
++    gs_multi = GridSearchCV(
++        estimator=SVC(random_state=42),
++        param_grid={'C': [0.1, 1.0]},
++        cv=3,
++        scoring=scoring,
++        refit='accuracy'  # Refit on accuracy
++    )
++    gs_multi.fit(X, y)
++    assert hasattr(gs_multi, 'refit_time_'), "refit_time_ should exist with multi-metric and refit"
++    assert isinstance(gs_multi.refit_time_, float), "refit_time_ should be a float"
++    assert gs_multi.refit_time_ > 0, "refit_time_ should be positive"
++    print(f"  [OK] refit_time_ = {gs_multi.refit_time_:.6f} seconds")
++    
++    # Test 5: Verify refit_time_ is reasonable compared to mean_fit_time
++    print("\nTest 5: Verify refit_time_ is reasonable")
++    mean_fit_time = np.mean(gs.cv_results_['mean_fit_time'])
++    # Refit time should be in the same order of magnitude as mean fit time
++    # (usually slightly larger because it's on the full dataset)
++    ratio = gs.refit_time_ / mean_fit_time
++    print(f"  Mean fit time during CV: {mean_fit_time:.6f} seconds")
++    print(f"  Refit time on full data: {gs.refit_time_:.6f} seconds")
++    print(f"  Ratio (refit/mean_fit): {ratio:.2f}")
++    assert 0.1 < ratio < 10, "refit_time_ should be comparable to mean_fit_time"
++    print("  [OK] refit_time_ is reasonable")
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_refit_time_attribute()
+diff --git a/test_refit_time_parallel.py b/test_refit_time_parallel.py
+new file mode 100644
+index 000000000..5680ecc5a
+--- /dev/null
++++ b/test_refit_time_parallel.py
+@@ -0,0 +1,45 @@
++"""Test refit_time_ with parallel processing (n_jobs != 1)"""
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++# Test with n_jobs != 1 as mentioned in the problem statement
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++print("Testing with n_jobs=2...")
++gs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5], 'max_depth': [2, 3]},
++    cv=3,
++    n_jobs=2,  # Parallel processing
++    refit=True
++)
++gs.fit(X, y)
++
++print(f"Mean fit times: {gs.cv_results_['mean_fit_time']}")
++print(f"Mean score times: {gs.cv_results_['mean_score_time']}")
++
++if hasattr(gs, 'refit_time_'):
++    print(f"Refit time: {gs.refit_time_:.6f} seconds")
++    print("SUCCESS: refit_time_ attribute is available even with n_jobs=2")
++else:
++    print("FAIL: refit_time_ attribute not found")
++
++# Also test with n_jobs=-1 (use all cores)
++print("\nTesting with n_jobs=-1 (all cores)...")
++rs = sklearn.model_selection.RandomizedSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_distributions={'n_estimators': range(2, 20), 'max_depth': [2, 3, 4, None]},
++    n_iter=10,
++    cv=3,
++    n_jobs=-1,  # Use all available cores
++    refit=True,
++    random_state=42
++)
++rs.fit(X, y)
++
++if hasattr(rs, 'refit_time_'):
++    print(f"Refit time: {rs.refit_time_:.6f} seconds")
++    print("SUCCESS: refit_time_ attribute is available even with n_jobs=-1")
++else:
++    print("FAIL: refit_time_ attribute not found")
+diff --git a/test_refit_time_unit.py b/test_refit_time_unit.py
+new file mode 100644
+index 000000000..d73ccd7a5
+--- /dev/null
++++ b/test_refit_time_unit.py
+@@ -0,0 +1,66 @@
++"""Unit test for refit_time_ attribute in BaseSearchCV"""
++import pytest
++import numpy as np
++from sklearn.datasets import make_classification
++from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
++from sklearn.svm import SVC
++
++
++def test_refit_time_attribute():
++    """Test that refit_time_ attribute is correctly set in search CV classes"""
++    X, y = make_classification(n_samples=50, n_features=4, random_state=42)
++    
++    # Test GridSearchCV with refit=True
++    gs = GridSearchCV(
++        SVC(random_state=42),
++        {'C': [0.1, 1.0]},
++        cv=3,
++        refit=True
++    )
++    gs.fit(X, y)
++    assert hasattr(gs, 'refit_time_')
++    assert isinstance(gs.refit_time_, float)
++    assert gs.refit_time_ > 0
++    
++    # Test GridSearchCV with refit=False
++    gs_no_refit = GridSearchCV(
++        SVC(random_state=42),
++        {'C': [0.1, 1.0]},
++        cv=3,
++        refit=False
++    )
++    gs_no_refit.fit(X, y)
++    assert not hasattr(gs_no_refit, 'refit_time_')
++    
++    # Test RandomizedSearchCV with refit=True
++    rs = RandomizedSearchCV(
++        SVC(random_state=42),
++        {'C': [0.1, 0.5, 1.0, 2.0]},
++        n_iter=2,
++        cv=3,
++        refit=True,
++        random_state=42
++    )
++    rs.fit(X, y)
++    assert hasattr(rs, 'refit_time_')
++    assert isinstance(rs.refit_time_, float)
++    assert rs.refit_time_ > 0
++    
++    # Test with multi-metric scoring
++    scoring = {'accuracy': 'accuracy', 'f1_macro': 'f1_macro'}
++    gs_multi = GridSearchCV(
++        SVC(random_state=42),
++        {'C': [0.1, 1.0]},
++        cv=3,
++        scoring=scoring,
++        refit='accuracy'
++    )
++    gs_multi.fit(X, y)
++    assert hasattr(gs_multi, 'refit_time_')
++    assert isinstance(gs_multi.refit_time_, float)
++    assert gs_multi.refit_time_ > 0
++
++
++if __name__ == '__main__':
++    test_refit_time_attribute()
++    print("All tests passed!")

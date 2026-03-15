@@ -1,0 +1,382 @@
+diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py
+index f957a667b2..720767aa9e 100644
+--- a/django/contrib/staticfiles/storage.py
++++ b/django/contrib/staticfiles/storage.py
+@@ -261,6 +261,7 @@ class HashedFilesMixin:
+ 
+         paths = {path: paths[path] for path in adjustable_paths}
+ 
++        substitutions = False
+         for i in range(self.max_post_process_passes):
+             substitutions = False
+             for name, hashed_name, processed, subst in self._post_process(paths, adjustable_paths, hashed_files):
+diff --git a/test_comprehensive_max_post_process_passes.py b/test_comprehensive_max_post_process_passes.py
+new file mode 100644
+index 0000000000..7c915b95b7
+--- /dev/null
++++ b/test_comprehensive_max_post_process_passes.py
+@@ -0,0 +1,88 @@
++"""Comprehensive test for ManifestStaticFilesStorage with various max_post_process_passes values"""
++import os
++import tempfile
++import shutil
++from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++from django.core.files.base import ContentFile
++from django.test import override_settings
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        STATIC_URL='/static/',
++        STATIC_ROOT=tempfile.mkdtemp(),
++        STATICFILES_STORAGE='django.contrib.staticfiles.storage.StaticFilesStorage',
++        INSTALLED_APPS=[
++            'django.contrib.staticfiles',
++        ],
++    )
++
++def test_various_max_post_process_passes():
++    """Test ManifestStaticFilesStorage with different max_post_process_passes values"""
++    
++    test_cases = [0, 1, 2, 5]  # Test with various values including 0
++    
++    for max_passes in test_cases:
++        print(f"\nTesting with max_post_process_passes = {max_passes}")
++        
++        class TestStorage(ManifestStaticFilesStorage):
++            max_post_process_passes = max_passes
++        
++        storage = TestStorage()
++        
++        # Create test files
++        test_css = """
++        body {
++            background: url('image.png');
++        }
++        .icon {
++            background: url('icon.svg');
++        }
++        """
++        
++        test_js = """
++        const imagePath = '/static/image.png';
++        const iconPath = '/static/icon.svg';
++        """
++        
++        # Save the test files
++        storage.save('test.css', ContentFile(test_css.encode('utf-8')))
++        storage.save('test.js', ContentFile(test_js.encode('utf-8')))
++        storage.save('image.png', ContentFile(b'fake image data'))
++        storage.save('icon.svg', ContentFile(b'<svg>fake svg</svg>'))
++        
++        # Try to post-process
++        try:
++            paths = {
++                'test.css': (storage, 'test.css'),
++                'test.js': (storage, 'test.js'),
++                'image.png': (storage, 'image.png'),
++                'icon.svg': (storage, 'icon.svg')
++            }
++            processed_files = list(storage.post_process(paths))
++            print(f"✓ Success! Post-processing completed without errors.")
++            print(f"  Processed {len(processed_files)} files")
++            
++            # Check if files were processed correctly
++            has_error = any(isinstance(item[2], Exception) for item in processed_files)
++            if has_error:
++                print("  Warning: Some files had processing errors")
++            
++        except Exception as e:
++            print(f"✗ Error: {type(e).__name__}: {e}")
++            return False
++        finally:
++            # Cleanup
++            if hasattr(storage, 'hashed_files'):
++                storage.hashed_files.clear()
++    
++    # Final cleanup
++    if os.path.exists(settings.STATIC_ROOT):
++        shutil.rmtree(settings.STATIC_ROOT)
++    
++    return True
++
++if __name__ == '__main__':
++    test_various_max_post_process_passes()
+diff --git a/test_max_post_process_passes_zero.py b/test_max_post_process_passes_zero.py
+new file mode 100644
+index 0000000000..523a46940f
+--- /dev/null
++++ b/test_max_post_process_passes_zero.py
+@@ -0,0 +1,60 @@
++"""Test for ManifestStaticFilesStorage with max_post_process_passes = 0"""
++import os
++import tempfile
++import shutil
++from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++from django.core.files.base import ContentFile
++from django.test import override_settings
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        STATIC_URL='/static/',
++        STATIC_ROOT=tempfile.mkdtemp(),
++        STATICFILES_STORAGE='django.contrib.staticfiles.storage.StaticFilesStorage',
++        INSTALLED_APPS=[
++            'django.contrib.staticfiles',
++        ],
++    )
++
++class MyManifestStaticFilesStorage(ManifestStaticFilesStorage):
++    max_post_process_passes = 0
++
++def test_max_post_process_passes_zero():
++    """Test that ManifestStaticFilesStorage works with max_post_process_passes = 0"""
++    storage = MyManifestStaticFilesStorage()
++    
++    # Create a test CSS file
++    test_css = """
++    body {
++        background: url('image.png');
++    }
++    """
++    
++    # Save the test file
++    storage.save('test.css', ContentFile(test_css.encode('utf-8')))
++    storage.save('image.png', ContentFile(b'fake image data'))
++    
++    # Try to post-process - this should fail with the current code
++    try:
++        paths = {'test.css': (storage, 'test.css'), 'image.png': (storage, 'image.png')}
++        processed_files = list(storage.post_process(paths))
++        print("Success! Post-processing completed without errors.")
++        print(f"Processed files: {processed_files}")
++    except UnboundLocalError as e:
++        print(f"Error occurred as expected: {e}")
++        return False
++    except Exception as e:
++        print(f"Unexpected error: {type(e).__name__}: {e}")
++        return False
++    finally:
++        # Cleanup
++        if os.path.exists(settings.STATIC_ROOT):
++            shutil.rmtree(settings.STATIC_ROOT)
++    
++    return True
++
++if __name__ == '__main__':
++    test_max_post_process_passes_zero()
+diff --git a/test_original_scenario.py b/test_original_scenario.py
+new file mode 100644
+index 0000000000..bf9734d70e
+--- /dev/null
++++ b/test_original_scenario.py
+@@ -0,0 +1,61 @@
++"""Test the original scenario from the problem statement"""
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++from django.conf import settings
++from django.core.management import call_command
++
++# Configure Django settings
++settings.configure(
++    DEBUG=False,
++    SECRET_KEY='test-secret-key',
++    STATIC_URL='/static/',
++    STATIC_ROOT=tempfile.mkdtemp(),
++    STATICFILES_STORAGE='test_original_scenario.MyManifestStaticFilesStorage',
++    INSTALLED_APPS=[
++        'django.contrib.staticfiles',
++    ],
++    STATICFILES_DIRS=[
++        tempfile.mkdtemp(),
++    ],
++)
++
++import django
++django.setup()
++
++from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++
++class MyManifestStaticFilesStorage(ManifestStaticFilesStorage):
++    max_post_process_passes = 0
++
++# Create a test CSS file in the static directory
++static_dir = settings.STATICFILES_DIRS[0]
++os.makedirs(os.path.join(static_dir, 'css'), exist_ok=True)
++with open(os.path.join(static_dir, 'css', 'test.css'), 'w') as f:
++    f.write("""
++body {
++    background: url('../img/test.png');
++}
++""")
++
++os.makedirs(os.path.join(static_dir, 'img'), exist_ok=True)
++with open(os.path.join(static_dir, 'img', 'test.png'), 'wb') as f:
++    f.write(b'fake image data')
++
++try:
++    # Run collectstatic - this should work without UnboundLocalError
++    call_command('collectstatic', interactive=False, verbosity=2)
++    print("\nSUCCESS: collectstatic completed without UnboundLocalError!")
++except UnboundLocalError as e:
++    print(f"\nFAILED: UnboundLocalError occurred: {e}")
++except Exception as e:
++    print(f"\nOther error: {type(e).__name__}: {e}")
++finally:
++    # Cleanup
++    shutil.rmtree(settings.STATIC_ROOT, ignore_errors=True)
++    shutil.rmtree(static_dir, ignore_errors=True)
+diff --git a/test_original_scenario2.py b/test_original_scenario2.py
+new file mode 100644
+index 0000000000..9aae523e36
+--- /dev/null
++++ b/test_original_scenario2.py
+@@ -0,0 +1,92 @@
++"""Test the original scenario from the problem statement"""
++import os
++import sys
++import tempfile
++import shutil
++import subprocess
++
++# Create a test Django project
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create settings.py
++settings_content = """
++import os
++import tempfile
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++SECRET_KEY = 'test-secret-key'
++DEBUG = False
++STATIC_URL = '/static/'
++STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
++STATICFILES_STORAGE = 'storage.MyManifestStaticFilesStorage'
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++STATICFILES_DIRS = [
++    os.path.join(BASE_DIR, 'static'),
++]
++"""
++
++# Create storage.py with the custom storage class
++storage_content = """
++from django.contrib.staticfiles.storage import ManifestStaticFilesStorage
++
++class MyManifestStaticFilesStorage(ManifestStaticFilesStorage):
++    max_post_process_passes = 0
++"""
++
++# Create the files
++with open('settings.py', 'w') as f:
++    f.write(settings_content)
++
++with open('storage.py', 'w') as f:
++    f.write(storage_content)
++
++# Create static directory and files
++os.makedirs('static/css', exist_ok=True)
++os.makedirs('static/img', exist_ok=True)
++
++with open('static/css/test.css', 'w') as f:
++    f.write("""body {
++    background: url('../img/test.png');
++}""")
++
++with open('static/img/test.png', 'wb') as f:
++    f.write(b'fake image data')
++
++# Run collectstatic
++env = os.environ.copy()
++env['PYTHONPATH'] = '/testbed:' + test_dir
++env['DJANGO_SETTINGS_MODULE'] = 'settings'
++
++try:
++    result = subprocess.run(
++        [sys.executable, '-m', 'django', 'collectstatic', '--noinput', '-v', '2'],
++        env=env,
++        capture_output=True,
++        text=True
++    )
++    
++    if result.returncode == 0:
++        print("SUCCESS: collectstatic completed without UnboundLocalError!")
++        print("\nOutput:")
++        print(result.stdout)
++    else:
++        print("FAILED: collectstatic returned non-zero exit code")
++        print("\nStdout:")
++        print(result.stdout)
++        print("\nStderr:")
++        print(result.stderr)
++        
++        # Check if it's the UnboundLocalError
++        if "UnboundLocalError" in result.stderr:
++            print("\nUnboundLocalError detected in the error output!")
++        
++except Exception as e:
++    print(f"Error running collectstatic: {e}")
++
++finally:
++    # Cleanup
++    os.chdir('/')
++    shutil.rmtree(test_dir, ignore_errors=True)
+diff --git a/tests/staticfiles_tests/test_storage.py b/tests/staticfiles_tests/test_storage.py
+index db655f2453..fe1fc9256a 100644
+--- a/tests/staticfiles_tests/test_storage.py
++++ b/tests/staticfiles_tests/test_storage.py
+@@ -635,3 +635,40 @@ class TestCollectionHashedFilesCache(CollectionTestCase):
+                 content = relfile.read()
+                 self.assertIn(b'foo.57a5cb9ba68d.png', content)
+                 self.assertIn(b'xyz.57a5cb9ba68d.png', content)
++
++
++class TestManifestStaticFilesStorageWithMaxPostProcessPassesZero(unittest.TestCase):
++    """
++    Test that ManifestStaticFilesStorage works correctly when max_post_process_passes = 0.
++    This tests the fix for the UnboundLocalError that occurred when the substitutions
++    variable was not initialized before the loop.
++    """
++    
++    def test_post_process_with_zero_passes(self):
++        """
++        Test that post_process works without UnboundLocalError when max_post_process_passes = 0.
++        """
++        # Create a custom storage class with max_post_process_passes = 0
++        class ZeroPassesManifestStaticFilesStorage(storage.ManifestStaticFilesStorage):
++            max_post_process_passes = 0
++        
++        # Create a temporary directory for testing
++        with tempfile.TemporaryDirectory() as temp_dir:
++            test_storage = ZeroPassesManifestStaticFilesStorage(location=temp_dir)
++            
++            # Create simple test files
++            test_storage.save('test.txt', StringIO('Hello World'))
++            test_storage.save('test.css', StringIO('body { color: red; }'))
++            
++            # Prepare paths for post-processing
++            paths = {
++                'test.txt': (test_storage, 'test.txt'),
++                'test.css': (test_storage, 'test.css'),
++            }
++            
++            # This should not raise UnboundLocalError
++            try:
++                processed = list(test_storage.post_process(paths))
++                # Test passes if no UnboundLocalError is raised
++            except UnboundLocalError:
++                self.fail("UnboundLocalError raised when max_post_process_passes = 0")

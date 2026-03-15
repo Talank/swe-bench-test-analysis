@@ -1,0 +1,311 @@
+diff --git a/CHANGES_SUMMARY.md b/CHANGES_SUMMARY.md
+new file mode 100644
+index 0000000000..ffa217a152
+--- /dev/null
++++ b/CHANGES_SUMMARY.md
+@@ -0,0 +1,32 @@
++# Summary of Changes for SQLite Version Requirement Update
++
++## Changes Made:
++
++1. **Updated SQLite version check** (`django/db/backends/sqlite3/base.py`):
++   - Changed minimum version from 3.8.3 to 3.9.0
++   - Updated error message accordingly
++
++2. **Updated documentation** (`docs/ref/databases.txt`):
++   - Changed "Django supports SQLite 3.8.3 and later" to "Django supports SQLite 3.9.0 and later"
++
++3. **Updated test case** (`tests/backends/sqlite/tests.py`):
++   - Updated test to check that SQLite 3.8.9 fails (instead of 3.8.2)
++   - Updated expected error message
++
++4. **Updated code comment** (`django/db/backends/sqlite3/introspection.py`):
++   - Changed comment from "SQLite 3.8.9+ has 5 columns" to "SQLite 3.9.0+ has 5 columns"
++   - Simplified comment since we now require 3.9.0+
++
++5. **Added release notes** (`docs/releases/3.2.txt`):
++   - Added section "Dropped support for SQLite < 3.9.0"
++
++## Rationale:
++- SQLite 3.9.0 was released in October 2015 (5+ years ago)
++- Supports indexes on expressions and SQLITE_ENABLE_JSON1 compile-time option
++- Ubuntu Xenial (EOL April 2021) ships with SQLite 3.11.0
++- Debian Jessie (EOL June 2020) shipped with 3.8.7
++
++## Tests:
++- All SQLite backend tests pass
++- Version check correctly rejects SQLite < 3.9.0
++- Version check correctly accepts SQLite >= 3.9.0
+diff --git a/django/db/backends/sqlite3/base.py b/django/db/backends/sqlite3/base.py
+index ab4ea70492..dcff5534e0 100644
+--- a/django/db/backends/sqlite3/base.py
++++ b/django/db/backends/sqlite3/base.py
+@@ -64,8 +64,8 @@ def list_aggregate(function):
+ 
+ 
+ def check_sqlite_version():
+-    if Database.sqlite_version_info < (3, 8, 3):
+-        raise ImproperlyConfigured('SQLite 3.8.3 or later is required (found %s).' % Database.sqlite_version)
++    if Database.sqlite_version_info < (3, 9, 0):
++        raise ImproperlyConfigured('SQLite 3.9.0 or later is required (found %s).' % Database.sqlite_version)
+ 
+ 
+ check_sqlite_version()
+diff --git a/django/db/backends/sqlite3/introspection.py b/django/db/backends/sqlite3/introspection.py
+index 1d7ce3fabf..f41b9ac257 100644
+--- a/django/db/backends/sqlite3/introspection.py
++++ b/django/db/backends/sqlite3/introspection.py
+@@ -381,8 +381,7 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
+         # Get the index info
+         cursor.execute("PRAGMA index_list(%s)" % self.connection.ops.quote_name(table_name))
+         for row in cursor.fetchall():
+-            # SQLite 3.8.9+ has 5 columns, however older versions only give 3
+-            # columns. Discard last 2 columns if there.
++            # SQLite 3.9.0+ has 5 columns. Discard last 2 columns.
+             number, index, unique = row[:3]
+             cursor.execute(
+                 "SELECT sql FROM sqlite_master "
+diff --git a/docs/ref/databases.txt b/docs/ref/databases.txt
+index 809ee68db6..8fc9e89662 100644
+--- a/docs/ref/databases.txt
++++ b/docs/ref/databases.txt
+@@ -679,7 +679,7 @@ appropriate typecasting.
+ SQLite notes
+ ============
+ 
+-Django supports SQLite 3.8.3 and later.
++Django supports SQLite 3.9.0 and later.
+ 
+ SQLite_ provides an excellent development alternative for applications that
+ are predominantly read-only or require a smaller installation footprint. As
+diff --git a/docs/releases/3.2.txt b/docs/releases/3.2.txt
+index 8cd77ffad0..8190653a28 100644
+--- a/docs/releases/3.2.txt
++++ b/docs/releases/3.2.txt
+@@ -605,6 +605,11 @@ Dropped support for MySQL 5.6
+ The end of upstream support for MySQL 5.6 is April 2021. Django 3.2 supports
+ MySQL 5.7 and higher.
+ 
++Dropped support for SQLite < 3.9.0
++----------------------------------
++
++Django 3.2 supports SQLite 3.9.0 and higher.
++
+ Miscellaneous
+ -------------
+ 
+diff --git a/test_sqlite_check.py b/test_sqlite_check.py
+new file mode 100644
+index 0000000000..a36fa15c76
+--- /dev/null
++++ b/test_sqlite_check.py
+@@ -0,0 +1,59 @@
++#!/usr/bin/env python
++"""Test the check_sqlite_version function directly."""
++from unittest import mock
++from sqlite3 import dbapi2 as Database
++
++# Define the function locally to test it
++def check_sqlite_version():
++    if Database.sqlite_version_info < (3, 8, 3):
++        raise Exception('SQLite 3.8.3 or later is required (found %s).' % Database.sqlite_version)
++
++# Test with different versions
++test_versions = [
++    ((3, 8, 2), '3.8.2', False),  # Should fail
++    ((3, 8, 3), '3.8.3', True),   # Should pass (current minimum)
++    ((3, 8, 9), '3.8.9', True),   # Should pass
++    ((3, 9, 0), '3.9.0', True),   # Should pass (new minimum)
++    ((3, 10, 0), '3.10.0', True), # Should pass
++]
++
++print("Testing current check_sqlite_version (requires >= 3.8.3):")
++for version_info, version_str, should_pass in test_versions:
++    with mock.patch.object(Database, 'sqlite_version_info', version_info), \
++         mock.patch.object(Database, 'sqlite_version', version_str):
++        try:
++            check_sqlite_version()
++            result = "PASS"
++        except Exception as e:
++            result = "FAIL"
++        
++        expected = "PASS" if should_pass else "FAIL"
++        status = "OK" if result == expected else "WRONG"
++        print(f"  SQLite {version_str}: {result} (expected {expected}) [{status}]")
++
++# Now test with new requirement (>= 3.9.0)
++print("\nTesting new check_sqlite_version (requires >= 3.9.0):")
++def check_sqlite_version_new():
++    if Database.sqlite_version_info < (3, 9, 0):
++        raise Exception('SQLite 3.9.0 or later is required (found %s).' % Database.sqlite_version)
++
++test_versions_new = [
++    ((3, 8, 2), '3.8.2', False),   # Should fail
++    ((3, 8, 3), '3.8.3', False),   # Should fail (was passing before)
++    ((3, 8, 9), '3.8.9', False),   # Should fail (was passing before)
++    ((3, 9, 0), '3.9.0', True),    # Should pass (new minimum)
++    ((3, 10, 0), '3.10.0', True),  # Should pass
++]
++
++for version_info, version_str, should_pass in test_versions_new:
++    with mock.patch.object(Database, 'sqlite_version_info', version_info), \
++         mock.patch.object(Database, 'sqlite_version', version_str):
++        try:
++            check_sqlite_version_new()
++            result = "PASS"
++        except Exception as e:
++            result = "FAIL"
++        
++        expected = "PASS" if should_pass else "FAIL"
++        status = "OK" if result == expected else "WRONG"
++        print(f"  SQLite {version_str}: {result} (expected {expected}) [{status}]")
+diff --git a/test_sqlite_version.py b/test_sqlite_version.py
+new file mode 100644
+index 0000000000..c29e841811
+--- /dev/null
++++ b/test_sqlite_version.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python
++"""Test script to verify SQLite version checking."""
++import sys
++from unittest import mock
++
++# Mock the sqlite3 module to test version checking
++import sqlite3 as dbapi2
++
++print("Current SQLite version:", dbapi2.sqlite_version)
++print("Current SQLite version info:", dbapi2.sqlite_version_info)
++
++# Test the check_sqlite_version function
++try:
++    from django.db.backends.sqlite3.base import check_sqlite_version
++    print("\nTesting check_sqlite_version with current version...")
++    check_sqlite_version()
++    print("OK: Current version passes check")
++except Exception as e:
++    print("ERROR:", e)
++
++# Test with older versions
++test_versions = [
++    ((3, 8, 2), '3.8.2'),
++    ((3, 8, 3), '3.8.3'),
++    ((3, 8, 9), '3.8.9'),
++    ((3, 9, 0), '3.9.0'),
++    ((3, 10, 0), '3.10.0'),
++]
++
++for version_info, version_str in test_versions:
++    print(f"\nTesting with SQLite {version_str}...")
++    with mock.patch.object(dbapi2, 'sqlite_version_info', version_info), \
++         mock.patch.object(dbapi2, 'sqlite_version', version_str):
++        try:
++            check_sqlite_version()
++            print(f"OK: SQLite {version_str} passes check")
++        except Exception as e:
++            print(f"ERROR: SQLite {version_str} fails check: {e}")
+diff --git a/test_sqlite_version2.py b/test_sqlite_version2.py
+new file mode 100644
+index 0000000000..e818bcf7d0
+--- /dev/null
++++ b/test_sqlite_version2.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++"""Test script to verify SQLite version checking."""
++import sys
++from unittest import mock
++
++# Test with older versions
++test_versions = [
++    ((3, 8, 2), '3.8.2', False),  # Should fail
++    ((3, 8, 3), '3.8.3', True),   # Should pass (current minimum)
++    ((3, 8, 9), '3.8.9', True),   # Should pass
++    ((3, 9, 0), '3.9.0', True),   # Should pass (new minimum)
++    ((3, 10, 0), '3.10.0', True), # Should pass
++]
++
++for version_info, version_str, should_pass in test_versions:
++    print(f"\nTesting with SQLite {version_str}...")
++    
++    # We need to mock before importing
++    with mock.patch('sqlite3.sqlite_version_info', version_info), \
++         mock.patch('sqlite3.sqlite_version', version_str):
++        
++        # Remove the module from cache if it exists
++        if 'django.db.backends.sqlite3.base' in sys.modules:
++            del sys.modules['django.db.backends.sqlite3.base']
++        
++        try:
++            from django.db.backends.sqlite3.base import check_sqlite_version
++            print(f"OK: SQLite {version_str} passes check")
++            if not should_pass:
++                print(f"WARNING: SQLite {version_str} should have failed but passed!")
++        except Exception as e:
++            print(f"ERROR: SQLite {version_str} fails check: {e}")
++            if should_pass:
++                print(f"WARNING: SQLite {version_str} should have passed but failed!")
+diff --git a/tests/backends/sqlite/tests.py b/tests/backends/sqlite/tests.py
+index 17a58f32ae..922a2e06ae 100644
+--- a/tests/backends/sqlite/tests.py
++++ b/tests/backends/sqlite/tests.py
+@@ -30,9 +30,9 @@ class Tests(TestCase):
+     longMessage = True
+ 
+     def test_check_sqlite_version(self):
+-        msg = 'SQLite 3.8.3 or later is required (found 3.8.2).'
+-        with mock.patch.object(dbapi2, 'sqlite_version_info', (3, 8, 2)), \
+-                mock.patch.object(dbapi2, 'sqlite_version', '3.8.2'), \
++        msg = 'SQLite 3.9.0 or later is required (found 3.8.9).'
++        with mock.patch.object(dbapi2, 'sqlite_version_info', (3, 8, 9)), \
++                mock.patch.object(dbapi2, 'sqlite_version', '3.8.9'), \
+                 self.assertRaisesMessage(ImproperlyConfigured, msg):
+             check_sqlite_version()
+ 
+diff --git a/verify_version_check.py b/verify_version_check.py
+new file mode 100644
+index 0000000000..c12eed827a
+--- /dev/null
++++ b/verify_version_check.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Verify that the SQLite version check is working correctly."""
++import sys
++from unittest import mock
++
++# Test that importing fails with old SQLite version
++print("Testing that SQLite 3.8.9 fails the version check...")
++with mock.patch('sqlite3.sqlite_version_info', (3, 8, 9)), \
++     mock.patch('sqlite3.sqlite_version', '3.8.9'):
++    try:
++        # Clear any cached imports
++        if 'django.db.backends.sqlite3.base' in sys.modules:
++            del sys.modules['django.db.backends.sqlite3.base']
++        if 'django.db.backends.sqlite3' in sys.modules:
++            del sys.modules['django.db.backends.sqlite3']
++        
++        from django.db.backends.sqlite3.base import DatabaseWrapper
++        print("ERROR: Import succeeded but should have failed!")
++        sys.exit(1)
++    except Exception as e:
++        if "SQLite 3.9.0 or later is required" in str(e):
++            print("OK: Got expected error:", e)
++        else:
++            print("ERROR: Got unexpected error:", e)
++            sys.exit(1)
++
++print("\nTesting that SQLite 3.9.0 passes the version check...")
++with mock.patch('sqlite3.sqlite_version_info', (3, 9, 0)), \
++     mock.patch('sqlite3.sqlite_version', '3.9.0'):
++    try:
++        # Clear any cached imports
++        if 'django.db.backends.sqlite3.base' in sys.modules:
++            del sys.modules['django.db.backends.sqlite3.base']
++        if 'django.db.backends.sqlite3' in sys.modules:
++            del sys.modules['django.db.backends.sqlite3']
++        
++        from django.db.backends.sqlite3.base import DatabaseWrapper
++        print("OK: Import succeeded as expected")
++    except Exception as e:
++        print("ERROR: Import failed but should have succeeded:", e)
++        sys.exit(1)
++
++print("\nAll checks passed!")

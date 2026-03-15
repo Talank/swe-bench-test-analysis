@@ -1,0 +1,552 @@
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 1ba093e51f..095ad0ccf0 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -344,7 +344,12 @@ class ManagementUtility:
+         # Preprocess options to extract --settings and --pythonpath.
+         # These options could affect the commands that are available, so they
+         # must be processed early.
+-        parser = CommandParser(usage='%(prog)s subcommand [options] [args]', add_help=False, allow_abbrev=False)
++        parser = CommandParser(
++            prog=self.prog_name,
++            usage='%(prog)s subcommand [options] [args]',
++            add_help=False,
++            allow_abbrev=False
++        )
+         parser.add_argument('--settings')
+         parser.add_argument('--pythonpath')
+         parser.add_argument('args', nargs='*')  # catch-all
+diff --git a/test_final_validation.py b/test_final_validation.py
+new file mode 100644
+index 0000000000..19f49d0ab0
+--- /dev/null
++++ b/test_final_validation.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python
++"""Final validation of the prog_name fix"""
++import sys
++import os
++import subprocess
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++def test_with_subprocess():
++    """Test that the fix works in a subprocess with None sys.argv[0]"""
++    test_script = '''
++import sys
++import os
++
++# Simulate None sys.argv[0]
++sys.argv[0] = None
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')
++
++from django.core.management import execute_from_command_line
++
++# This should not fail even with sys.argv[0] = None
++try:
++    execute_from_command_line(['/my/app/manage.py', 'help', '--commands'])
++    print("SUCCESS: No exception raised")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++'''
++    
++    result = subprocess.run(
++        [sys.executable, '-c', test_script],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        universal_newlines=True
++    )
++    
++    print("Subprocess test:")
++    print("-" * 40)
++    print("stdout:", result.stdout)
++    print("stderr:", result.stderr)
++    print("return code:", result.returncode)
++    
++    return "SUCCESS" in result.stdout and result.returncode == 0
++
++
++def test_edge_cases():
++    """Test various edge cases"""
++    from django.core.management import ManagementUtility
++    
++    test_cases = [
++        ("Normal path", ["/usr/bin/django-admin"]),
++        ("Relative path", ["./manage.py"]),
++        ("Path with spaces", ["/path with spaces/manage.py"]),
++        ("Unicode path", ["/путь/to/manage.py"]),
++        ("Empty string", [""]),
++        ("Just filename", ["manage.py"]),
++        ("__main__.py", ["__main__.py"]),
++    ]
++    
++    print("\nEdge case tests:")
++    print("-" * 40)
++    
++    all_passed = True
++    for description, argv in test_cases:
++        try:
++            utility = ManagementUtility(argv + ['help'])
++            prog_name = utility.prog_name
++            
++            # Try to execute to ensure no errors
++            import io
++            from contextlib import redirect_stdout, redirect_stderr
++            
++            stdout = io.StringIO()
++            stderr = io.StringIO()
++            
++            try:
++                with redirect_stdout(stdout), redirect_stderr(stderr):
++                    utility.execute()
++            except SystemExit:
++                pass  # Expected for help
++                
++            error = stderr.getvalue()
++            if "NoneType" in error or "expected str" in error:
++                print(f"[FAIL] {description}: Failed with error: {error[:50]}...")
++                all_passed = False
++            else:
++                print(f"[PASS] {description}: prog_name = '{prog_name}'")
++                
++        except Exception as e:
++            print(f"[FAIL] {description}: Exception: {type(e).__name__}: {e}")
++            all_passed = False
++            
++    return all_passed
++
++
++if __name__ == '__main__':
++    print("Final validation of prog_name fix")
++    print("=" * 50)
++    
++    subprocess_ok = test_with_subprocess()
++    edge_cases_ok = test_edge_cases()
++    
++    print("\n" + "=" * 50)
++    if subprocess_ok and edge_cases_ok:
++        print("[SUCCESS] All tests passed!")
++        sys.exit(0)
++    else:
++        print("[FAILED] Some tests failed!")
++        sys.exit(1)
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..7340a0823a
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++"""Test the exact scenario from the problem statement"""
++import sys
++import os
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')
++
++def test_problem_statement_scenario():
++    """
++    Test the exact scenario described in the problem statement:
++    - sys.argv[0] is None (weird embedded environment)
++    - Custom argv is passed to execute_from_command_line
++    - Should work without modifying sys.argv[0] globally
++    """
++    print("Testing problem statement scenario:")
++    print("=" * 50)
++    
++    # Save original sys.argv
++    original_argv = sys.argv[:]
++    
++    try:
++        # Set sys.argv[0] to None to simulate the weird embedded environment
++        sys.argv = [None, 'some', 'other', 'args']
++        print(f"sys.argv[0] = {sys.argv[0]} (simulating embedded environment)")
++        
++        # Import Django management after setting sys.argv[0] to None
++        from django.core.management import execute_from_command_line
++        
++        # Use custom argv to avoid the None issue
++        custom_argv = ['/my/custom/program', 'help', '--pythonpath=/custom/path', '--settings=myproject.settings']
++        print(f"custom_argv = {custom_argv}")
++        
++        # This should work without raising any exceptions
++        import io
++        from contextlib import redirect_stdout, redirect_stderr
++        
++        stdout = io.StringIO()
++        stderr = io.StringIO()
++        
++        try:
++            with redirect_stdout(stdout), redirect_stderr(stderr):
++                execute_from_command_line(custom_argv)
++        except SystemExit as e:
++            # Help command exits with 0
++            if e.code != 0:
++                raise
++                
++        error_output = stderr.getvalue()
++        
++        # Check for the specific errors mentioned in the problem statement
++        if "NoneType" in error_output:
++            print("[FAIL] Got NoneType error:")
++            print(error_output)
++            return False
++        elif "expected str, bytes or os.PathLike object" in error_output:
++            print("[FAIL] Got 'expected str' error:")
++            print(error_output)
++            return False
++        else:
++            print("[PASS] No NoneType or 'expected str' errors!")
++            
++            # Verify the prog name is used correctly
++            output = stdout.getvalue()
++            if "program" in output:  # prog_name should be 'program' from '/my/custom/program'
++                print("[PASS] Correct prog_name 'program' found in output")
++            else:
++                print("[WARNING] prog_name 'program' not found in output")
++                
++            return True
++            
++    except Exception as e:
++        print(f"[FAIL] Unexpected exception: {type(e).__name__}: {e}")
++        import traceback
++        traceback.print_exc()
++        return False
++        
++    finally:
++        # Restore original sys.argv
++        sys.argv = original_argv
++
++
++if __name__ == '__main__':
++    success = test_problem_statement_scenario()
++    
++    print("\n" + "=" * 50)
++    if success:
++        print("SUCCESS: The fix resolves the problem statement issue!")
++        print("execute_from_command_line works properly in weird embedded")
++        print("environments where sys.argv[0] is None.")
++    else:
++        print("FAILED: The problem statement issue is not resolved.")
++        sys.exit(1)
+diff --git a/test_prog_comprehensive.py b/test_prog_comprehensive.py
+new file mode 100644
+index 0000000000..cc45b6516a
+--- /dev/null
++++ b/test_prog_comprehensive.py
+@@ -0,0 +1,116 @@
++#!/usr/bin/env python
++"""Comprehensive test for prog_name fix"""
++import sys
++import os
++import io
++from contextlib import redirect_stdout, redirect_stderr
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')
++
++import django
++from django.core.management import ManagementUtility, execute_from_command_line
++
++def test_scenario(description, argv, sys_argv_override=None):
++    """Test a specific scenario"""
++    print(f"\n{description}")
++    print("-" * len(description))
++    
++    original_argv = sys.argv[:]
++    try:
++        if sys_argv_override is not None:
++            sys.argv = sys_argv_override
++            
++        utility = ManagementUtility(argv)
++        print(f"argv[0]: {argv[0] if argv else 'None'}")
++        print(f"sys.argv[0]: {sys.argv[0]}")
++        print(f"prog_name: {utility.prog_name}")
++        
++        # Capture output
++        stdout = io.StringIO()
++        stderr = io.StringIO()
++        
++        try:
++            with redirect_stdout(stdout), redirect_stderr(stderr):
++                utility.execute()
++        except SystemExit as e:
++            pass  # Expected for help command
++            
++        output = stdout.getvalue()
++        error = stderr.getvalue()
++        
++        # Check if prog_name appears in output
++        if utility.prog_name in output or utility.prog_name in error:
++            print(f"[PASS] prog_name '{utility.prog_name}' found in output")
++        else:
++            print(f"[FAIL] prog_name '{utility.prog_name}' NOT found in output")
++            
++        # Check for errors related to None
++        if "NoneType" in error or "expected str" in error:
++            print(f"[FAIL] Error related to None: {error[:100]}...")
++        else:
++            print("[PASS] No NoneType errors")
++            
++    finally:
++        sys.argv = original_argv
++
++# Test various scenarios
++print("Testing prog_name handling in ManagementUtility")
++print("=" * 50)
++
++# Scenario 1: Normal usage
++test_scenario(
++    "Scenario 1: Normal usage",
++    ['/usr/bin/django-admin', 'help']
++)
++
++# Scenario 2: __main__.py
++test_scenario(
++    "Scenario 2: __main__.py special case",
++    ['__main__.py', 'help']
++)
++
++# Scenario 3: Custom program with sys.argv[0] = None
++test_scenario(
++    "Scenario 3: Custom argv with sys.argv[0] = None",
++    ['/my/custom/program', 'help'],
++    sys_argv_override=[None, 'other', 'args']
++)
++
++# Scenario 4: Empty string argv[0]
++test_scenario(
++    "Scenario 4: Empty string argv[0]",
++    ['', 'help']
++)
++
++# Scenario 5: Using execute_from_command_line with custom argv
++print("\nScenario 5: execute_from_command_line with custom argv")
++print("-" * 50)
++original_argv = sys.argv[:]
++try:
++    sys.argv = [None, 'test']
++    custom_argv = ['/my/app/manage.py', 'help', '--commands']
++    
++    stdout = io.StringIO()
++    stderr = io.StringIO()
++    
++    try:
++        with redirect_stdout(stdout), redirect_stderr(stderr):
++            execute_from_command_line(custom_argv)
++    except SystemExit:
++        pass
++        
++    error = stderr.getvalue()
++    if "NoneType" in error or "expected str" in error:
++        print(f"[FAIL] Error with execute_from_command_line: {error[:100]}...")
++    else:
++        print("[PASS] execute_from_command_line works with custom argv")
++        
++finally:
++    sys.argv = original_argv
++
++print("\n" + "=" * 50)
++print("All tests completed!")
+diff --git a/test_prog_fix.py b/test_prog_fix.py
+new file mode 100644
+index 0000000000..74df39f76b
+--- /dev/null
++++ b/test_prog_fix.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python
++"""Test case specifically for the prog_name fix"""
++import sys
++import os
++import unittest
++from io import StringIO
++from contextlib import redirect_stdout, redirect_stderr
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')
++
++import django
++from django.core.management import ManagementUtility, execute_from_command_line
++
++
++class TestProgNameFix(unittest.TestCase):
++    """Test that ManagementUtility passes prog_name to CommandParser"""
++    
++    def setUp(self):
++        self.original_argv = sys.argv[:]
++        
++    def tearDown(self):
++        sys.argv = self.original_argv
++        
++    def test_prog_name_passed_to_parser(self):
++        """Test that prog_name is correctly passed to CommandParser"""
++        # Set sys.argv[0] to None to simulate the problematic environment
++        sys.argv = [None, 'help']
++        
++        # Use custom argv with ManagementUtility
++        custom_argv = ['/my/custom/program', 'help', '--settings=test']
++        utility = ManagementUtility(custom_argv)
++        
++        # Should not raise an exception
++        stdout = StringIO()
++        stderr = StringIO()
++        
++        try:
++            with redirect_stdout(stdout), redirect_stderr(stderr):
++                utility.execute()
++        except SystemExit:
++            pass  # Expected for help command
++            
++        # Check that there's no error about NoneType
++        error_output = stderr.getvalue()
++        self.assertNotIn("NoneType", error_output)
++        self.assertNotIn("expected str", error_output)
++        
++        # Check that the correct prog_name appears in output
++        output = stdout.getvalue()
++        self.assertIn("program", output)  # prog_name should be 'program'
++        
++    def test_execute_from_command_line_with_none_argv(self):
++        """Test execute_from_command_line works when sys.argv[0] is None"""
++        sys.argv = [None, 'other']
++        
++        # Should work with custom argv
++        custom_argv = ['/path/to/manage.py', 'help', '--commands']
++        
++        stdout = StringIO()
++        stderr = StringIO()
++        
++        try:
++            with redirect_stdout(stdout), redirect_stderr(stderr):
++                execute_from_command_line(custom_argv)
++        except SystemExit:
++            pass
++            
++        error_output = stderr.getvalue()
++        self.assertNotIn("NoneType", error_output)
++        self.assertNotIn("expected str", error_output)
++        
++    def test_special_main_py_case(self):
++        """Test the special __main__.py case"""
++        argv = ['__main__.py', 'help']
++        utility = ManagementUtility(argv)
++        
++        self.assertEqual(utility.prog_name, 'python -m django')
++        
++        stdout = StringIO()
++        try:
++            with redirect_stdout(stdout):
++                utility.execute()
++        except SystemExit:
++            pass
++            
++        output = stdout.getvalue()
++        self.assertIn('python -m django', output)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/test_prog_name.py b/test_prog_name.py
+new file mode 100644
+index 0000000000..6a37cd3a5a
+--- /dev/null
++++ b/test_prog_name.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python
++"""Test script to reproduce the prog_name issue"""
++import sys
++import os
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django.conf.global_settings')
++
++import django
++from django.core.management import ManagementUtility
++from django.core.management.base import CommandParser
++
++# Test 1: Check that ManagementUtility correctly computes prog_name
++print("Test 1: ManagementUtility prog_name computation")
++print("=" * 50)
++
++# Test with custom argv
++custom_argv = ['/custom/path/to/myprogram.py', 'help']
++utility = ManagementUtility(custom_argv)
++print(f"Custom argv[0]: {custom_argv[0]}")
++print(f"Computed prog_name: {utility.prog_name}")
++print()
++
++# Test with __main__.py
++main_argv = ['__main__.py', 'help']
++utility2 = ManagementUtility(main_argv)
++print(f"__main__.py argv[0]: {main_argv[0]}")
++print(f"Computed prog_name: {utility2.prog_name}")
++print()
++
++# Test 2: Check what happens when sys.argv[0] is None
++print("\nTest 2: sys.argv[0] = None scenario")
++print("=" * 50)
++
++# Save original sys.argv
++original_argv = sys.argv[:]
++
++try:
++    # Set sys.argv[0] to None to simulate the issue
++    sys.argv = [None, 'help']
++    
++    # Create utility with custom argv to avoid the None issue
++    custom_argv = ['/my/custom/program', 'help', '--settings=test']
++    utility3 = ManagementUtility(custom_argv)
++    
++    print(f"sys.argv[0]: {sys.argv[0]}")
++    print(f"custom argv[0]: {custom_argv[0]}")
++    print(f"Computed prog_name: {utility3.prog_name}")
++    
++    # Now let's see what happens in execute() when it creates the CommandParser
++    # We'll monkey-patch CommandParser to see what prog it receives
++    original_init = CommandParser.__init__
++    
++    def patched_init(self, *args, **kwargs):
++        print(f"\nCommandParser.__init__ called with:")
++        print(f"  args: {args}")
++        print(f"  kwargs: {kwargs}")
++        if 'prog' in kwargs:
++            print(f"  prog parameter: {kwargs['prog']}")
++        else:
++            print(f"  prog parameter: NOT PROVIDED (will use sys.argv[0])")
++        original_init(self, *args, **kwargs)
++        print(f"  Resulting self.prog: {self.prog}")
++    
++    CommandParser.__init__ = patched_init
++    
++    # This will trigger the CommandParser creation in execute()
++    try:
++        utility3.execute()
++    except SystemExit:
++        pass  # Expected for 'help' command
++    except Exception as e:
++        print(f"Error during execute: {type(e).__name__}: {e}")
++    
++finally:
++    # Restore original sys.argv
++    sys.argv = original_argv
++    CommandParser.__init__ = original_init
++
++print("\n" + "=" * 50)
++print("The issue: CommandParser is created without passing prog=self.prog_name")
++print("This causes it to use sys.argv[0] instead of the computed prog_name")

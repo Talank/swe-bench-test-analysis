@@ -1,0 +1,314 @@
+diff --git a/sklearn/ensemble/iforest.py b/sklearn/ensemble/iforest.py
+index 8a1bd3625..589171f73 100644
+--- a/sklearn/ensemble/iforest.py
++++ b/sklearn/ensemble/iforest.py
+@@ -120,6 +120,10 @@ class IsolationForest(BaseBagging, OutlierMixin):
+     verbose : int, optional (default=0)
+         Controls the verbosity of the tree building process.
+ 
++    warm_start : bool, optional (default=False)
++        When set to ``True``, reuse the solution of the previous call to fit
++        and add more estimators to the ensemble, otherwise, just fit a whole
++        new forest. See :term:`the Glossary <warm_start>`.
+ 
+     Attributes
+     ----------
+@@ -173,7 +177,8 @@ class IsolationForest(BaseBagging, OutlierMixin):
+                  n_jobs=None,
+                  behaviour='old',
+                  random_state=None,
+-                 verbose=0):
++                 verbose=0,
++                 warm_start=False):
+         super().__init__(
+             base_estimator=ExtraTreeRegressor(
+                 max_features=1,
+@@ -185,6 +190,7 @@ class IsolationForest(BaseBagging, OutlierMixin):
+             n_estimators=n_estimators,
+             max_samples=max_samples,
+             max_features=max_features,
++            warm_start=warm_start,
+             n_jobs=n_jobs,
+             random_state=random_state,
+             verbose=verbose)
+diff --git a/sklearn/ensemble/tests/test_iforest.py b/sklearn/ensemble/tests/test_iforest.py
+index 67ba2d7f9..75dc4bf76 100644
+--- a/sklearn/ensemble/tests/test_iforest.py
++++ b/sklearn/ensemble/tests/test_iforest.py
+@@ -359,3 +359,57 @@ def test_iforest_chunks_works2(
+ ):
+     test_iforest_works(contamination)
+     assert mocked_get_chunk.call_count == n_predict_calls
++
++
++@pytest.mark.filterwarnings('ignore:default contamination')
++def test_iforest_warm_start():
++    """Test warm_start parameter in IsolationForest"""
++    rng = np.random.RandomState(42)
++    X = rng.randn(100, 2)
++    
++    # Test 1: warm_start=True preserves estimators
++    clf = IsolationForest(n_estimators=10, warm_start=True, random_state=42,
++                         contamination=0.1, behaviour='new')
++    clf.fit(X)
++    assert_equal(len(clf.estimators_), 10)
++    
++    # Store first estimator reference
++    first_estimator = clf.estimators_[0]
++    
++    # Increase n_estimators and refit
++    clf.set_params(n_estimators=20)
++    clf.fit(X)
++    assert_equal(len(clf.estimators_), 20)
++    
++    # Check that first estimator is preserved
++    assert first_estimator is clf.estimators_[0]
++    
++    # Test 2: warm_start=False replaces estimators
++    clf2 = IsolationForest(n_estimators=10, warm_start=False, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf2.fit(X)
++    first_estimator2 = clf2.estimators_[0]
++    
++    clf2.set_params(n_estimators=20)
++    clf2.fit(X)
++    assert_equal(len(clf2.estimators_), 20)
++    
++    # Check that estimators were replaced
++    assert first_estimator2 is not clf2.estimators_[0]
++    
++    # Test 3: warm_start with no increase in n_estimators
++    clf3 = IsolationForest(n_estimators=10, warm_start=True, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf3.fit(X)
++    
++    assert_warns_message(UserWarning,
++                        "Warm-start fitting without increasing n_estimators",
++                        clf3.fit, X)
++    
++    # Test 4: warm_start with decrease in n_estimators should raise error
++    clf4 = IsolationForest(n_estimators=20, warm_start=True, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf4.fit(X)
++    clf4.set_params(n_estimators=10)
++    
++    assert_raises(ValueError, clf4.fit, X)
+diff --git a/test_warm_start_current.py b/test_warm_start_current.py
+new file mode 100644
+index 000000000..15710098e
+--- /dev/null
++++ b/test_warm_start_current.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Test that warm_start currently works with IsolationForest"""
++
++import numpy as np
++from sklearn.ensemble import IsolationForest
++
++# Generate some test data
++rng = np.random.RandomState(42)
++X = rng.randn(100, 2)
++
++# Test 1: Verify warm_start works by setting it after initialization
++print("Test 1: Setting warm_start after initialization")
++clf = IsolationForest(n_estimators=10, random_state=42)
++clf.warm_start = True
++clf.fit(X)
++print(f"Number of estimators after first fit: {len(clf.estimators_)}")
++
++# Increase n_estimators and fit again
++clf.n_estimators = 20
++clf.fit(X)
++print(f"Number of estimators after second fit: {len(clf.estimators_)}")
++
++# Test 2: Verify that without warm_start, estimators are replaced
++print("\nTest 2: Without warm_start, estimators are replaced")
++clf2 = IsolationForest(n_estimators=10, random_state=42)
++clf2.fit(X)
++first_estimator = clf2.estimators_[0]
++print(f"Number of estimators after first fit: {len(clf2.estimators_)}")
++
++clf2.n_estimators = 20
++clf2.fit(X)
++print(f"Number of estimators after second fit: {len(clf2.estimators_)}")
++print(f"First estimator is same object: {first_estimator is clf2.estimators_[0]}")
++
++# Test 3: Check predictions remain consistent
++print("\nTest 3: Predictions consistency")
++X_test = rng.randn(10, 2)
++clf3 = IsolationForest(n_estimators=10, random_state=42)
++clf3.warm_start = True
++clf3.fit(X)
++pred1 = clf3.predict(X_test)
++
++clf3.n_estimators = 20
++clf3.fit(X)
++pred2 = clf3.predict(X_test)
++print(f"Predictions with 10 estimators: {pred1}")
++print(f"Predictions with 20 estimators: {pred2}")
+diff --git a/test_warm_start_iforest.py b/test_warm_start_iforest.py
+new file mode 100644
+index 000000000..836968388
+--- /dev/null
++++ b/test_warm_start_iforest.py
+@@ -0,0 +1,100 @@
++#!/usr/bin/env python
++"""Test warm_start functionality for IsolationForest"""
++
++import numpy as np
++import pytest
++from sklearn.ensemble import IsolationForest
++from sklearn.utils.testing import assert_equal, assert_array_equal, assert_warns_message
++
++
++def test_iforest_warm_start():
++    """Test warm_start parameter in IsolationForest"""
++    rng = np.random.RandomState(42)
++    X = rng.randn(100, 2)
++    
++    # Test 1: warm_start=True preserves estimators
++    clf = IsolationForest(n_estimators=10, warm_start=True, random_state=42,
++                         contamination=0.1, behaviour='new')
++    clf.fit(X)
++    assert_equal(len(clf.estimators_), 10)
++    
++    # Store first estimator reference
++    first_estimator = clf.estimators_[0]
++    
++    # Increase n_estimators and refit
++    clf.set_params(n_estimators=20)
++    clf.fit(X)
++    assert_equal(len(clf.estimators_), 20)
++    
++    # Check that first estimator is preserved
++    assert first_estimator is clf.estimators_[0]
++    
++    # Test 2: warm_start=False replaces estimators
++    clf2 = IsolationForest(n_estimators=10, warm_start=False, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf2.fit(X)
++    first_estimator2 = clf2.estimators_[0]
++    
++    clf2.set_params(n_estimators=20)
++    clf2.fit(X)
++    assert_equal(len(clf2.estimators_), 20)
++    
++    # Check that estimators were replaced
++    assert first_estimator2 is not clf2.estimators_[0]
++    
++    # Test 3: warm_start with no increase in n_estimators
++    clf3 = IsolationForest(n_estimators=10, warm_start=True, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf3.fit(X)
++    
++    with pytest.warns(UserWarning, match="Warm-start fitting without increasing n_estimators"):
++        clf3.fit(X)
++    
++    # Test 4: warm_start with decrease in n_estimators should raise error
++    clf4 = IsolationForest(n_estimators=20, warm_start=True, random_state=42,
++                          contamination=0.1, behaviour='new')
++    clf4.fit(X)
++    clf4.set_params(n_estimators=10)
++    
++    with pytest.raises(ValueError, match="n_estimators=10 must be larger or equal to"):
++        clf4.fit(X)
++
++
++def test_iforest_warm_start_default():
++    """Test that warm_start defaults to False"""
++    clf = IsolationForest()
++    assert_equal(clf.warm_start, False)
++
++
++def test_iforest_warm_start_predictions():
++    """Test that warm_start produces consistent predictions"""
++    rng = np.random.RandomState(42)
++    X_train = rng.randn(100, 2)
++    X_test = rng.randn(20, 2)
++    
++    # Train with warm_start
++    clf_warm = IsolationForest(n_estimators=10, warm_start=True, random_state=42,
++                              contamination=0.1, behaviour='new')
++    clf_warm.fit(X_train)
++    pred_10 = clf_warm.predict(X_test)
++    
++    clf_warm.set_params(n_estimators=20)
++    clf_warm.fit(X_train)
++    pred_20_warm = clf_warm.predict(X_test)
++    
++    # Train without warm_start
++    clf_cold = IsolationForest(n_estimators=20, warm_start=False, random_state=42,
++                              contamination=0.1, behaviour='new')
++    clf_cold.fit(X_train)
++    pred_20_cold = clf_cold.predict(X_test)
++    
++    # Predictions with more trees might differ from fewer trees
++    # but should be deterministic given same random_state
++    assert pred_10.shape == pred_20_warm.shape == pred_20_cold.shape
++
++
++if __name__ == "__main__":
++    test_iforest_warm_start()
++    test_iforest_warm_start_default()
++    test_iforest_warm_start_predictions()
++    print("All tests passed!")
+diff --git a/warm_start_demo.py b/warm_start_demo.py
+new file mode 100644
+index 000000000..3e4db712a
+--- /dev/null
++++ b/warm_start_demo.py
+@@ -0,0 +1,54 @@
++#!/usr/bin/env python
++"""Demonstrate warm_start functionality in IsolationForest"""
++
++import numpy as np
++from sklearn.ensemble import IsolationForest
++import time
++
++# Generate some data
++rng = np.random.RandomState(42)
++X = rng.randn(1000, 10)
++
++print("Demonstrating warm_start in IsolationForest")
++print("=" * 50)
++
++# Without warm_start - training from scratch each time
++print("\n1. Without warm_start (default behavior):")
++clf = IsolationForest(n_estimators=100, random_state=42, contamination=0.1, behaviour='new')
++
++start = time.time()
++clf.fit(X)
++time1 = time.time() - start
++print(f"   First fit with 100 trees: {time1:.3f}s")
++
++clf.n_estimators = 200
++start = time.time()
++clf.fit(X)
++time2 = time.time() - start
++print(f"   Second fit with 200 trees (from scratch): {time2:.3f}s")
++
++# With warm_start - incremental training
++print("\n2. With warm_start=True:")
++clf_warm = IsolationForest(n_estimators=100, warm_start=True, random_state=42, 
++                          contamination=0.1, behaviour='new')
++
++start = time.time()
++clf_warm.fit(X)
++time3 = time.time() - start
++print(f"   First fit with 100 trees: {time3:.3f}s")
++
++clf_warm.n_estimators = 200
++start = time.time()
++clf_warm.fit(X)
++time4 = time.time() - start
++print(f"   Second fit adding 100 more trees: {time4:.3f}s")
++
++print(f"\n3. Time saved with warm_start: {time2 - time4:.3f}s ({(time2-time4)/time2*100:.1f}%)")
++
++# Verify both approaches give similar results
++X_test = rng.randn(100, 10)
++pred_cold = clf.predict(X_test)
++pred_warm = clf_warm.predict(X_test)
++
++print(f"\n4. Predictions match: {np.array_equal(pred_cold, pred_warm)}")
++print(f"   Number of differences: {np.sum(pred_cold != pred_warm)}")

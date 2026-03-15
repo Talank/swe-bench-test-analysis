@@ -1,0 +1,214 @@
+diff --git a/django/http/response.py b/django/http/response.py
+index 6a84e193ba..5602d6c10f 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -233,6 +233,9 @@ class HttpResponseBase:
+             return bytes(value)
+         if isinstance(value, str):
+             return bytes(value.encode(self.charset))
++        # Handle memoryview objects
++        if isinstance(value, memoryview):
++            return bytes(value)
+         # Handle non-string types.
+         return str(value).encode(self.charset)
+ 
+diff --git a/test_memoryview_edge_cases.py b/test_memoryview_edge_cases.py
+new file mode 100644
+index 0000000000..6e62fbd605
+--- /dev/null
++++ b/test_memoryview_edge_cases.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python
++"""Test edge cases for memoryview handling in HttpResponse"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++
++django.setup()
++
++from django.http import HttpResponse
++
++def test_memoryview_edge_cases():
++    print("Testing memoryview edge cases...")
++    
++    # Test 1: Empty memoryview
++    response = HttpResponse(memoryview(b""))
++    print(f"Empty memoryview: {repr(response.content)}")
++    assert response.content == b"", f"Expected b'', got {response.content}"
++    
++    # Test 2: Memoryview with slicing
++    data = b"Hello World"
++    mv = memoryview(data)
++    response = HttpResponse(mv[0:5])  # "Hello"
++    print(f"Sliced memoryview: {repr(response.content)}")
++    assert response.content == b"Hello", f"Expected b'Hello', got {response.content}"
++    
++    # Test 3: Memoryview from bytearray
++    ba = bytearray(b"ByteArray Content")
++    response = HttpResponse(memoryview(ba))
++    print(f"Memoryview from bytearray: {repr(response.content)}")
++    assert response.content == b"ByteArray Content", f"Expected b'ByteArray Content', got {response.content}"
++    
++    # Test 4: Setting content property with memoryview
++    response = HttpResponse()
++    response.content = memoryview(b"Set via property")
++    print(f"Set via property: {repr(response.content)}")
++    assert response.content == b"Set via property", f"Expected b'Set via property', got {response.content}"
++    
++    # Test 5: Memoryview in list (iter content)
++    response = HttpResponse([memoryview(b"Part1"), b" ", memoryview(b"Part2")])
++    print(f"Memoryview in list: {repr(response.content)}")
++    assert response.content == b"Part1 Part2", f"Expected b'Part1 Part2', got {response.content}"
++    
++    print("\nAll edge case tests passed!")
++    return True
++
++if __name__ == "__main__":
++    success = test_memoryview_edge_cases()
++    sys.exit(0 if success else 1)
+diff --git a/test_memoryview_issue.py b/test_memoryview_issue.py
+new file mode 100644
+index 0000000000..5a48c1cfbf
+--- /dev/null
++++ b/test_memoryview_issue.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python
++"""Test script to reproduce the memoryview issue with HttpResponse"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++
++django.setup()
++
++from django.http import HttpResponse
++
++def test_memoryview_response():
++    print("Testing HttpResponse with different content types...")
++    
++    # Test 1: String content
++    response = HttpResponse("My Content")
++    print(f"String content: {response.content}")
++    assert response.content == b'My Content', f"Expected b'My Content', got {response.content}"
++    
++    # Test 2: Bytes content
++    response = HttpResponse(b"My Content")
++    print(f"Bytes content: {response.content}")
++    assert response.content == b'My Content', f"Expected b'My Content', got {response.content}"
++    
++    # Test 3: memoryview content
++    response = HttpResponse(memoryview(b"My Content"))
++    print(f"Memoryview content: {response.content}")
++    print(f"Memoryview content repr: {repr(response.content)}")
++    
++    # This should be b'My Content' but currently returns something like b'<memory at 0x...>'
++    expected = b'My Content'
++    if response.content != expected:
++        print(f"ERROR: Expected {expected}, but got {response.content}")
++        return False
++    else:
++        print("SUCCESS: Memoryview content handled correctly")
++        return True
++
++if __name__ == "__main__":
++    success = test_memoryview_response()
++    sys.exit(0 if success else 1)
+diff --git a/test_streaming_memoryview.py b/test_streaming_memoryview.py
+new file mode 100644
+index 0000000000..c454483c19
+--- /dev/null
++++ b/test_streaming_memoryview.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""Test memoryview handling in StreamingHttpResponse"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++
++django.setup()
++
++from django.http import StreamingHttpResponse
++
++def test_streaming_memoryview():
++    print("Testing StreamingHttpResponse with memoryview...")
++    
++    # Test 1: Single memoryview in streaming content
++    response = StreamingHttpResponse([memoryview(b"Streaming content")])
++    content = b''.join(response.streaming_content)
++    print(f"Single memoryview: {repr(content)}")
++    assert content == b"Streaming content", f"Expected b'Streaming content', got {content}"
++    
++    # Test 2: Multiple memoryviews in streaming content
++    response = StreamingHttpResponse([
++        memoryview(b"Part 1"),
++        b" - ",
++        memoryview(b"Part 2"),
++        " - ",
++        memoryview(b"Part 3")
++    ])
++    content = b''.join(response.streaming_content)
++    print(f"Multiple memoryviews: {repr(content)}")
++    assert content == b"Part 1 - Part 2 - Part 3", f"Expected b'Part 1 - Part 2 - Part 3', got {content}"
++    
++    print("\nStreaming memoryview tests passed!")
++    return True
++
++if __name__ == "__main__":
++    success = test_streaming_memoryview()
++    sys.exit(0 if success else 1)
+diff --git a/tests/httpwrappers/tests.py b/tests/httpwrappers/tests.py
+index e6c6297898..9dd5718909 100644
+--- a/tests/httpwrappers/tests.py
++++ b/tests/httpwrappers/tests.py
+@@ -366,6 +366,16 @@ class HttpResponseTests(unittest.TestCase):
+         r.content = 12345
+         self.assertEqual(r.content, b'12345')
+ 
++    def test_memoryview_content(self):
++        # HttpResponse should handle memoryview objects
++        r = HttpResponse(memoryview(b'My Content'))
++        self.assertEqual(r.content, b'My Content')
++
++        # test content via property
++        r = HttpResponse()
++        r.content = memoryview(b'My Content')
++        self.assertEqual(r.content, b'My Content')
++
+     def test_iter_content(self):
+         r = HttpResponse(['abc', 'def', 'ghi'])
+         self.assertEqual(r.content, b'abcdefghi')

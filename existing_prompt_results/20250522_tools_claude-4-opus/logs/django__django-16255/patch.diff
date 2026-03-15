@@ -1,0 +1,209 @@
+diff --git a/django/contrib/sitemaps/__init__.py b/django/contrib/sitemaps/__init__.py
+index 27756d9d96..b40ad806ed 100644
+--- a/django/contrib/sitemaps/__init__.py
++++ b/django/contrib/sitemaps/__init__.py
+@@ -168,7 +168,7 @@ class Sitemap:
+         if callable(self.lastmod):
+             try:
+                 return max([self.lastmod(item) for item in self.items()])
+-            except TypeError:
++            except (TypeError, ValueError):
+                 return None
+         else:
+             return self.lastmod
+diff --git a/test_empty_sitemap.py b/test_empty_sitemap.py
+new file mode 100644
+index 0000000000..33257fa37e
+--- /dev/null
++++ b/test_empty_sitemap.py
+@@ -0,0 +1,57 @@
++"""Test script to reproduce the empty sitemap with callable lastmod issue."""
++from datetime import datetime
++from django.contrib.sitemaps import Sitemap
++
++
++class EmptySitemapWithCallableLastmod(Sitemap):
++    """A sitemap with no items but a callable lastmod method."""
++    
++    def items(self):
++        return []
++    
++    def lastmod(self, item):
++        return datetime.now()
++
++
++def test_empty_sitemap_with_callable_lastmod():
++    """Test that get_latest_lastmod doesn't raise ValueError for empty sitemaps."""
++    sitemap = EmptySitemapWithCallableLastmod()
++    
++    try:
++        result = sitemap.get_latest_lastmod()
++        print(f"Success! get_latest_lastmod returned: {result}")
++    except ValueError as e:
++        print(f"ERROR: ValueError raised: {e}")
++        return False
++    except Exception as e:
++        print(f"ERROR: Unexpected exception: {type(e).__name__}: {e}")
++        return False
++    
++    return True
++
++
++if __name__ == "__main__":
++    # Setup minimal Django environment
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.sites',
++            'django.contrib.sitemaps',
++        ],
++        SITE_ID=1,
++    )
++    django.setup()
++    
++    print("Testing empty sitemap with callable lastmod...")
++    success = test_empty_sitemap_with_callable_lastmod()
++    
++    if success:
++        print("\nTest passed!")
++    else:
++        print("\nTest failed!")
+diff --git a/test_sitemap_view.py b/test_sitemap_view.py
+new file mode 100644
+index 0000000000..1980f22947
+--- /dev/null
++++ b/test_sitemap_view.py
+@@ -0,0 +1,97 @@
++"""Test that empty sitemaps with callable lastmod work in views."""
++import os
++import sys
++from datetime import datetime
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++SECRET_KEY = 'test-secret-key'
++DEBUG = True
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.sites',
++    'django.contrib.sitemaps',
++]
++SITE_ID = 1
++ROOT_URLCONF = 'test_urls'
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++TEMPLATES = [
++    {
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    },
++]
++""")
++
++# Create a minimal urls module
++with open('/testbed/test_urls.py', 'w') as f:
++    f.write("""
++from django.contrib.sitemaps import Sitemap
++from django.contrib.sitemaps.views import index, sitemap
++from django.urls import path
++from datetime import datetime
++
++class EmptySitemapWithCallableLastmod(Sitemap):
++    def items(self):
++        return []
++    
++    def lastmod(self, item):
++        return datetime.now()
++
++sitemaps = {
++    'empty': EmptySitemapWithCallableLastmod,
++}
++
++urlpatterns = [
++    path('sitemap.xml', index, {'sitemaps': sitemaps}, name='django.contrib.sitemaps.views.index'),
++    path('sitemap-<section>.xml', sitemap, {'sitemaps': sitemaps}, name='django.contrib.sitemaps.views.sitemap'),
++]
++""")
++
++import django
++django.setup()
++
++from django.test import Client
++from django.contrib.sites.models import Site
++from django.core.management import call_command
++
++# Run migrations
++call_command('migrate', verbosity=0)
++
++# Create the site
++Site.objects.get_or_create(id=1, defaults={'domain': 'example.com', 'name': 'Example'})
++
++# Test the sitemap index view
++client = Client()
++response = client.get('/sitemap.xml')
++
++print(f"Response status: {response.status_code}")
++print(f"Response content:\n{response.content.decode()}")
++
++if response.status_code == 200:
++    print("\nSUCCESS: Empty sitemap with callable lastmod works in views!")
++else:
++    print("\nFAILED: Got unexpected status code")
++
++# Clean up
++os.remove('/testbed/test_settings.py')
++os.remove('/testbed/test_urls.py')
+diff --git a/tests/sitemaps_tests/test_http.py b/tests/sitemaps_tests/test_http.py
+index 4a269b8737..b97a79c673 100644
+--- a/tests/sitemaps_tests/test_http.py
++++ b/tests/sitemaps_tests/test_http.py
+@@ -507,6 +507,25 @@ class HTTPSitemapTests(SitemapTestsBase):
+         self.assertXMLEqual(index_response.content.decode(), expected_content_index)
+         self.assertXMLEqual(sitemap_response.content.decode(), expected_content_sitemap)
+ 
++    def test_empty_sitemap_with_callable_lastmod(self):
++        """
++        A sitemap with no items but a callable lastmod should not raise
++        ValueError when get_latest_lastmod() is called.
++        """
++        from datetime import datetime
++        
++        class EmptySitemapWithCallableLastmod(Sitemap):
++            def items(self):
++                return []
++            
++            def lastmod(self, item):
++                return datetime.now()
++        
++        sitemap = EmptySitemapWithCallableLastmod()
++        # This should not raise ValueError
++        result = sitemap.get_latest_lastmod()
++        self.assertIsNone(result)
++
+ 
+ # RemovedInDjango50Warning
+ class DeprecatedTests(SitemapTestsBase):

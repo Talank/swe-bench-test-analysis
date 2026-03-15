@@ -1,0 +1,593 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index ac0b62d0bf..ea88c54b0d 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -68,7 +68,7 @@ class Aggregate(Func):
+         return []
+ 
+     def as_sql(self, compiler, connection, **extra_context):
+-        extra_context['distinct'] = 'DISTINCT' if self.distinct else ''
++        extra_context['distinct'] = 'DISTINCT ' if self.distinct else ''
+         if self.filter:
+             if connection.features.supports_aggregate_filter_clause:
+                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)
+diff --git a/test_comprehensive_distinct.py b/test_comprehensive_distinct.py
+new file mode 100644
+index 0000000000..d325029afc
+--- /dev/null
++++ b/test_comprehensive_distinct.py
+@@ -0,0 +1,127 @@
++"""Comprehensive test for Count distinct functionality."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Case, When, IntegerField, Q, Sum, Avg
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.IntegerField(default=0)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(name='test1', status=1, value=10)
++TestModel.objects.create(name='test2', status=2, value=20)
++TestModel.objects.create(name='test3', status=1, value=10)
++TestModel.objects.create(name='test4', status=1, value=30)
++
++print("Testing various Count distinct scenarios:\n")
++
++# Test 1: Count with distinct=True and Case
++try:
++    result = TestModel.objects.aggregate(
++        count_distinct_case=Count(
++            Case(
++                When(status=1, then='value'),
++                default=None,
++                output_field=IntegerField()
++            ),
++            distinct=True
++        )
++    )
++    print("1. Count with distinct=True and Case:")
++    print(f"   Result: {result}")
++    print("   ✓ Success\n")
++except Exception as e:
++    print(f"   ✗ Error: {e}\n")
++
++# Test 2: Count with distinct=True and filter
++try:
++    result = TestModel.objects.aggregate(
++        count_with_filter=Count('value', distinct=True, filter=Q(status=1))
++    )
++    print("2. Count with distinct=True and filter:")
++    print(f"   Result: {result}")
++    print("   ✓ Success\n")
++except Exception as e:
++    print(f"   ✗ Error: {e}\n")
++
++# Test 3: Regular Count with distinct=True (no Case/filter)
++try:
++    result = TestModel.objects.aggregate(
++        count_distinct=Count('value', distinct=True)
++    )
++    print("3. Regular Count with distinct=True:")
++    print(f"   Result: {result}")
++    print("   ✓ Success\n")
++except Exception as e:
++    print(f"   ✗ Error: {e}\n")
++
++# Test 4: Count without distinct but with Case
++try:
++    result = TestModel.objects.aggregate(
++        count_case=Count(
++            Case(
++                When(status=1, then='value'),
++                default=None,
++                output_field=IntegerField()
++            )
++        )
++    )
++    print("4. Count without distinct but with Case:")
++    print(f"   Result: {result}")
++    print("   ✓ Success\n")
++except Exception as e:
++    print(f"   ✗ Error: {e}\n")
++
++# Test 5: Verify other aggregates aren't affected
++try:
++    result = TestModel.objects.aggregate(
++        sum_case=Sum(
++            Case(
++                When(status=1, then='value'),
++                default=0,
++                output_field=IntegerField()
++            )
++        )
++    )
++    print("5. Sum with Case (no distinct):")
++    print(f"   Result: {result}")
++    print("   ✓ Success\n")
++except Exception as e:
++    print(f"   ✗ Error: {e}\n")
++
++print("All tests completed!")
+diff --git a/test_count_distinct_case.py b/test_count_distinct_case.py
+new file mode 100644
+index 0000000000..aa8d6f789b
+--- /dev/null
++++ b/test_count_distinct_case.py
+@@ -0,0 +1,78 @@
++"""Test script to reproduce the Count distinct with Case issue."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Case, When, IntegerField, Q
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(name='test1', status=1)
++TestModel.objects.create(name='test2', status=2)
++TestModel.objects.create(name='test3', status=1)
++
++# Try to use Count with distinct=True and a Case expression
++try:
++    # This should fail with a syntax error
++    result = TestModel.objects.annotate(
++        count_distinct_case=Count(
++            Case(
++                When(status=1, then='id'),
++                default=None,
++                output_field=IntegerField()
++            ),
++            distinct=True
++        )
++    )
++    
++    # Try to execute the query
++    print("Query:", result.query)
++    print("Result:", list(result))
++    
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    
++# Also test with filter parameter (which internally uses Case)
++try:
++    result2 = TestModel.objects.annotate(
++        count_with_filter=Count('id', distinct=True, filter=Q(status=1))
++    )
++    print("\nQuery with filter:", result2.query)
++    print("Result with filter:", list(result2))
++except Exception as e:
++    print(f"Error occurred with filter: {type(e).__name__}: {e}")
+diff --git a/test_django_fix.py b/test_django_fix.py
+new file mode 100644
+index 0000000000..a5ec3c2c8c
+--- /dev/null
++++ b/test_django_fix.py
+@@ -0,0 +1,37 @@
++"""Test the Django fix for Count distinct with Case."""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++
++import django
++django.setup()
++
++from django.db.models import Count, Case, When, Q
++from tests.aggregation.models import Book
++
++# Run the test
++print("Testing Count with distinct=True and Case expression...")
++
++# Test Count with distinct and Case
++result = Book.objects.aggregate(
++    distinct_ratings=Count(
++        Case(
++            When(rating__gte=4, then='rating'),
++            default=None,
++        ),
++        distinct=True
++    )
++)
++print(f"Result with Case: {result}")
++
++# Test Count with distinct and filter parameter (which uses Case internally)
++result = Book.objects.aggregate(
++    high_rating_books=Count('rating', distinct=True, filter=Q(rating__gte=4))
++)
++print(f"Result with filter: {result}")
++
++print("\nTest completed successfully!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..b8fb34843e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,107 @@
++"""Test edge cases for the Count distinct fix."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Case, When, IntegerField, Q, Sum, Avg, Max, Min
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.IntegerField(default=0)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(name='test1', status=1, value=10)
++TestModel.objects.create(name='test2', status=2, value=20)
++TestModel.objects.create(name='test3', status=1, value=10)
++
++print("Testing edge cases:\n")
++
++# Test 1: Count without distinct (should still work)
++result = TestModel.objects.aggregate(
++    count_case=Count(
++        Case(
++            When(status=1, then='value'),
++            default=None,
++            output_field=IntegerField()
++        )
++    )
++)
++print("1. Count with Case (no distinct):", result)
++
++# Test 2: Count with distinct but no Case (should still work)
++result = TestModel.objects.aggregate(
++    count_distinct=Count('value', distinct=True)
++)
++print("2. Count with distinct (no Case):", result)
++
++# Test 3: Other aggregates shouldn't be affected
++result = TestModel.objects.aggregate(
++    sum_value=Sum('value'),
++    avg_value=Avg('value'),
++    max_value=Max('value'),
++    min_value=Min('value')
++)
++print("3. Other aggregates:", result)
++
++# Test 4: Multiple Count aggregates with distinct and Case
++result = TestModel.objects.aggregate(
++    count1=Count(
++        Case(When(status=1, then='value')),
++        distinct=True
++    ),
++    count2=Count(
++        Case(When(status=2, then='value')),
++        distinct=True
++    )
++)
++print("4. Multiple Count with distinct and Case:", result)
++
++# Test 5: Nested expressions
++result = TestModel.objects.aggregate(
++    complex_count=Count(
++        Case(
++            When(status=1, then=Case(
++                When(value__gte=10, then='id'),
++                default=None
++            )),
++            default=None
++        ),
++        distinct=True
++    )
++)
++print("5. Nested Case expressions:", result)
++
++print("\nAll edge case tests completed successfully!")
+diff --git a/test_simple_distinct.py b/test_simple_distinct.py
+new file mode 100644
+index 0000000000..651f1ff1a8
+--- /dev/null
++++ b/test_simple_distinct.py
+@@ -0,0 +1,76 @@
++"""Simple test for Count distinct functionality."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Case, When, IntegerField, Q
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.IntegerField(default=0)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert some test data
++TestModel.objects.create(name='test1', status=1, value=10)
++TestModel.objects.create(name='test2', status=2, value=20)
++TestModel.objects.create(name='test3', status=1, value=10)
++TestModel.objects.create(name='test4', status=1, value=30)
++
++# Test Count with distinct=True and Case
++result = TestModel.objects.aggregate(
++    count_distinct_case=Count(
++        Case(
++            When(status=1, then='value'),
++            default=None,
++            output_field=IntegerField()
++        ),
++        distinct=True
++    )
++)
++print("Count with distinct=True and Case:", result)
++
++# Test Count with distinct=True and filter
++result = TestModel.objects.aggregate(
++    count_with_filter=Count('value', distinct=True, filter=Q(status=1))
++)
++print("Count with distinct=True and filter:", result)
++
++# Test regular Count with distinct=True
++result = TestModel.objects.aggregate(
++    count_distinct=Count('value', distinct=True)
++)
++print("Regular Count with distinct=True:", result)
++
++print("\nAll tests passed successfully!")
+diff --git a/tests/aggregation/tests.py b/tests/aggregation/tests.py
+index 8cac90f020..654dd9e9c7 100644
+--- a/tests/aggregation/tests.py
++++ b/tests/aggregation/tests.py
+@@ -484,6 +484,33 @@ class AggregateTestCase(TestCase):
+         age_sum = distinct_authors.aggregate(Sum('age'))
+         self.assertEqual(age_sum['age__sum'], 103)
+ 
++    def test_count_distinct_with_case(self):
++        """
++        Count with distinct=True and Case expression should work correctly.
++        """
++        from django.db.models import Case, When, Q
++        
++        # Test Count with distinct and Case
++        result = Book.objects.aggregate(
++            distinct_ratings=Count(
++                Case(
++                    When(rating__gte=4, then='rating'),
++                    default=None,
++                ),
++                distinct=True
++            )
++        )
++        # Books have ratings: 4.5, 3.0, 4.0, 5.0, 4.5 (duplicate), 4.0 (duplicate)
++        # Ratings >= 4 are: 4.5, 4.0, 5.0, 4.5 (duplicate), 4.0 (duplicate)
++        # Distinct ratings >= 4 are: 4.5, 4.0, 5.0 = 3 distinct values
++        self.assertEqual(result['distinct_ratings'], 3)
++        
++        # Test Count with distinct and filter parameter (which uses Case internally)
++        result = Book.objects.aggregate(
++            high_rating_books=Count('rating', distinct=True, filter=Q(rating__gte=4))
++        )
++        self.assertEqual(result['high_rating_books'], 3)
++
+     def test_filtering(self):
+         p = Publisher.objects.create(name='Expensive Publisher', num_awards=0)
+         Book.objects.create(
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 0000000000..5fee642140
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,81 @@
++"""Verify the fix by showing the SQL generated."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Case, When, IntegerField, Q
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++print("=== SQL Generation Test ===\n")
++
++# Test 1: Count with distinct and Case
++qs1 = TestModel.objects.annotate(
++    count_distinct_case=Count(
++        Case(
++            When(status=1, then='id'),
++            default=None,
++            output_field=IntegerField()
++        ),
++        distinct=True
++    )
++)
++print("1. Count with distinct=True and Case:")
++print("   SQL:", str(qs1.query))
++print()
++
++# Test 2: Count with distinct and filter (uses Case internally)
++qs2 = TestModel.objects.annotate(
++    count_with_filter=Count('id', distinct=True, filter=Q(status=1))
++)
++print("2. Count with distinct=True and filter:")
++print("   SQL:", str(qs2.query))
++print()
++
++# Verify the SQL contains proper spacing
++sql1 = str(qs1.query)
++sql2 = str(qs2.query)
++
++if "COUNT(DISTINCT CASE" in sql1:
++    print("✓ Fix verified: Proper spacing in SQL with Case")
++else:
++    print("✗ Issue remains: Missing space in SQL with Case")
++
++if "COUNT(DISTINCT CASE" in sql2:
++    print("✓ Fix verified: Proper spacing in SQL with filter")
++else:
++    print("✗ Issue remains: Missing space in SQL with filter")

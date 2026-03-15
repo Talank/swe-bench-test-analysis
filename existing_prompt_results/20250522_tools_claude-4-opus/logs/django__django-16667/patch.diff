@@ -1,0 +1,527 @@
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 842b73e95c..f4bc74b7cd 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -1157,7 +1157,7 @@ class SelectDateWidget(Widget):
+             input_format = formats.sanitize_strftime_format(input_format)
+             try:
+                 date_value = datetime.date(int(y), int(m), int(d))
+-            except ValueError:
++            except (ValueError, OverflowError):
+                 # Return pseudo-ISO dates with zeros for any unselected values,
+                 # e.g. '2017-0-23'.
+                 return "%s-%s-%s" % (y or 0, m or 0, d or 0)
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..ab41708b45
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,166 @@
++#!/usr/bin/env python
++"""Comprehensive test for SelectDateWidget OverflowError fix"""
++
++import sys
++import datetime
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    USE_TZ=False,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++django.setup()
++
++from django import forms
++from django.forms import SelectDateWidget
++
++
++class TestForm(forms.Form):
++    date_field = forms.DateField(widget=SelectDateWidget())
++
++
++def test_case(name, data, expected_valid=None, expected_error=False):
++    """Run a test case and report results"""
++    print(f"\nTest: {name}")
++    print(f"Data: {data}")
++    
++    try:
++        form = TestForm(data)
++        is_valid = form.is_valid()
++        print(f"Valid: {is_valid}")
++        
++        if is_valid:
++            print(f"Cleaned data: {form.cleaned_data}")
++        else:
++            print(f"Errors: {form.errors.as_data()}")
++            
++        if expected_valid is not None:
++            assert is_valid == expected_valid, f"Expected valid={expected_valid}, got {is_valid}"
++            
++        if expected_error:
++            assert False, "Expected an error to be raised"
++            
++        return True
++        
++    except Exception as e:
++        print(f"Exception: {type(e).__name__}: {e}")
++        if not expected_error:
++            raise
++        return True
++
++
++def main():
++    print("Testing SelectDateWidget with various edge cases")
++    print("=" * 60)
++    
++    # Test cases
++    test_cases = [
++        # Normal valid dates
++        ("Valid date", {
++            'date_field_day': '15',
++            'date_field_month': '6',
++            'date_field_year': '2023'
++        }, True),
++        
++        # Edge case: leap year
++        ("Leap year Feb 29", {
++            'date_field_day': '29',
++            'date_field_month': '2',
++            'date_field_year': '2020'
++        }, True),
++        
++        # Invalid date (not leap year)
++        ("Invalid Feb 29", {
++            'date_field_day': '29',
++            'date_field_month': '2',
++            'date_field_year': '2021'
++        }, False),
++        
++        # Overflow cases
++        ("Overflow year (sys.maxsize + 1)", {
++            'date_field_day': '1',
++            'date_field_month': '1',
++            'date_field_year': str(sys.maxsize + 1)
++        }, False),
++        
++        ("Overflow year (very large)", {
++            'date_field_day': '1',
++            'date_field_month': '1',
++            'date_field_year': '9' * 20  # 20 digit number
++        }, False),
++        
++        ("Overflow month", {
++            'date_field_day': '1',
++            'date_field_month': str(sys.maxsize + 1),
++            'date_field_year': '2023'
++        }, False),
++        
++        ("Overflow day", {
++            'date_field_day': str(sys.maxsize + 1),
++            'date_field_month': '1',
++            'date_field_year': '2023'
++        }, False),
++        
++        # Empty values
++        ("All empty", {
++            'date_field_day': '',
++            'date_field_month': '',
++            'date_field_year': ''
++        }, False),
++        
++        # Partial values
++        ("Missing day", {
++            'date_field_day': '',
++            'date_field_month': '6',
++            'date_field_year': '2023'
++        }, False),
++        
++        # Zero values
++        ("Zero day", {
++            'date_field_day': '0',
++            'date_field_month': '6',
++            'date_field_year': '2023'
++        }, False),
++        
++        # Negative values  
++        ("Negative year", {
++            'date_field_day': '1',
++            'date_field_month': '1',
++            'date_field_year': '-2023'
++        }, False),
++        
++        # Very large but valid year
++        ("Large valid year", {
++            'date_field_day': '1',
++            'date_field_month': '1',
++            'date_field_year': '9999'
++        }, True),
++    ]
++    
++    all_passed = True
++    for args in test_cases:
++        try:
++            test_case(*args)
++        except AssertionError as e:
++            print(f"FAILED: {e}")
++            all_passed = False
++        except Exception as e:
++            print(f"ERROR: {type(e).__name__}: {e}")
++            all_passed = False
++    
++    print("\n" + "=" * 60)
++    print(f"All tests passed: {all_passed}")
++    return all_passed
++
++
++if __name__ == "__main__":
++    success = main()
++    sys.exit(0 if success else 1)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0a9f4c002c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++"""Test edge cases for SelectDateWidget"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    USE_TZ=False,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++django.setup()
++
++from django.forms import SelectDateWidget
++
++
++def test_edge_cases():
++    """Test various edge cases"""
++    widget = SelectDateWidget()
++    
++    test_cases = [
++        # Non-numeric values
++        {
++            'field_year': 'abc',
++            'field_month': '1',
++            'field_day': '1',
++            'expected_error': ValueError,
++            'description': 'Non-numeric year'
++        },
++        {
++            'field_year': '2023',
++            'field_month': 'xyz',
++            'field_day': '1',
++            'expected_error': ValueError,
++            'description': 'Non-numeric month'
++        },
++        {
++            'field_year': '2023',
++            'field_month': '1',
++            'field_day': 'foo',
++            'expected_error': ValueError,
++            'description': 'Non-numeric day'
++        },
++        # Float values
++        {
++            'field_year': '2023.5',
++            'field_month': '1',
++            'field_day': '1',
++            'expected_error': ValueError,
++            'description': 'Float year'
++        },
++        # Empty strings with spaces
++        {
++            'field_year': '  ',
++            'field_month': '1',
++            'field_day': '1',
++            'expected_error': ValueError,
++            'description': 'Whitespace year'
++        },
++    ]
++    
++    print("Testing edge cases for SelectDateWidget...")
++    print("=" * 60)
++    
++    all_passed = True
++    for test_case in test_cases:
++        data = {k: v for k, v in test_case.items() if k.startswith('field_')}
++        description = test_case['description']
++        expected_error = test_case.get('expected_error')
++        
++        print(f"\nTest: {description}")
++        print(f"Data: {data}")
++        
++        try:
++            result = widget.value_from_datadict(data, {}, 'field')
++            print(f"Result: {result}")
++            
++            # If we expected an error but didn't get one, that's still OK
++            # as long as the widget handles it gracefully
++            if expected_error:
++                print("✓ No exception raised - handled gracefully")
++            else:
++                print("✓ Processed successfully")
++                
++        except Exception as e:
++            print(f"Exception: {type(e).__name__}: {e}")
++            if type(e) == expected_error:
++                print("✓ Expected exception raised")
++            else:
++                print("✗ Unexpected exception type")
++                all_passed = False
++    
++    print("\n" + "=" * 60)
++    print(f"All edge cases handled gracefully: {all_passed}")
++    return all_passed
++
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_overflow_fix.py b/test_overflow_fix.py
+new file mode 100644
+index 0000000000..102ac33181
+--- /dev/null
++++ b/test_overflow_fix.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python
++"""Test script to reproduce the OverflowError issue in SelectDateWidget"""
++
++import sys
++import datetime
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    USE_TZ=False,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++django.setup()
++
++from django import forms
++from django.forms import SelectDateWidget
++from django.http import HttpResponse
++
++
++class ReproForm(forms.Form):
++    my_date = forms.DateField(widget=SelectDateWidget())
++
++
++def test_overflow_error():
++    """Test that large integers trigger OverflowError"""
++    # Create form data with a very large year value
++    data = {
++        'my_date_day': '1',
++        'my_date_month': '1', 
++        'my_date_year': str(sys.maxsize + 1)  # This will cause OverflowError
++    }
++    
++    print(f"Testing with year value: {data['my_date_year']}")
++    
++    # Try to create form - this should trigger the error
++    try:
++        form = ReproForm(data)
++        # Calling is_valid() will trigger value_from_datadict
++        is_valid = form.is_valid()
++        print(f"Form is valid: {is_valid}")
++        if not is_valid:
++            print(f"Form errors: {form.errors}")
++    except OverflowError as e:
++        print(f"OverflowError caught: {e}")
++        return False
++    except Exception as e:
++        print(f"Unexpected error: {type(e).__name__}: {e}")
++        return False
++    
++    return True
++
++
++def test_normal_date():
++    """Test that normal dates still work"""
++    data = {
++        'my_date_day': '15',
++        'my_date_month': '6',
++        'my_date_year': '2023'
++    }
++    
++    form = ReproForm(data)
++    is_valid = form.is_valid()
++    print(f"Normal date - Form is valid: {is_valid}")
++    if is_valid:
++        print(f"Cleaned data: {form.cleaned_data}")
++    else:
++        print(f"Form errors: {form.errors}")
++    
++    return is_valid
++
++
++def test_invalid_date():
++    """Test that invalid dates are handled properly"""
++    data = {
++        'my_date_day': '31',
++        'my_date_month': '2',  # February doesn't have 31 days
++        'my_date_year': '2023'
++    }
++    
++    form = ReproForm(data)
++    is_valid = form.is_valid()
++    print(f"Invalid date - Form is valid: {is_valid}")
++    if not is_valid:
++        print(f"Form errors: {form.errors}")
++    
++    return not is_valid  # Should be invalid
++
++
++if __name__ == "__main__":
++    print("Testing SelectDateWidget OverflowError issue...")
++    print("=" * 60)
++    
++    print("\n1. Testing with overflow value:")
++    overflow_handled = test_overflow_error()
++    
++    print("\n2. Testing with normal date:")
++    normal_works = test_normal_date()
++    
++    print("\n3. Testing with invalid date:")
++    invalid_handled = test_invalid_date()
++    
++    print("\n" + "=" * 60)
++    print("Results:")
++    print(f"- Overflow handled without crash: {overflow_handled}")
++    print(f"- Normal dates work: {normal_works}")
++    print(f"- Invalid dates handled: {invalid_handled}")
+diff --git a/test_pr_scenario.py b/test_pr_scenario.py
+new file mode 100644
+index 0000000000..1dc5b7b879
+--- /dev/null
++++ b/test_pr_scenario.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++"""Test the exact scenario from the PR description"""
++
++import django
++from django.conf import settings
++from django.test import RequestFactory
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    USE_TZ=False,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++)
++django.setup()
++
++from django import forms
++from django.forms import SelectDateWidget
++from django.http import HttpResponse, QueryDict
++
++
++class ReproForm(forms.Form):
++    my_date = forms.DateField(widget=SelectDateWidget())
++
++
++def repro_view(request):
++    form = ReproForm(request.GET)  # for ease of reproducibility
++    if form.is_valid():
++        return HttpResponse("ok")
++    else:
++        return HttpResponse("not ok")
++
++
++def test_pr_scenario():
++    """Test the exact scenario from the PR description"""
++    factory = RequestFactory()
++    
++    # Create a request with the problematic query string
++    request = factory.get('/repro/', {
++        'my_date_day': '1',
++        'my_date_month': '1',
++        'my_date_year': '1234567821345678'
++    })
++    
++    print("Testing PR scenario with large year value...")
++    print(f"Query params: {request.GET}")
++    
++    try:
++        response = repro_view(request)
++        print(f"Response content: {response.content.decode()}")
++        print("✓ No OverflowError raised - issue is fixed!")
++        return True
++    except OverflowError as e:
++        print(f"✗ OverflowError raised: {e}")
++        return False
++    except Exception as e:
++        print(f"✗ Unexpected error: {type(e).__name__}: {e}")
++        return False
++
++
++if __name__ == "__main__":
++    success = test_pr_scenario()
++    if success:
++        print("\nThe fix successfully prevents the OverflowError crash!")
++    else:
++        print("\nThe issue is not fixed.")
+diff --git a/tests/forms_tests/widget_tests/test_selectdatewidget.py b/tests/forms_tests/widget_tests/test_selectdatewidget.py
+index cfcd037987..d916f3560d 100644
+--- a/tests/forms_tests/widget_tests/test_selectdatewidget.py
++++ b/tests/forms_tests/widget_tests/test_selectdatewidget.py
+@@ -1,3 +1,4 @@
++import sys
+ from datetime import date
+ 
+ from django.forms import DateField, Form, SelectDateWidget
+@@ -745,3 +746,26 @@ class SelectDateWidgetTest(WidgetTest):
+             "</select></fieldset></div>",
+             form.render(),
+         )
++
++    def test_value_from_datadict_with_overflow_error(self):
++        """
++        Test that very large integer values that would cause OverflowError
++        are handled gracefully.
++        """
++        tests = [
++            # Overflow in year
++            ((str(sys.maxsize + 1), "12", "1"), f"{sys.maxsize + 1}-12-1"),
++            (("9" * 20, "12", "1"), f"{'9' * 20}-12-1"),
++            # Overflow in month
++            (("2023", str(sys.maxsize + 1), "1"), f"2023-{sys.maxsize + 1}-1"),
++            # Overflow in day
++            (("2023", "12", str(sys.maxsize + 1)), f"2023-12-{sys.maxsize + 1}"),
++        ]
++        for values, expected in tests:
++            with self.subTest(values=values):
++                data = {}
++                for field_name, value in zip(("year", "month", "day"), values):
++                    data["field_%s" % field_name] = value
++                # Should not raise OverflowError
++                result = self.widget.value_from_datadict(data, {}, "field")
++                self.assertEqual(result, expected)

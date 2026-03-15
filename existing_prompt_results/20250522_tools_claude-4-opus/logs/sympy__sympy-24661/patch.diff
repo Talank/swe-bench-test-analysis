@@ -1,0 +1,283 @@
+diff --git a/sympy/parsing/sympy_parser.py b/sympy/parsing/sympy_parser.py
+index 52711d1324..fd040cd758 100644
+--- a/sympy/parsing/sympy_parser.py
++++ b/sympy/parsing/sympy_parser.py
+@@ -1110,6 +1110,14 @@ class EvaluateFalseTransformer(ast.NodeTransformer):
+         ast.BitAnd: 'And',
+         ast.BitXor: 'Not',
+     }
++    comparison_operators = {
++        ast.Lt: 'Lt',
++        ast.LtE: 'Le',
++        ast.Gt: 'Gt',
++        ast.GtE: 'Ge',
++        ast.Eq: 'Eq',
++        ast.NotEq: 'Ne',
++    }
+     functions = (
+         'Abs', 'im', 're', 'sign', 'arg', 'conjugate',
+         'acos', 'acot', 'acsc', 'asec', 'asin', 'atan',
+@@ -1192,6 +1200,25 @@ def visit_Call(self, node):
+             new_node.keywords.append(ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load())))
+         return new_node
+ 
++    def visit_Compare(self, node):
++        # Handle comparison operators (relationals)
++        if len(node.ops) == 1 and node.ops[0].__class__ in self.comparison_operators:
++            sympy_class = self.comparison_operators[node.ops[0].__class__]
++            left = self.visit(node.left)
++            right = self.visit(node.comparators[0])
++            
++            new_node = ast.Call(
++                func=ast.Name(id=sympy_class, ctx=ast.Load()),
++                args=[left, right],
++                keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                starargs=None,
++                kwargs=None
++            )
++            return new_node
++        else:
++            # For chained comparisons or unsupported operators, use default behavior
++            return self.generic_visit(node)
++
+ 
+ _transformation = {  # items can be added but never re-ordered
+ 0: lambda_notation,
+diff --git a/sympy/parsing/tests/test_sympy_parser.py b/sympy/parsing/tests/test_sympy_parser.py
+index 7c43e1fce3..e508b64c50 100644
+--- a/sympy/parsing/tests/test_sympy_parser.py
++++ b/sympy/parsing/tests/test_sympy_parser.py
+@@ -359,3 +359,36 @@ def test_issue_22822():
+     raises(ValueError, lambda: parse_expr('x', {'': 1}))
+     data = {'some_parameter': None}
+     assert parse_expr('some_parameter is None', data) is True
++
++
++def test_evaluate_false_relationals():
++    # Test that evaluate=False parameter works for relationals
++    from sympy.core.relational import Lt, Le, Gt, Ge, Eq as Equality, Ne
++    from sympy.logic.boolalg import true, false
++    
++    # Test basic numeric comparisons
++    assert parse_expr('1 < 2', evaluate=False) == Lt(1, 2, evaluate=False)
++    assert parse_expr('1 > 2', evaluate=False) == Gt(1, 2, evaluate=False)
++    assert parse_expr('1 <= 2', evaluate=False) == Le(1, 2, evaluate=False)
++    assert parse_expr('1 >= 2', evaluate=False) == Ge(1, 2, evaluate=False)
++    assert parse_expr('1 == 2', evaluate=False) == Equality(1, 2, evaluate=False)
++    assert parse_expr('1 != 2', evaluate=False) == Ne(1, 2, evaluate=False)
++    
++    # Test with symbols
++    x = Symbol('x')
++    y = Symbol('y')
++    assert parse_expr('x < y', evaluate=False) == Lt(x, y, evaluate=False)
++    assert parse_expr('x > y', evaluate=False) == Gt(x, y, evaluate=False)
++    assert parse_expr('x <= y', evaluate=False) == Le(x, y, evaluate=False)
++    assert parse_expr('x >= y', evaluate=False) == Ge(x, y, evaluate=False)
++    assert parse_expr('x == y', evaluate=False) == Equality(x, y, evaluate=False)
++    assert parse_expr('x != y', evaluate=False) == Ne(x, y, evaluate=False)
++    
++    # Test that evaluate=True still works (default behavior)
++    assert parse_expr('1 < 2') == true
++    assert parse_expr('1 > 2') == false
++    assert parse_expr('1 <= 2') == true
++    assert parse_expr('1 >= 2') == false
++    # For == and !=, they return Python bool, not SymPy bool
++    assert parse_expr('1 == 2') is False
++    assert parse_expr('1 != 2') is True
+diff --git a/test_ast_compare.py b/test_ast_compare.py
+new file mode 100644
+index 0000000000..9c5776e85c
+--- /dev/null
++++ b/test_ast_compare.py
+@@ -0,0 +1,16 @@
++import ast
++
++# Test how AST represents comparisons
++code = "1 < 2"
++tree = ast.parse(code)
++print(ast.dump(tree))
++
++# Also test other comparisons
++comparisons = ["1 < 2", "1 > 2", "1 <= 2", "1 >= 2", "1 == 2", "1 != 2"]
++for comp in comparisons:
++    tree = ast.parse(comp)
++    expr = tree.body[0].value
++    print(f"\n{comp}:")
++    print(f"  Type: {type(expr).__name__}")
++    if hasattr(expr, 'ops'):
++        print(f"  Operator: {type(expr.ops[0]).__name__}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..52343893ff
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,56 @@
++from sympy import Lt, Gt, Le, Ge, Eq, Ne, Symbol, Add, Mul
++from sympy.parsing.sympy_parser import parse_expr
++
++print("Testing comprehensive cases:")
++print()
++
++# Test with symbols
++x = Symbol('x')
++y = Symbol('y')
++
++test_cases = [
++    # Basic numeric comparisons
++    ('1 < 2', Lt(1, 2, evaluate=False)),
++    ('1 > 2', Gt(1, 2, evaluate=False)),
++    ('1 <= 2', Le(1, 2, evaluate=False)),
++    ('1 >= 2', Ge(1, 2, evaluate=False)),
++    ('1 == 2', Eq(1, 2, evaluate=False)),
++    ('1 != 2', Ne(1, 2, evaluate=False)),
++    
++    # Comparisons with symbols
++    ('x < y', Lt(x, y, evaluate=False)),
++    ('x > y', Gt(x, y, evaluate=False)),
++    ('x <= y', Le(x, y, evaluate=False)),
++    ('x >= y', Ge(x, y, evaluate=False)),
++    ('x == y', Eq(x, y, evaluate=False)),
++    ('x != y', Ne(x, y, evaluate=False)),
++    
++    # Comparisons with expressions
++    ('x + 1 < y - 2', Lt(Add(x, 1, evaluate=False), Add(y, -2, evaluate=False), evaluate=False)),
++    ('2*x > 3*y', Gt(Mul(2, x, evaluate=False), Mul(3, y, evaluate=False), evaluate=False)),
++]
++
++for expr_str, expected in test_cases:
++    result = parse_expr(expr_str, evaluate=False)
++    # Check if the types match
++    if type(result) == type(expected):
++        print(f"✓ parse_expr('{expr_str}', evaluate=False) = {result}")
++    else:
++        print(f"✗ parse_expr('{expr_str}', evaluate=False) = {result}")
++        print(f"  Expected type: {type(expected).__name__}, Got: {type(result).__name__}")
++
++# Test that evaluate=True still works
++print("\nTesting with evaluate=True (default):")
++result_true = parse_expr('1 < 2')
++print(f"parse_expr('1 < 2') = {result_true} (type: {type(result_true).__name__})")
++
++result_false = parse_expr('1 > 2')
++print(f"parse_expr('1 > 2') = {result_false} (type: {type(result_false).__name__})")
++
++# Test chained comparisons (should fall back to default behavior)
++print("\nTesting chained comparisons:")
++try:
++    result = parse_expr('1 < 2 < 3', evaluate=False)
++    print(f"parse_expr('1 < 2 < 3', evaluate=False) = {result}")
++except Exception as e:
++    print(f"Error with chained comparison: {e}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..b2f98d7387
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,54 @@
++from sympy import Symbol, Lt, Gt, Le, Ge, Eq, Ne, Add, Mul
++from sympy.parsing.sympy_parser import parse_expr
++
++print("Testing edge cases for evaluate=False with relationals:")
++print()
++
++# Test with complex expressions
++x = Symbol('x')
++y = Symbol('y')
++
++test_cases = [
++    # Complex expressions
++    ('x + 1 < y - 2', 'Complex expression with addition/subtraction'),
++    ('2*x > 3*y', 'Complex expression with multiplication'),
++    ('x**2 < y**3', 'Complex expression with exponentiation'),
++    ('sin(x) < cos(y)', 'Complex expression with functions'),
++    
++    # Nested expressions
++    ('(x + 1) < (y - 2)', 'Parenthesized expressions'),
++    ('x < y + z', 'Three variables'),
++    
++    # Edge cases
++    ('0 < 1', 'Zero comparison'),
++    ('-1 < 0', 'Negative number comparison'),
++    ('x < 0', 'Variable vs zero'),
++    
++    # Chained comparisons (should still work, but differently)
++    ('1 < 2 < 3', 'Chained comparison'),
++]
++
++for expr_str, description in test_cases:
++    try:
++        result = parse_expr(expr_str, evaluate=False)
++        print(f"✓ {description}: parse_expr('{expr_str}', evaluate=False)")
++        print(f"  Result: {result}")
++        print(f"  Type: {type(result).__name__}")
++        print()
++    except Exception as e:
++        print(f"✗ {description}: parse_expr('{expr_str}', evaluate=False)")
++        print(f"  Error: {e}")
++        print()
++
++# Test that the fix doesn't affect non-relational expressions
++print("Testing non-relational expressions still work:")
++non_rel_cases = [
++    'x + y',
++    '2*x',
++    'sin(x)',
++    'x**2',
++]
++
++for expr_str in non_rel_cases:
++    result = parse_expr(expr_str, evaluate=False)
++    print(f"parse_expr('{expr_str}', evaluate=False) = {result}")
+diff --git a/test_our_fix.py b/test_our_fix.py
+new file mode 100644
+index 0000000000..0b26ba4ea0
+--- /dev/null
++++ b/test_our_fix.py
+@@ -0,0 +1,9 @@
++from sympy.parsing.tests.test_sympy_parser import test_evaluate_false_relationals
++
++try:
++    test_evaluate_false_relationals()
++    print("Test passed!")
++except Exception as e:
++    print(f"Test failed: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_parse_expr_issue.py b/test_parse_expr_issue.py
+new file mode 100644
+index 0000000000..f5c0ab9a30
+--- /dev/null
++++ b/test_parse_expr_issue.py
+@@ -0,0 +1,32 @@
++from sympy import Lt
++from sympy.parsing.sympy_parser import parse_expr
++
++# Test the issue
++print("Testing parse_expr with evaluate=False for relationals:")
++print()
++
++# This should return Lt(1, 2) but currently returns True
++result = parse_expr('1 < 2', evaluate=False)
++print(f"parse_expr('1 < 2', evaluate=False) = {result}")
++print(f"Type: {type(result)}")
++print()
++
++# Expected behavior
++expected = Lt(1, 2, evaluate=False)
++print(f"Expected: Lt(1, 2, evaluate=False) = {expected}")
++print(f"Type: {type(expected)}")
++print()
++
++# Test other comparison operators
++print("Testing other comparison operators:")
++test_cases = [
++    ('1 > 2', 'Gt'),
++    ('1 <= 2', 'Le'),
++    ('1 >= 2', 'Ge'),
++    ('1 == 2', 'Eq'),
++    ('1 != 2', 'Ne')
++]
++
++for expr, expected_class in test_cases:
++    result = parse_expr(expr, evaluate=False)
++    print(f"parse_expr('{expr}', evaluate=False) = {result} (type: {type(result).__name__})")

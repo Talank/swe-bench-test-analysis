@@ -1,0 +1,529 @@
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index acee9887d2..bdeec80610 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -304,7 +304,7 @@ FILE_UPLOAD_TEMP_DIR = None
+ 
+ # The numeric mode to set newly-uploaded files to. The value should be a mode
+ # you'd pass directly to os.chmod; see https://docs.python.org/library/os.html#files-and-directories.
+-FILE_UPLOAD_PERMISSIONS = None
++FILE_UPLOAD_PERMISSIONS = 0o644
+ 
+ # The numeric mode to assign to newly-created directories, when uploading files.
+ # The value should be a mode as you'd pass to os.chmod;
+diff --git a/docs/ref/settings.txt b/docs/ref/settings.txt
+index 46e99af993..b4fc952f6e 100644
+--- a/docs/ref/settings.txt
++++ b/docs/ref/settings.txt
+@@ -1484,13 +1484,13 @@ This value mirrors the functionality and caveats of the
+ ``FILE_UPLOAD_PERMISSIONS``
+ ---------------------------
+ 
+-Default: ``None``
++Default: ``0o644``
+ 
+-The numeric mode (i.e. ``0o644``) to set newly uploaded files to. For
++The numeric mode to set newly uploaded files to. For
+ more information about what these modes mean, see the documentation for
+ :func:`os.chmod`.
+ 
+-If this isn't given or is ``None``, you'll get operating-system
++If this is ``None``, you'll get operating-system
+ dependent behavior. On most platforms, temporary files will have a mode
+ of ``0o600``, and files saved from memory will be saved using the
+ system's standard umask.
+diff --git a/docs/releases/3.0.txt b/docs/releases/3.0.txt
+index 5d9bff086e..a529fe362d 100644
+--- a/docs/releases/3.0.txt
++++ b/docs/releases/3.0.txt
+@@ -129,7 +129,9 @@ File Storage
+ File Uploads
+ ~~~~~~~~~~~~
+ 
+-* ...
++* :setting:`FILE_UPLOAD_PERMISSIONS` now defaults to ``0o644`` to avoid
++  inconsistent permissions on files uploaded using :class:`~django.core.files.uploadedfile.TemporaryUploadedFile`
++  and :class:`~django.core.files.uploadedfile.MemoryUploadedFile`.
+ 
+ 
+ Forms
+@@ -290,6 +292,10 @@ Miscellaneous
+ * ``ContentType.__str__()`` now includes the model's ``app_label`` to
+   disambiguate model's with the same name in different apps.
+ 
++* :setting:`FILE_UPLOAD_PERMISSIONS` now defaults to ``0o644`` instead of
++  ``None``. If you need the previous behavior, you must explicitly set it to
++  ``None``.
++
+ .. _deprecated-features-3.0:
+ 
+ Features deprecated in 3.0
+diff --git a/test_comprehensive_permissions.py b/test_comprehensive_permissions.py
+new file mode 100644
+index 0000000000..c30eb4ee4c
+--- /dev/null
++++ b/test_comprehensive_permissions.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python
++import os
++import tempfile
++import shutil
++from django.conf import settings
++
++# Test with default settings
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    MEDIA_ROOT='/tmp/test_upload_permissions_default',
++    FILE_UPLOAD_HANDLERS=[
++        'django.core.files.uploadhandler.MemoryFileUploadHandler',
++        'django.core.files.uploadhandler.TemporaryFileUploadHandler',
++    ]
++)
++
++import django
++django.setup()
++
++from django.core.files.uploadedfile import SimpleUploadedFile, TemporaryUploadedFile
++from django.core.files.storage import FileSystemStorage
++
++def test_permissions(test_name, expected_perms=None):
++    print(f"\n{test_name}")
++    if settings.FILE_UPLOAD_PERMISSIONS is not None:
++        print(f"FILE_UPLOAD_PERMISSIONS: {settings.FILE_UPLOAD_PERMISSIONS} (0o{oct(settings.FILE_UPLOAD_PERMISSIONS)[2:]} in octal)")
++    else:
++        print("FILE_UPLOAD_PERMISSIONS: None")
++    
++    # Clean up test directory
++    if os.path.exists(settings.MEDIA_ROOT):
++        shutil.rmtree(settings.MEDIA_ROOT)
++    os.makedirs(settings.MEDIA_ROOT)
++    
++    # Create storage instance
++    storage = FileSystemStorage(location=settings.MEDIA_ROOT)
++    
++    # Test small file
++    small_content = b"Small file content"
++    small_file = SimpleUploadedFile("small.txt", small_content)
++    small_path = storage.save("small.txt", small_file)
++    small_full_path = os.path.join(settings.MEDIA_ROOT, small_path)
++    small_perms = oct(os.stat(small_full_path).st_mode)[-3:]
++    print(f"Small file permissions: {small_perms}")
++    
++    # Test large file
++    with tempfile.NamedTemporaryFile(delete=False) as tmp:
++        tmp.write(b"Large file content" * 1000)
++        tmp_path = tmp.name
++    
++    large_file = TemporaryUploadedFile("large.txt", "text/plain", 18000, "utf-8")
++    large_file.file = open(tmp_path, 'rb')
++    large_file.temporary_file_path = lambda: tmp_path
++    
++    large_path = storage.save("large.txt", large_file)
++    large_full_path = os.path.join(settings.MEDIA_ROOT, large_path)
++    large_perms = oct(os.stat(large_full_path).st_mode)[-3:]
++    print(f"Large file permissions: {large_perms}")
++    
++    # Clean up
++    large_file.file.close()
++    if os.path.exists(tmp_path):
++        os.unlink(tmp_path)
++    
++    # Verify consistency
++    if small_perms == large_perms:
++        print(f"[OK] Permissions are consistent: {small_perms}")
++        if expected_perms and small_perms == expected_perms:
++            print(f"[OK] Permissions match expected: {expected_perms}")
++        elif expected_perms:
++            print(f"[FAIL] Expected {expected_perms} but got {small_perms}")
++    else:
++        print(f"[FAIL] Permissions are inconsistent! Small: {small_perms}, Large: {large_perms}")
++    
++    return small_perms == large_perms
++
++# Test 1: Default settings (should be 0o644)
++test_permissions("Test 1: Default FILE_UPLOAD_PERMISSIONS", "644")
++
++# Test 2: Custom permissions
++settings.FILE_UPLOAD_PERMISSIONS = 0o600
++settings.MEDIA_ROOT = '/tmp/test_upload_permissions_600'
++test_permissions("Test 2: FILE_UPLOAD_PERMISSIONS = 0o600", "600")
++
++# Test 3: Another custom permission
++settings.FILE_UPLOAD_PERMISSIONS = 0o664
++settings.MEDIA_ROOT = '/tmp/test_upload_permissions_664'
++test_permissions("Test 3: FILE_UPLOAD_PERMISSIONS = 0o664", "664")
++
++# Test 4: None (should fall back to system umask)
++settings.FILE_UPLOAD_PERMISSIONS = None
++settings.MEDIA_ROOT = '/tmp/test_upload_permissions_none'
++print("\nTest 4: FILE_UPLOAD_PERMISSIONS = None")
++print("This will use system umask, so results may vary")
++# Don't test consistency here as it depends on umask
++
++# Clean up
++for path in ['/tmp/test_upload_permissions_default', '/tmp/test_upload_permissions_600', 
++             '/tmp/test_upload_permissions_664', '/tmp/test_upload_permissions_none']:
++    if os.path.exists(path):
++        shutil.rmtree(path)
+diff --git a/test_file_permissions.py b/test_file_permissions.py
+new file mode 100644
+index 0000000000..1c70b62fa5
+--- /dev/null
++++ b/test_file_permissions.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python
++import os
++import tempfile
++import shutil
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    MEDIA_ROOT='/tmp/test_upload_permissions',
++    # Don't set FILE_UPLOAD_PERMISSIONS to use the default
++    FILE_UPLOAD_HANDLERS=[
++        'django.core.files.uploadhandler.MemoryFileUploadHandler',
++        'django.core.files.uploadhandler.TemporaryFileUploadHandler',
++    ]
++)
++
++import django
++django.setup()
++
++from django.core.files.uploadedfile import SimpleUploadedFile, TemporaryUploadedFile
++from django.core.files.storage import default_storage
++
++# Create a test directory
++test_dir = '/tmp/test_upload_permissions'
++if os.path.exists(test_dir):
++    shutil.rmtree(test_dir)
++os.makedirs(test_dir)
++
++# Configure media root
++settings.MEDIA_ROOT = test_dir
++
++def test_file_permissions():
++    print("Testing file upload permissions...")
++    print(f"Current FILE_UPLOAD_PERMISSIONS setting: {settings.FILE_UPLOAD_PERMISSIONS}")
++    
++    # Test with small file (MemoryUploadedFile)
++    small_content = b"Small file content"
++    small_file = SimpleUploadedFile("small.txt", small_content)
++    small_path = default_storage.save("small.txt", small_file)
++    small_full_path = os.path.join(test_dir, small_path)
++    small_perms = oct(os.stat(small_full_path).st_mode)[-3:]
++    print(f"Small file (MemoryUploadedFile) permissions: {small_perms}")
++    
++    # Test with large file (TemporaryUploadedFile)
++    # Create a temporary file manually to simulate TemporaryUploadedFile
++    with tempfile.NamedTemporaryFile(delete=False) as tmp:
++        tmp.write(b"Large file content" * 1000)
++        tmp_path = tmp.name
++    
++    # Check temp file permissions
++    temp_perms = oct(os.stat(tmp_path).st_mode)[-3:]
++    print(f"Temporary file permissions before move: {temp_perms}")
++    
++    # Simulate what happens with TemporaryUploadedFile
++    large_file = TemporaryUploadedFile("large.txt", "text/plain", 18000, "utf-8")
++    large_file.file = open(tmp_path, 'rb')
++    large_file.temporary_file_path = lambda: tmp_path
++    
++    large_path = default_storage.save("large.txt", large_file)
++    large_full_path = os.path.join(test_dir, large_path)
++    large_perms = oct(os.stat(large_full_path).st_mode)[-3:]
++    print(f"Large file (TemporaryUploadedFile) permissions: {large_perms}")
++    
++    # Clean up
++    large_file.file.close()
++    if os.path.exists(tmp_path):
++        os.unlink(tmp_path)
++    
++    return small_perms, large_perms
++
++if __name__ == "__main__":
++    small_perms, large_perms = test_file_permissions()
++    
++    if small_perms != large_perms:
++        print(f"\nISSUE CONFIRMED: File permissions are inconsistent!")
++        print(f"Small files get: {small_perms}")
++        print(f"Large files get: {large_perms}")
++    else:
++        print(f"\nFile permissions are consistent: {small_perms}")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..33647da381
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python
++"""
++Final verification that the FILE_UPLOAD_PERMISSIONS fix works correctly.
++"""
++import os
++import tempfile
++import shutil
++from django.conf import settings
++
++# Test 1: Verify default value in global_settings
++print("Test 1: Checking global_settings.py")
++from django.conf import global_settings
++print(f"FILE_UPLOAD_PERMISSIONS in global_settings: {global_settings.FILE_UPLOAD_PERMISSIONS}")
++print(f"In octal: 0o{oct(global_settings.FILE_UPLOAD_PERMISSIONS)[2:]}")
++assert global_settings.FILE_UPLOAD_PERMISSIONS == 0o644, "Default should be 0o644"
++print("✓ PASS\n")
++
++# Test 2: Verify default behavior
++print("Test 2: Testing default behavior")
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    MEDIA_ROOT='/tmp/test_default_behavior',
++)
++
++import django
++django.setup()
++
++from django.core.files.uploadedfile import SimpleUploadedFile, TemporaryUploadedFile
++from django.core.files.storage import FileSystemStorage
++
++if os.path.exists(settings.MEDIA_ROOT):
++    shutil.rmtree(settings.MEDIA_ROOT)
++os.makedirs(settings.MEDIA_ROOT)
++
++storage = FileSystemStorage(location=settings.MEDIA_ROOT)
++
++# Small file
++small_file = SimpleUploadedFile("small.txt", b"small content")
++small_path = storage.save("small.txt", small_file)
++small_perms = os.stat(os.path.join(settings.MEDIA_ROOT, small_path)).st_mode & 0o777
++
++# Large file
++with tempfile.NamedTemporaryFile(delete=False) as tmp:
++    tmp.write(b"large content" * 1000)
++    tmp_path = tmp.name
++
++large_file = TemporaryUploadedFile("large.txt", "text/plain", 13000, "utf-8")
++large_file.file = open(tmp_path, 'rb')
++large_file.temporary_file_path = lambda: tmp_path
++
++large_path = storage.save("large.txt", large_file)
++large_perms = os.stat(os.path.join(settings.MEDIA_ROOT, large_path)).st_mode & 0o777
++
++large_file.file.close()
++if os.path.exists(tmp_path):
++    os.unlink(tmp_path)
++
++print(f"Small file permissions: 0o{oct(small_perms)[2:]}")
++print(f"Large file permissions: 0o{oct(large_perms)[2:]}")
++assert small_perms == 0o644, f"Small file should have 0o644, got 0o{oct(small_perms)[2:]}"
++assert large_perms == 0o644, f"Large file should have 0o644, got 0o{oct(large_perms)[2:]}"
++assert small_perms == large_perms, "Permissions should be consistent"
++print("✓ PASS\n")
++
++# Test 3: Verify None behavior still works
++print("Test 3: Testing FILE_UPLOAD_PERMISSIONS = None")
++settings.FILE_UPLOAD_PERMISSIONS = None
++settings.MEDIA_ROOT = '/tmp/test_none_behavior'
++
++if os.path.exists(settings.MEDIA_ROOT):
++    shutil.rmtree(settings.MEDIA_ROOT)
++os.makedirs(settings.MEDIA_ROOT)
++
++storage = FileSystemStorage(location=settings.MEDIA_ROOT)
++
++# Get current umask
++current_umask = os.umask(0)
++os.umask(current_umask)
++
++file = SimpleUploadedFile("test.txt", b"content")
++path = storage.save("test.txt", file)
++perms = os.stat(os.path.join(settings.MEDIA_ROOT, path)).st_mode & 0o777
++expected = 0o666 & ~current_umask
++
++print(f"File permissions: 0o{oct(perms)[2:]}")
++print(f"Expected (0o666 & ~umask): 0o{oct(expected)[2:]}")
++assert perms == expected, f"Should match umask behavior"
++print("✓ PASS\n")
++
++# Clean up
++for path in ['/tmp/test_default_behavior', '/tmp/test_none_behavior']:
++    if os.path.exists(path):
++        shutil.rmtree(path)
++
++print("All tests passed! The fix is working correctly.")
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 0000000000..65d529d35b
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python
++"""
++Test to verify that the FILE_UPLOAD_PERMISSIONS default of 0o644 fixes the
++inconsistent permissions issue between MemoryUploadedFile and TemporaryUploadedFile.
++"""
++import os
++import tempfile
++import shutil
++from django.conf import settings
++from django.test import TestCase, override_settings
++from django.core.files.uploadedfile import SimpleUploadedFile, TemporaryUploadedFile
++from django.core.files.storage import FileSystemStorage
++
++# Configure Django for testing
++from django.conf import settings
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++import django
++django.setup()
++
++class FileUploadPermissionConsistencyTest(TestCase):
++    def setUp(self):
++        self.test_dir = tempfile.mkdtemp()
++        self.storage = FileSystemStorage(location=self.test_dir)
++        
++    def tearDown(self):
++        shutil.rmtree(self.test_dir)
++    
++    def test_default_permissions_are_consistent(self):
++        """Test that small and large files get the same permissions with default settings."""
++        # Small file (uses MemoryUploadedFile)
++        small_content = b"Small file content"
++        small_file = SimpleUploadedFile("small.txt", small_content)
++        small_path = self.storage.save("small.txt", small_file)
++        small_full_path = os.path.join(self.test_dir, small_path)
++        small_perms = os.stat(small_full_path).st_mode & 0o777
++        
++        # Large file (uses TemporaryUploadedFile)
++        with tempfile.NamedTemporaryFile(delete=False) as tmp:
++            tmp.write(b"Large file content" * 1000)
++            tmp_path = tmp.name
++        
++        large_file = TemporaryUploadedFile("large.txt", "text/plain", 18000, "utf-8")
++        large_file.file = open(tmp_path, 'rb')
++        large_file.temporary_file_path = lambda: tmp_path
++        
++        large_path = self.storage.save("large.txt", large_file)
++        large_full_path = os.path.join(self.test_dir, large_path)
++        large_perms = os.stat(large_full_path).st_mode & 0o777
++        
++        # Clean up
++        large_file.file.close()
++        if os.path.exists(tmp_path):
++            os.unlink(tmp_path)
++        
++        # Both should have 0o644 permissions
++        self.assertEqual(small_perms, 0o644, 
++                        f"Small file has incorrect permissions: {oct(small_perms)}")
++        self.assertEqual(large_perms, 0o644,
++                        f"Large file has incorrect permissions: {oct(large_perms)}")
++        self.assertEqual(small_perms, large_perms,
++                        "Small and large files have different permissions")
++    
++    @override_settings(FILE_UPLOAD_PERMISSIONS=0o600)
++    def test_custom_permissions_are_consistent(self):
++        """Test that custom permissions are applied consistently."""
++        # Small file
++        small_content = b"Small file content"
++        small_file = SimpleUploadedFile("small2.txt", small_content)
++        small_path = self.storage.save("small2.txt", small_file)
++        small_full_path = os.path.join(self.test_dir, small_path)
++        small_perms = os.stat(small_full_path).st_mode & 0o777
++        
++        # Large file
++        with tempfile.NamedTemporaryFile(delete=False) as tmp:
++            tmp.write(b"Large file content" * 1000)
++            tmp_path = tmp.name
++        
++        large_file = TemporaryUploadedFile("large2.txt", "text/plain", 18000, "utf-8")
++        large_file.file = open(tmp_path, 'rb')
++        large_file.temporary_file_path = lambda: tmp_path
++        
++        large_path = self.storage.save("large2.txt", large_file)
++        large_full_path = os.path.join(self.test_dir, large_path)
++        large_perms = os.stat(large_full_path).st_mode & 0o777
++        
++        # Clean up
++        large_file.file.close()
++        if os.path.exists(tmp_path):
++            os.unlink(tmp_path)
++        
++        # Both should have 0o600 permissions
++        self.assertEqual(small_perms, 0o600)
++        self.assertEqual(large_perms, 0o600)
++        self.assertEqual(small_perms, large_perms)
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/test_none_behavior.py b/test_none_behavior.py
+new file mode 100644
+index 0000000000..95460ae08a
+--- /dev/null
++++ b/test_none_behavior.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""
++Test to verify behavior when FILE_UPLOAD_PERMISSIONS is explicitly set to None.
++"""
++import os
++import tempfile
++import shutil
++from django.conf import settings
++
++# Configure Django with FILE_UPLOAD_PERMISSIONS = None
++settings.configure(
++    SECRET_KEY='test-secret-key',
++    MEDIA_ROOT='/tmp/test_none_permissions',
++    FILE_UPLOAD_PERMISSIONS=None,  # Explicitly set to None
++)
++
++import django
++django.setup()
++
++from django.core.files.uploadedfile import SimpleUploadedFile
++from django.core.files.storage import FileSystemStorage
++
++# Clean up test directory
++if os.path.exists(settings.MEDIA_ROOT):
++    shutil.rmtree(settings.MEDIA_ROOT)
++os.makedirs(settings.MEDIA_ROOT)
++
++storage = FileSystemStorage(location=settings.MEDIA_ROOT)
++
++# Get current umask
++current_umask = os.umask(0)
++os.umask(current_umask)
++
++print(f"Current umask: 0o{oct(current_umask)[2:]}")
++print(f"FILE_UPLOAD_PERMISSIONS: {settings.FILE_UPLOAD_PERMISSIONS}")
++
++# Test file upload
++content = b"Test content"
++uploaded_file = SimpleUploadedFile("test.txt", content)
++path = storage.save("test.txt", uploaded_file)
++full_path = os.path.join(settings.MEDIA_ROOT, path)
++perms = os.stat(full_path).st_mode & 0o777
++
++print(f"File permissions: 0o{oct(perms)[2:]}")
++print(f"Expected permissions (0o666 & ~umask): 0o{oct(0o666 & ~current_umask)[2:]}")
++
++if perms == (0o666 & ~current_umask):
++    print("✓ Permissions match expected umask behavior")
++else:
++    print("✗ Permissions don't match expected umask behavior")
++
++# Clean up
++shutil.rmtree(settings.MEDIA_ROOT)

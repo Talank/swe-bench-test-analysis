@@ -1,0 +1,950 @@
+diff --git a/debug_choices.py b/debug_choices.py
+new file mode 100644
+index 0000000000..eb2b6bca05
+--- /dev/null
++++ b/debug_choices.py
+@@ -0,0 +1,68 @@
++"""Debug why adding choices still generates SQL."""
++
++from django.db import models
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++
++# Test 1: Field without choices -> field with choices
++field1_old = models.IntegerField(default=3)
++field1_new = models.IntegerField(default=3, choices=[(1, "Pink"), (2, "Not Pink")])
++
++# Test 2: Field with choices -> field with different choices  
++field2_old = models.IntegerField(choices=[(1, "Pink"), (2, "Not Pink")])
++field2_new = models.IntegerField(choices=[(1, "Pink"), (3, "Very Pink")])
++
++# Set column names
++field1_old.set_attributes_from_name('pink')
++field1_new.set_attributes_from_name('pink')
++field2_old.set_attributes_from_name('pink')
++field2_new.set_attributes_from_name('pink')
++
++# Test deconstruction
++print("Test 1: No choices -> With choices")
++_, path1_old, args1_old, kwargs1_old = field1_old.deconstruct()
++_, path1_new, args1_new, kwargs1_new = field1_new.deconstruct()
++print(f"  Old: path={path1_old}, args={args1_old}, kwargs={kwargs1_old}")
++print(f"  New: path={path1_new}, args={args1_new}, kwargs={kwargs1_new}")
++
++print("\nTest 2: With choices -> Different choices")
++_, path2_old, args2_old, kwargs2_old = field2_old.deconstruct()
++_, path2_new, args2_new, kwargs2_new = field2_new.deconstruct()
++print(f"  Old: path={path2_old}, args={args2_old}, kwargs={kwargs2_old}")
++print(f"  New: path={path2_new}, args={args2_new}, kwargs={kwargs2_new}")
++
++# Now let's see what happens after removing non-database attrs
++non_database_attrs = [
++    "blank",
++    "choices",
++    "db_column",
++    "editable",
++    "error_messages",
++    "help_text",
++    "limit_choices_to",
++    "on_delete",
++    "related_name",
++    "related_query_name",
++    "validators",
++    "verbose_name",
++]
++
++print("\nAfter removing non-database attrs:")
++print("Test 1:")
++kwargs1_old_clean = kwargs1_old.copy()
++kwargs1_new_clean = kwargs1_new.copy()
++for attr in non_database_attrs:
++    kwargs1_old_clean.pop(attr, None)
++    kwargs1_new_clean.pop(attr, None)
++print(f"  Old kwargs: {kwargs1_old_clean}")
++print(f"  New kwargs: {kwargs1_new_clean}")
++print(f"  Equal? {(path1_old, args1_old, kwargs1_old_clean) == (path1_new, args1_new, kwargs1_new_clean)}")
++
++print("\nTest 2:")
++kwargs2_old_clean = kwargs2_old.copy()
++kwargs2_new_clean = kwargs2_new.copy()
++for attr in non_database_attrs:
++    kwargs2_old_clean.pop(attr, None)
++    kwargs2_new_clean.pop(attr, None)
++print(f"  Old kwargs: {kwargs2_old_clean}")
++print(f"  New kwargs: {kwargs2_new_clean}")
++print(f"  Equal? {(path2_old, args2_old, kwargs2_old_clean) == (path2_new, args2_new, kwargs2_new_clean)}")
+diff --git a/debug_test_failure.py b/debug_test_failure.py
+new file mode 100644
+index 0000000000..5bb1995e97
+--- /dev/null
++++ b/debug_test_failure.py
+@@ -0,0 +1,106 @@
++"""Debug why the test is failing."""
++
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.state import ModelState, ProjectState
++from django.db.migrations import operations as migrations
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Create initial project state (mimicking the test)
++app_label = "test_afacn"
++project_state = ProjectState()
++
++# Add the Pony model with fields matching set_up_test_model
++project_state.add_model(ModelState(
++    app_label, 'Pony',
++    [
++        ('id', models.AutoField(primary_key=True)),
++        ('pink', models.IntegerField(default=3)),
++        ('weight', models.FloatField()),
++    ]
++))
++
++# Create the table
++with connection.schema_editor() as editor:
++    editor.create_model(project_state.apps.get_model(app_label, 'Pony'))
++
++# Now test the AlterField operation - IMPORTANT: preserve the default!
++new_state = project_state.clone()
++operation = migrations.AlterField(
++    "Pony",
++    "pink",
++    models.IntegerField(default=3, choices=[(1, "Pink"), (2, "Not Pink")]),
++)
++operation.state_forwards(app_label, new_state)
++
++# Get the fields
++old_field = project_state.models[app_label, "pony"].fields["pink"]
++new_field = new_state.models[app_label, "pony"].fields["pink"]
++
++print("Old field:")
++print(f"  Type: {type(old_field)}")
++print(f"  Default: {old_field.default}")
++print(f"  Choices: {getattr(old_field, 'choices', None)}")
++
++print("\nNew field:")
++print(f"  Type: {type(new_field)}")
++print(f"  Default: {new_field.default}")
++print(f"  Choices: {getattr(new_field, 'choices', None)}")
++
++# Check if field should be altered
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++base_editor = BaseDatabaseSchemaEditor(connection)
++should_alter = base_editor._field_should_be_altered(old_field, new_field)
++print(f"\n_field_should_be_altered: {should_alter}")
++
++# Check deconstruction
++_, old_path, old_args, old_kwargs = old_field.deconstruct()
++_, new_path, new_args, new_kwargs = new_field.deconstruct()
++print(f"\nOld deconstruct: path={old_path}, args={old_args}, kwargs={old_kwargs}")
++print(f"New deconstruct: path={new_path}, args={new_args}, kwargs={new_kwargs}")
++
++# Remove non-database attrs
++non_database_attrs = [
++    "blank",
++    "choices",
++    "db_column",
++    "editable",
++    "error_messages",
++    "help_text",
++    "limit_choices_to",
++    "on_delete",
++    "related_name",
++    "related_query_name",
++    "validators",
++    "verbose_name",
++]
++for attr in non_database_attrs:
++    old_kwargs.pop(attr, None)
++    new_kwargs.pop(attr, None)
++
++print(f"\nAfter removing non-database attrs:")
++print(f"Old kwargs: {old_kwargs}")
++print(f"New kwargs: {new_kwargs}")
++print(f"Equal? {(old_path, old_args, old_kwargs) == (new_path, new_args, new_kwargs)}")
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index 9d6952df21..85d53e3b1a 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -1378,6 +1378,7 @@ class BaseDatabaseSchemaEditor:
+         # - adding only a db_column and the column name is not changed
+         non_database_attrs = [
+             "blank",
++            "choices",
+             "db_column",
+             "editable",
+             "error_messages",
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 0000000000..e02cce27d2
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,167 @@
++"""Final comprehensive test of the choices fix."""
++
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations.operations import CreateModel, AlterField
++from django.db.migrations.state import ProjectState
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++
++def test_scenario(name, initial_field, altered_field, expect_sql=False):
++    """Test a specific scenario."""
++    print(f"\n{name}:")
++    
++    # Create initial model
++    initial_ops = [
++        CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('status', initial_field),
++            ],
++        ),
++    ]
++    
++    # Create migration that alters the field
++    alter_ops = [
++        AlterField(
++            model_name='TestModel',
++            name='status',
++            field=altered_field,
++        ),
++    ]
++    
++    # Create migrations
++    initial_migration = Migration('0001_initial', 'test_app')
++    initial_migration.operations = initial_ops
++    
++    alter_migration = Migration('0002_alter', 'test_app')
++    alter_migration.operations = alter_ops
++    alter_migration.dependencies = [('test_app', '0001_initial')]
++    
++    # Apply migrations and capture SQL
++    executor = MigrationExecutor(connection)
++    
++    # Apply initial migration
++    project_state = ProjectState()
++    with connection.schema_editor() as schema_editor:
++        initial_migration.apply(project_state, schema_editor)
++    
++    # Capture SQL for alter migration
++    sql_statements = []
++    
++    class CapturingSQLSchemaEditor(connection.schema_editor().__class__):
++        def execute(self, sql, params=()):
++            sql_statements.append(sql)
++            super().execute(sql, params)
++    
++    with CapturingSQLSchemaEditor(connection) as schema_editor:
++        alter_migration.apply(project_state, schema_editor)
++    
++    # Check results
++    if expect_sql:
++        if sql_statements:
++            print(f"  ✓ Generated {len(sql_statements)} SQL statement(s) as expected")
++        else:
++            print(f"  ✗ ERROR: Expected SQL but none was generated!")
++    else:
++        if sql_statements:
++            print(f"  ✗ ERROR: Generated {len(sql_statements)} SQL statement(s) when none expected!")
++            for sql in sql_statements:
++                print(f"    - {sql}")
++        else:
++            print(f"  ✓ No SQL generated (as expected)")
++    
++    # Clean up
++    with connection.schema_editor() as schema_editor:
++        schema_editor.execute("DROP TABLE IF EXISTS test_app_testmodel")
++
++
++print("Testing AlterField with choices on SQLite...")
++
++# Test 1: Add choices only (no other changes)
++test_scenario(
++    "Add choices to CharField",
++    models.CharField(max_length=20),
++    models.CharField(max_length=20, choices=[('a', 'A'), ('b', 'B')]),
++    expect_sql=False
++)
++
++# Test 2: Change choices on field that already has choices
++test_scenario(
++    "Change existing choices",
++    models.CharField(max_length=20, choices=[('a', 'A'), ('b', 'B')]),
++    models.CharField(max_length=20, choices=[('x', 'X'), ('y', 'Y')]),
++    expect_sql=False
++)
++
++# Test 3: Remove choices
++test_scenario(
++    "Remove choices",
++    models.CharField(max_length=20, choices=[('a', 'A'), ('b', 'B')]),
++    models.CharField(max_length=20),
++    expect_sql=False
++)
++
++# Test 4: Add choices AND change max_length (should generate SQL)
++test_scenario(
++    "Add choices AND change max_length",
++    models.CharField(max_length=20),
++    models.CharField(max_length=50, choices=[('a', 'A'), ('b', 'B')]),
++    expect_sql=True
++)
++
++# Test 5: Add choices to IntegerField with default
++test_scenario(
++    "Add choices to IntegerField with default (preserving default)",
++    models.IntegerField(default=1),
++    models.IntegerField(default=1, choices=[(1, 'One'), (2, 'Two')]),
++    expect_sql=False
++)
++
++# Test 6: Add choices but change default (should generate SQL)
++test_scenario(
++    "Add choices but change default",
++    models.IntegerField(default=1),
++    models.IntegerField(default=2, choices=[(1, 'One'), (2, 'Two')]),
++    expect_sql=True
++)
++
++# Test 7: Multiple non-database attributes
++test_scenario(
++    "Change choices + verbose_name + help_text",
++    models.CharField(max_length=20),
++    models.CharField(
++        max_length=20,
++        choices=[('a', 'A'), ('b', 'B')],
++        verbose_name='Status',
++        help_text='Choose a status'
++    ),
++    expect_sql=False
++)
++
++print("\nAll tests completed!")
+diff --git a/test_alter_field_choices.py b/test_alter_field_choices.py
+new file mode 100644
+index 0000000000..eb6743befd
+--- /dev/null
++++ b/test_alter_field_choices.py
+@@ -0,0 +1,154 @@
++"""Test case for AlterField with choices on SQLite."""
++
++from django.db import models, connection
++from django.db.migrations.operations import AlterField
++from django.db.migrations.state import ModelState, ProjectState
++from django.test import TestCase
++
++
++class AlterFieldChoicesTests(TestCase):
++    """Test that adding/changing choices is a no-op on SQLite."""
++    
++    def test_alter_field_add_choices_no_sql(self):
++        """Adding choices to a field should not generate SQL."""
++        project_state = ProjectState()
++        project_state.add_model(ModelState(
++            'test_app', 'TestModel',
++            [
++                ('id', models.AutoField(primary_key=True)),
++                ('status', models.CharField(max_length=20)),
++            ]
++        ))
++        
++        operation = AlterField(
++            model_name='TestModel',
++            name='status',
++            field=models.CharField(max_length=20, choices=[('a', 'A'), ('b', 'B')])
++        )
++        
++        # Create the table first
++        with connection.schema_editor() as editor:
++            project_state.apps.get_model('test_app', 'TestModel')
++            editor.create_model(project_state.apps.get_model('test_app', 'TestModel'))
++        
++        # Now test the alter operation
++        new_state = project_state.clone()
++        operation.state_forwards('test_app', new_state)
++        
++        # Capture SQL
++        sql_statements = []
++        
++        class CapturingSchemaEditor(connection.schema_editor().__class__):
++            def execute(self, sql, params=()):
++                sql_statements.append(sql)
++                super().execute(sql, params)
++        
++        with CapturingSchemaEditor(connection) as editor:
++            operation.database_forwards('test_app', editor, project_state, new_state)
++        
++        # Should not generate any SQL
++        self.assertEqual(len(sql_statements), 0)
++    
++    def test_alter_field_change_choices_no_sql(self):
++        """Changing choices on a field should not generate SQL."""
++        project_state = ProjectState()
++        project_state.add_model(ModelState(
++            'test_app', 'TestModel',
++            [
++                ('id', models.AutoField(primary_key=True)),
++                ('status', models.CharField(max_length=20, choices=[('a', 'A'), ('b', 'B')])),
++            ]
++        ))
++        
++        operation = AlterField(
++            model_name='TestModel',
++            name='status',
++            field=models.CharField(max_length=20, choices=[('x', 'X'), ('y', 'Y')])
++        )
++        
++        # Create the table first
++        with connection.schema_editor() as editor:
++            editor.create_model(project_state.apps.get_model('test_app', 'TestModel'))
++        
++        # Now test the alter operation
++        new_state = project_state.clone()
++        operation.state_forwards('test_app', new_state)
++        
++        # Capture SQL
++        sql_statements = []
++        
++        class CapturingSchemaEditor(connection.schema_editor().__class__):
++            def execute(self, sql, params=()):
++                sql_statements.append(sql)
++                super().execute(sql, params)
++        
++        with CapturingSchemaEditor(connection) as editor:
++            operation.database_forwards('test_app', editor, project_state, new_state)
++        
++        # Should not generate any SQL
++        self.assertEqual(len(sql_statements), 0)
++    
++    def test_alter_field_choices_and_max_length_generates_sql(self):
++        """Changing choices along with max_length should generate SQL."""
++        project_state = ProjectState()
++        project_state.add_model(ModelState(
++            'test_app', 'TestModel',
++            [
++                ('id', models.AutoField(primary_key=True)),
++                ('status', models.CharField(max_length=20)),
++            ]
++        ))
++        
++        operation = AlterField(
++            model_name='TestModel',
++            name='status',
++            field=models.CharField(max_length=50, choices=[('a', 'A'), ('b', 'B')])
++        )
++        
++        # Create the table first
++        with connection.schema_editor() as editor:
++            editor.create_model(project_state.apps.get_model('test_app', 'TestModel'))
++        
++        # Now test the alter operation
++        new_state = project_state.clone()
++        operation.state_forwards('test_app', new_state)
++        
++        # Capture SQL
++        sql_statements = []
++        
++        class CapturingSchemaEditor(connection.schema_editor().__class__):
++            def execute(self, sql, params=()):
++                sql_statements.append(sql)
++                super().execute(sql, params)
++        
++        with CapturingSchemaEditor(connection) as editor:
++            operation.database_forwards('test_app', editor, project_state, new_state)
++        
++        # Should generate SQL because max_length changed
++        self.assertGreater(len(sql_statements), 0)
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            USE_TZ=False,
++        )
++    
++    django.setup()
++    
++    import unittest
++    unittest.main()
+diff --git a/test_choices_alter.py b/test_choices_alter.py
+new file mode 100644
+index 0000000000..c67067eb96
+--- /dev/null
++++ b/test_choices_alter.py
+@@ -0,0 +1,101 @@
++"""Test script to reproduce the issue with AlterField and choices on SQLite."""
++
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations.operations import CreateModel, AlterField
++from django.db.migrations.state import ProjectState
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++
++def test_alter_field_choices():
++    """Test that adding choices to a field doesn't generate SQL on SQLite."""
++    
++    # Create initial model state
++    initial_operations = [
++        CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('status', models.CharField(max_length=20)),
++            ],
++        ),
++    ]
++    
++    # Create migration that adds choices
++    alter_operations = [
++        AlterField(
++            model_name='TestModel',
++            name='status',
++            field=models.CharField(
++                max_length=20,
++                choices=[('active', 'Active'), ('inactive', 'Inactive')]
++            ),
++        ),
++    ]
++    
++    # Create migrations
++    initial_migration = Migration('0001_initial', 'test_app')
++    initial_migration.operations = initial_operations
++    
++    alter_migration = Migration('0002_add_choices', 'test_app')
++    alter_migration.operations = alter_operations
++    alter_migration.dependencies = [('test_app', '0001_initial')]
++    
++    # Apply migrations and capture SQL
++    executor = MigrationExecutor(connection)
++    
++    # Apply initial migration
++    project_state = ProjectState()
++    with connection.schema_editor() as schema_editor:
++        initial_migration.apply(project_state, schema_editor)
++    
++    # Capture SQL for alter migration
++    sql_statements = []
++    
++    class CapturingSQLSchemaEditor(connection.schema_editor().__class__):
++        def execute(self, sql, params=()):
++            sql_statements.append(sql)
++            super().execute(sql, params)
++    
++    with CapturingSQLSchemaEditor(connection) as schema_editor:
++        alter_migration.apply(project_state, schema_editor)
++    
++    print("SQL statements generated for adding choices:")
++    for sql in sql_statements:
++        print(f"  {sql}")
++    
++    print(f"\nTotal SQL statements: {len(sql_statements)}")
++    
++    # The issue is that SQLite generates SQL for this operation when it shouldn't
++    if sql_statements:
++        print("\nISSUE CONFIRMED: SQLite is generating SQL for adding choices when it should be a no-op")
++    else:
++        print("\nNo SQL generated - working as expected")
++
++
++if __name__ == '__main__':
++    test_alter_field_choices()
+diff --git a/test_choices_alter_postgres.py b/test_choices_alter_postgres.py
+new file mode 100644
+index 0000000000..0005f9a0f0
+--- /dev/null
++++ b/test_choices_alter_postgres.py
+@@ -0,0 +1,61 @@
++"""Test script to verify PostgreSQL behavior with AlterField and choices."""
++
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations.operations import CreateModel, AlterField
++from django.db.migrations.state import ProjectState
++
++# Configure Django for PostgreSQL (mock)
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.postgresql',  # Mock PostgreSQL
++                'NAME': 'test_db',
++                'USER': 'test_user',
++                'PASSWORD': 'test_pass',
++                'HOST': 'localhost',
++                'PORT': '5432',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++# Let's check what happens when we deconstruct fields with and without choices
++# Create two fields - one without choices, one with choices
++field_without_choices = models.CharField(max_length=20)
++field_with_choices = models.CharField(
++    max_length=20,
++    choices=[('active', 'Active'), ('inactive', 'Inactive')]
++)
++
++# Set column names (normally done during field initialization with model)
++field_without_choices.set_attributes_from_name('status')
++field_with_choices.set_attributes_from_name('status')
++
++print("Testing field deconstruction to understand why choices triggers schema changes...")
++
++# Let's check the deconstruction
++_, old_path, old_args, old_kwargs = field_without_choices.deconstruct()
++_, new_path, new_args, new_kwargs = field_with_choices.deconstruct()
++
++print(f"\nOld field deconstruct:")
++print(f"  Path: {old_path}")
++print(f"  Args: {old_args}")
++print(f"  Kwargs: {old_kwargs}")
++
++print(f"\nNew field deconstruct:")
++print(f"  Path: {new_path}")
++print(f"  Args: {new_args}")
++print(f"  Kwargs: {new_kwargs}")
+diff --git a/test_comprehensive_choices.py b/test_comprehensive_choices.py
+new file mode 100644
+index 0000000000..608de8821c
+--- /dev/null
++++ b/test_comprehensive_choices.py
+@@ -0,0 +1,145 @@
++"""Comprehensive test for choices alterations."""
++
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations.operations import CreateModel, AlterField
++from django.db.migrations.state import ProjectState
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++
++def capture_sql(operations, initial_state=None):
++    """Helper to capture SQL statements from migration operations."""
++    sql_statements = []
++    
++    class CapturingSQLSchemaEditor(connection.schema_editor().__class__):
++        def execute(self, sql, params=()):
++            sql_statements.append(sql)
++            super().execute(sql, params)
++    
++    if initial_state is None:
++        initial_state = ProjectState()
++    
++    migration = Migration('test', 'test_app')
++    migration.operations = operations
++    
++    final_state = initial_state.clone()
++    with CapturingSQLSchemaEditor(connection) as schema_editor:
++        migration.apply(final_state, schema_editor)
++    
++    return sql_statements, final_state
++
++
++def test_scenario(name, operations, initial_state=None):
++    """Test a scenario and report results."""
++    print(f"\n{name}:")
++    sql_statements, final_state = capture_sql(operations, initial_state)
++    
++    if sql_statements:
++        print(f"  Generated {len(sql_statements)} SQL statement(s):")
++        for sql in sql_statements:
++            print(f"    {sql}")
++    else:
++        print("  No SQL generated (as expected)")
++    
++    return final_state
++
++
++# Create initial model
++print("Setting up initial model...")
++initial_ops = [
++    CreateModel(
++        name='TestModel',
++        fields=[
++            ('id', models.AutoField(primary_key=True)),
++            ('status', models.CharField(max_length=20)),
++            ('category', models.CharField(max_length=30, choices=[('a', 'A'), ('b', 'B')])),
++        ],
++    ),
++]
++state = test_scenario("Initial model creation", initial_ops)
++
++# Test 1: Add choices to a field without choices
++test_scenario(
++    "Test 1: Add choices to field without choices",
++    [AlterField(
++        model_name='TestModel',
++        name='status',
++        field=models.CharField(max_length=20, choices=[('active', 'Active'), ('inactive', 'Inactive')]),
++    )],
++    state
++)
++
++# Test 2: Change choices on a field that already has choices
++test_scenario(
++    "Test 2: Change existing choices",
++    [AlterField(
++        model_name='TestModel',
++        name='category',
++        field=models.CharField(max_length=30, choices=[('x', 'X'), ('y', 'Y'), ('z', 'Z')]),
++    )],
++    state
++)
++
++# Test 3: Remove choices from a field
++test_scenario(
++    "Test 3: Remove choices from field",
++    [AlterField(
++        model_name='TestModel',
++        name='category',
++        field=models.CharField(max_length=30),
++    )],
++    state
++)
++
++# Test 4: Change choices and another attribute (should generate SQL)
++test_scenario(
++    "Test 4: Change choices AND max_length (should generate SQL)",
++    [AlterField(
++        model_name='TestModel',
++        name='status',
++        field=models.CharField(max_length=50, choices=[('new', 'New'), ('old', 'Old')]),
++    )],
++    state
++)
++
++# Test 5: Only change non-database attributes
++test_scenario(
++    "Test 5: Change only non-database attributes (choices + verbose_name)",
++    [AlterField(
++        model_name='TestModel',
++        name='status',
++        field=models.CharField(
++            max_length=20, 
++            choices=[('a', 'A'), ('b', 'B')],
++            verbose_name='Status Field',
++            help_text='Choose status'
++        ),
++    )],
++    state
++)
++
++print("\nAll tests completed!")
+diff --git a/tests/migrations/test_operations.py b/tests/migrations/test_operations.py
+index a84321ad3b..e1335768bf 100644
+--- a/tests/migrations/test_operations.py
++++ b/tests/migrations/test_operations.py
+@@ -1781,6 +1781,89 @@ class OperationTests(OperationTestBase):
+                 operation.database_forwards(app_label, editor, new_state, project_state)
+         self.assertColumnExists(rider_table, "pony_id")
+ 
++    def test_alter_field_add_choices_noop(self):
++        """
++        AlterField operation is a noop when adding only choices.
++        """
++        app_label = "test_afacn"
++        project_state = self.set_up_test_model(app_label)
++        pony_table = "%s_pony" % app_label
++        new_state = project_state.clone()
++        operation = migrations.AlterField(
++            "Pony",
++            "pink",
++            models.IntegerField(default=3, choices=[(1, "Pink"), (2, "Not Pink")]),
++        )
++        operation.state_forwards(app_label, new_state)
++        # Ensure choices are not in the old state
++        self.assertIsNone(
++            project_state.models[app_label, "pony"].fields["pink"].choices
++        )
++        # Ensure choices are in the new state
++        self.assertEqual(
++            new_state.models[app_label, "pony"].fields["pink"].choices,
++            [(1, "Pink"), (2, "Not Pink")],
++        )
++        self.assertColumnExists(pony_table, "pink")
++        with connection.schema_editor() as editor:
++            with self.assertNumQueries(0):
++                operation.database_forwards(app_label, editor, project_state, new_state)
++        self.assertColumnExists(pony_table, "pink")
++        with connection.schema_editor() as editor:
++            with self.assertNumQueries(0):
++                operation.database_backwards(
++                    app_label, editor, new_state, project_state
++                )
++        self.assertColumnExists(pony_table, "pink")
++
++    def test_alter_field_change_choices_noop(self):
++        """
++        AlterField operation is a noop when changing choices on a field that
++        already has choices.
++        """
++        app_label = "test_afccn"
++        # Create initial state with choices
++        project_state = self.apply_operations(
++            app_label,
++            ProjectState(),
++            operations=[
++                migrations.CreateModel(
++                    "Pony",
++                    [
++                        ("id", models.AutoField(primary_key=True)),
++                        ("pink", models.IntegerField(choices=[(1, "Pink"), (2, "Not Pink")])),
++                    ],
++                ),
++            ],
++        )
++        pony_table = "%s_pony" % app_label
++        new_state = project_state.clone()
++        operation = migrations.AlterField(
++            "Pony",
++            "pink",
++            models.IntegerField(choices=[(1, "Pink"), (3, "Very Pink")]),
++        )
++        operation.state_forwards(app_label, new_state)
++        self.assertEqual(
++            project_state.models[app_label, "pony"].fields["pink"].choices,
++            [(1, "Pink"), (2, "Not Pink")],
++        )
++        self.assertEqual(
++            new_state.models[app_label, "pony"].fields["pink"].choices,
++            [(1, "Pink"), (3, "Very Pink")],
++        )
++        self.assertColumnExists(pony_table, "pink")
++        with connection.schema_editor() as editor:
++            with self.assertNumQueries(0):
++                operation.database_forwards(app_label, editor, project_state, new_state)
++        self.assertColumnExists(pony_table, "pink")
++        with connection.schema_editor() as editor:
++            with self.assertNumQueries(0):
++                operation.database_backwards(
++                    app_label, editor, new_state, project_state
++                )
++        self.assertColumnExists(pony_table, "pink")
++
+     def test_alter_field_pk(self):
+         """
+         The AlterField operation on primary keys (things like PostgreSQL's

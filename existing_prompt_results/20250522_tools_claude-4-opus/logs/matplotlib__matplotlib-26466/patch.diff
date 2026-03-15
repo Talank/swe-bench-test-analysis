@@ -1,0 +1,421 @@
+diff --git a/bug_output.png b/bug_output.png
+new file mode 100644
+index 0000000000..47efa21093
+Binary files /dev/null and b/bug_output.png differ
+diff --git a/bug_output2.png b/bug_output2.png
+new file mode 100644
+index 0000000000..e5a70585c6
+Binary files /dev/null and b/bug_output2.png differ
+diff --git a/lib/matplotlib/text.py b/lib/matplotlib/text.py
+index d4922fc517..02cc012a81 100644
+--- a/lib/matplotlib/text.py
++++ b/lib/matplotlib/text.py
+@@ -1456,7 +1456,18 @@ class _AnnotationBase:
+                  xycoords='data',
+                  annotation_clip=None):
+ 
+-        self.xy = xy
++        # Make a copy of xy if it's a mutable sequence (list, array, etc.)
++        # to prevent external modifications from affecting the annotation
++        import numpy as np
++        if hasattr(xy, '__array__'):
++            # Handle numpy arrays and array-like objects
++            self.xy = np.asarray(xy).copy()
++        elif isinstance(xy, list):
++            # Handle mutable lists by converting to tuple
++            self.xy = tuple(xy)
++        else:
++            # For tuples and other immutable types, use as-is
++            self.xy = xy
+         self.xycoords = xycoords
+         self.set_annotation_clip(annotation_clip)
+ 
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..8443954a8f
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,43 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++fig = plt.figure("test")
++
++ax = fig.add_axes([0.13, 0.15, .8, .8])
++ax.set_xlim(-5, 5)
++ax.set_ylim(-3, 3)
++
++xy_0 = np.array((-4, 1))
++xy_f = np.array((-1, 1))
++# this annotation is messed by later changing the array passed as xy kwarg
++ann1 = ax.annotate('', xy=xy_0, xytext=xy_f, arrowprops=dict(arrowstyle='<->'))
++print(f"Before modification: ann1.xy = {ann1.xy}")
++xy_0[1] = 3  # <--this updates the arrow position
++print(f"After modification: ann1.xy = {ann1.xy}")
++
++xy_0 = np.array((1, 1))
++xy_f = np.array((4, 1))
++# using a copy of the array helps spoting where the problem is
++ann2 = ax.annotate('', xy=xy_0.copy(), xytext=xy_f, arrowprops=dict(arrowstyle='<->'))
++print(f"Before modification: ann2.xy = {ann2.xy}")
++xy_0[1] = 3
++print(f"After modification: ann2.xy = {ann2.xy}")
++
++plt.savefig('/testbed/bug_output.png')
++plt.close()
++
++# Let's also check if the same issue exists with xytext
++fig2 = plt.figure("test2")
++ax2 = fig2.add_axes([0.13, 0.15, .8, .8])
++ax2.set_xlim(-5, 5)
++ax2.set_ylim(-3, 3)
++
++xy_0 = np.array((-4, 1))
++xy_f = np.array((-1, 1))
++ann3 = ax2.annotate('', xy=xy_0.copy(), xytext=xy_f, arrowprops=dict(arrowstyle='<->'))
++print(f"\nBefore modification: ann3.xyann = {ann3.xyann}")
++xy_f[1] = 3  # Check if xytext has the same issue
++print(f"After modification: ann3.xyann = {ann3.xyann}")
++
++plt.savefig('/testbed/bug_output2.png')
++plt.close()
+diff --git a/test_annotation_array_copy.py b/test_annotation_array_copy.py
+new file mode 100644
+index 0000000000..1eabac7584
+--- /dev/null
++++ b/test_annotation_array_copy.py
+@@ -0,0 +1,95 @@
++"""
++Test that annotation xy parameter is copied when mutable objects are passed.
++This test should be added to the matplotlib test suite.
++"""
++import numpy as np
++import matplotlib.pyplot as plt
++import pytest
++
++
++def test_annotation_xy_array_copy():
++    """Test that modifying input arrays doesn't affect annotation positions."""
++    fig, ax = plt.subplots()
++    
++    # Test with numpy array
++    xy_array = np.array([1.0, 2.0])
++    xytext_array = np.array([3.0, 4.0])
++    
++    ann = ax.annotate('test', xy=xy_array, xytext=xytext_array,
++                      arrowprops=dict(arrowstyle='->'))
++    
++    # Check initial values
++    assert np.array_equal(ann.xy, [1.0, 2.0])
++    
++    # Modify the input arrays
++    xy_array[0] = 10.0
++    xy_array[1] = 20.0
++    xytext_array[0] = 30.0
++    xytext_array[1] = 40.0
++    
++    # Check that annotation positions haven't changed
++    assert np.array_equal(ann.xy, [1.0, 2.0])
++    # xytext is stored as x, y in Text, so it's already safe
++    assert ann.xyann == (3.0, 4.0)
++    
++    plt.close(fig)
++
++
++def test_annotation_xy_list_copy():
++    """Test that modifying input lists doesn't affect annotation positions."""
++    fig, ax = plt.subplots()
++    
++    # Test with list
++    xy_list = [1.0, 2.0]
++    xytext_list = [3.0, 4.0]
++    
++    ann = ax.annotate('test', xy=xy_list, xytext=xytext_list,
++                      arrowprops=dict(arrowstyle='->'))
++    
++    # Check initial values (lists are converted to tuples for safety)
++    assert ann.xy == (1.0, 2.0)
++    
++    # Modify the input lists
++    xy_list[0] = 10.0
++    xy_list[1] = 20.0
++    xytext_list[0] = 30.0
++    xytext_list[1] = 40.0
++    
++    # Check that annotation positions haven't changed
++    assert ann.xy == (1.0, 2.0)
++    assert ann.xyann == (3.0, 4.0)
++    
++    plt.close(fig)
++
++
++def test_annotation_arrow_visual():
++    """Test that arrow visual appearance is not affected by array modifications."""
++    fig, ax = plt.subplots()
++    ax.set_xlim(-5, 5)
++    ax.set_ylim(-3, 3)
++    
++    # Create annotations with arrows
++    xy_0 = np.array([-4, 1])
++    xy_f = np.array([-1, 1])
++    ann1 = ax.annotate('', xy=xy_0, xytext=xy_f, arrowprops=dict(arrowstyle='<->'))
++    
++    xy_0_copy = np.array([1, 1])
++    xy_f_copy = np.array([4, 1])
++    ann2 = ax.annotate('', xy=xy_0_copy.copy(), xytext=xy_f_copy, 
++                       arrowprops=dict(arrowstyle='<->'))
++    
++    # Modify the first array (should not affect the annotation)
++    xy_0[1] = 3
++    
++    # Both annotations should still have horizontal arrows
++    assert ann1.xy[1] == 1  # Should still be at y=1
++    assert ann2.xy[1] == 1  # Should still be at y=1
++    
++    plt.close(fig)
++
++
++if __name__ == "__main__":
++    test_annotation_xy_array_copy()
++    test_annotation_xy_list_copy() 
++    test_annotation_arrow_visual()
++    print("All tests passed!")
+diff --git a/test_annotation_copy.py b/test_annotation_copy.py
+new file mode 100644
+index 0000000000..1feb2bd8f5
+--- /dev/null
++++ b/test_annotation_copy.py
+@@ -0,0 +1,75 @@
++import pytest
++import numpy as np
++import matplotlib.pyplot as plt
++
++
++def test_annotation_xy_copy():
++    """Test that modifying the input xy array doesn't affect the annotation."""
++    fig, ax = plt.subplots()
++    
++    # Test with numpy array
++    xy_array = np.array([1.0, 2.0])
++    ann = ax.annotate('test', xy=xy_array, xytext=(3, 4))
++    
++    # Store original values
++    original_xy = ann.xy.copy() if hasattr(ann.xy, 'copy') else ann.xy
++    
++    # Modify the input array
++    xy_array[0] = 10.0
++    xy_array[1] = 20.0
++    
++    # Check that annotation xy hasn't changed
++    assert np.array_equal(ann.xy, original_xy), "Annotation xy was modified by external array change"
++    
++    # Test with list
++    xy_list = [5.0, 6.0]
++    ann2 = ax.annotate('test2', xy=xy_list, xytext=(7, 8))
++    
++    # Store original values
++    original_xy2 = ann2.xy
++    
++    # Modify the input list
++    xy_list[0] = 50.0
++    xy_list[1] = 60.0
++    
++    # Check that annotation xy hasn't changed
++    assert ann2.xy == original_xy2, "Annotation xy was modified by external list change"
++    
++    plt.close(fig)
++
++
++def test_annotation_arrow_position():
++    """Test that arrow positions are not affected by modifying input arrays."""
++    fig, ax = plt.subplots()
++    ax.set_xlim(-5, 5)
++    ax.set_ylim(-3, 3)
++    
++    # Create annotation with arrow
++    xy_0 = np.array([-4, 1])
++    xy_f = np.array([-1, 1])
++    ann = ax.annotate('', xy=xy_0, xytext=xy_f, arrowprops=dict(arrowstyle='<->'))
++    
++    # Get the arrow patch's initial position
++    if ann.arrow_patch:
++        # Force a draw to ensure positions are calculated
++        fig.canvas.draw()
++        initial_path = ann.arrow_patch.get_path().vertices.copy()
++    
++    # Modify the input array
++    xy_0[1] = 3
++    
++    # Force another draw
++    fig.canvas.draw()
++    
++    # Check that arrow position hasn't changed
++    if ann.arrow_patch:
++        final_path = ann.arrow_patch.get_path().vertices
++        assert np.allclose(initial_path, final_path), "Arrow position changed after modifying input array"
++    
++    plt.close(fig)
++
++
++if __name__ == "__main__":
++    test_annotation_xy_copy()
++    test_annotation_arrow_position()
++    print("All tests passed!")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..e603bac1ef
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,47 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++# Test 1: Check if xy array modification affects annotation
++fig, ax = plt.subplots()
++xy_array = np.array([1.0, 2.0])
++xytext_array = np.array([3.0, 4.0])
++
++ann = ax.annotate('test', xy=xy_array, xytext=xytext_array, 
++                  arrowprops=dict(arrowstyle='->'))
++
++print("Initial values:")
++print(f"  xy_array: {xy_array}")
++print(f"  ann.xy: {ann.xy}")
++print(f"  xytext_array: {xytext_array}")
++print(f"  ann.xyann: {ann.xyann}")
++
++# Modify the arrays
++xy_array[0] = 10.0
++xy_array[1] = 20.0
++xytext_array[0] = 30.0
++xytext_array[1] = 40.0
++
++print("\nAfter modifying arrays:")
++print(f"  xy_array: {xy_array}")
++print(f"  ann.xy: {ann.xy}")
++print(f"  xytext_array: {xytext_array}")
++print(f"  ann.xyann: {ann.xyann}")
++
++# Test 2: Check with lists
++fig2, ax2 = plt.subplots()
++xy_list = [1.0, 2.0]
++xytext_list = [3.0, 4.0]
++
++ann2 = ax2.annotate('test2', xy=xy_list, xytext=xytext_list,
++                    arrowprops=dict(arrowstyle='->'))
++
++print("\n\nTest with lists:")
++print(f"  xy_list: {xy_list}")
++print(f"  ann2.xy: {ann2.xy}")
++
++xy_list[0] = 100.0
++print("\nAfter modifying list:")
++print(f"  xy_list: {xy_list}")
++print(f"  ann2.xy: {ann2.xy}")
++
++plt.close('all')
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..e045d448d4
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,58 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++
++def test_edge_cases():
++    """Test various edge cases for annotation xy parameter."""
++    fig, ax = plt.subplots()
++    
++    # Test 1: Tuple (should work as before)
++    ann1 = ax.annotate('test1', xy=(1, 2), xytext=(3, 4))
++    assert ann1.xy == (1, 2)
++    print("✓ Tuple input works correctly")
++    
++    # Test 2: Numpy array with more than 2 elements (should work with first 2)
++    xy_3d = np.array([1, 2, 3])
++    ann2 = ax.annotate('test2', xy=xy_3d, xytext=(3, 4))
++    xy_3d[0] = 10
++    assert ann2.xy[0] == 1  # Should not be affected
++    print("✓ 3D array input works correctly")
++    
++    # Test 3: Single-element arrays
++    try:
++        ann3 = ax.annotate('test3', xy=np.array([1]), xytext=(3, 4))
++        print("✗ Single element array should fail but didn't")
++    except (ValueError, IndexError):
++        print("✓ Single element array fails as expected")
++    
++    # Test 4: Nested lists
++    xy_nested = [[1, 2]]
++    ann4 = ax.annotate('test4', xy=xy_nested[0], xytext=(3, 4))
++    xy_nested[0][0] = 10
++    assert ann4.xy == (1, 2)
++    print("✓ Nested list input works correctly")
++    
++    # Test 5: Array-like objects (e.g., pandas Series if available)
++    try:
++        import pandas as pd
++        xy_series = pd.Series([1, 2])
++        ann5 = ax.annotate('test5', xy=xy_series, xytext=(3, 4))
++        xy_series[0] = 10
++        assert ann5.xy[0] == 1
++        print("✓ Pandas Series input works correctly")
++    except ImportError:
++        print("⚠ Pandas not available, skipping Series test")
++    
++    # Test 6: Matrix/2D array (should use first row)
++    xy_matrix = np.array([[1, 2], [3, 4]])
++    ann6 = ax.annotate('test6', xy=xy_matrix[0], xytext=(5, 6))
++    xy_matrix[0, 0] = 10
++    assert ann6.xy[0] == 1
++    print("✓ Matrix row input works correctly")
++    
++    plt.close(fig)
++    print("\nAll edge case tests passed!")
++
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_performance.py b/test_performance.py
+new file mode 100644
+index 0000000000..5ccbca2a2c
+--- /dev/null
++++ b/test_performance.py
+@@ -0,0 +1,35 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import time
++
++
++def test_performance():
++    """Quick performance check to ensure copying doesn't significantly impact performance."""
++    fig, ax = plt.subplots()
++    
++    # Test with tuples (no copy needed)
++    start = time.time()
++    for i in range(1000):
++        ann = ax.annotate(f'test{i}', xy=(i, i), xytext=(i+1, i+1))
++    tuple_time = time.time() - start
++    print(f"Time for 1000 annotations with tuples: {tuple_time:.4f}s")
++    
++    # Clear
++    ax.clear()
++    
++    # Test with arrays (copy needed)
++    start = time.time()
++    for i in range(1000):
++        ann = ax.annotate(f'test{i}', xy=np.array([i, i]), xytext=np.array([i+1, i+1]))
++    array_time = time.time() - start
++    print(f"Time for 1000 annotations with arrays: {array_time:.4f}s")
++    
++    # The overhead should be minimal
++    overhead = array_time - tuple_time
++    print(f"Overhead from copying: {overhead:.4f}s ({overhead/1000*1000:.2f}ms per annotation)")
++    
++    plt.close(fig)
++
++
++if __name__ == "__main__":
++    test_performance()

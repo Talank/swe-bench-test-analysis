@@ -1,0 +1,799 @@
+diff --git a/demo_serialize_result.py b/demo_serialize_result.py
+new file mode 100644
+index 0000000000..1832701c48
+--- /dev/null
++++ b/demo_serialize_result.py
+@@ -0,0 +1,62 @@
++"""
++Demonstration of the new serialize_result feature in AutocompleteJsonView.
++
++This shows how easy it is now to add custom fields to autocomplete responses
++without overriding the entire get() method.
++"""
++
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++
++
++# Before this change, you had to override the entire get() method:
++class OldCustomAutocompleteJsonView(AutocompleteJsonView):
++    def get(self, request, *args, **kwargs):
++        self.term, self.model_admin, self.source_field, to_field_name = self.process_request(request)
++
++        if not self.has_perm(request):
++            raise PermissionDenied
++
++        self.object_list = self.get_queryset()
++        context = self.get_context_data()
++        return JsonResponse({
++            'results': [
++                {'id': str(getattr(obj, to_field_name)), 'text': str(obj), 'notes': obj.notes}
++                for obj in context['object_list']
++            ],
++            'pagination': {'more': context['page_obj'].has_next()},
++        })
++
++
++# After this change, you only need to override serialize_result():
++class NewCustomAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        # Add any custom fields you want
++        result['notes'] = obj.notes
++        result['created_at'] = obj.created_at.isoformat() if hasattr(obj, 'created_at') else None
++        result['category'] = obj.category.name if hasattr(obj, 'category') else None
++        return result
++
++
++# You can also use more concise approaches:
++class ConciseCustomAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        return {
++            **super().serialize_result(obj, to_field_name),
++            'notes': obj.notes,
++            'extra_data': self.get_extra_data(obj),
++        }
++    
++    def get_extra_data(self, obj):
++        # Complex logic can be separated into its own method
++        return {
++            'field1': obj.field1,
++            'field2': obj.field2,
++        }
++
++
++print("The new serialize_result method provides:")
++print("1. Cleaner code - no need to duplicate the entire get() method")
++print("2. Better maintainability - changes to get() in future Django versions won't break your code")
++print("3. Clear separation of concerns - serialize_result() only handles object serialization")
++print("4. Easy to test - you can test serialize_result() in isolation")
+diff --git a/django/contrib/admin/views/autocomplete.py b/django/contrib/admin/views/autocomplete.py
+index 3903e4c98c..9abc3bc514 100644
+--- a/django/contrib/admin/views/autocomplete.py
++++ b/django/contrib/admin/views/autocomplete.py
+@@ -26,12 +26,19 @@ class AutocompleteJsonView(BaseListView):
+         context = self.get_context_data()
+         return JsonResponse({
+             'results': [
+-                {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}
++                self.serialize_result(obj, to_field_name)
+                 for obj in context['object_list']
+             ],
+             'pagination': {'more': context['page_obj'].has_next()},
+         })
+ 
++    def serialize_result(self, obj, to_field_name):
++        """
++        Convert the provided model object to a dictionary that is added to the
++        results list.
++        """
++        return {'id': str(getattr(obj, to_field_name)), 'text': str(obj)}
++
+     def get_paginator(self, *args, **kwargs):
+         """Use the ModelAdmin's paginator."""
+         return self.model_admin.get_paginator(self.request, *args, **kwargs)
+diff --git a/test_autocomplete_refactor.py b/test_autocomplete_refactor.py
+new file mode 100644
+index 0000000000..655ab76d39
+--- /dev/null
++++ b/test_autocomplete_refactor.py
+@@ -0,0 +1,54 @@
++"""
++Test script to demonstrate the current behavior and the desired refactoring.
++"""
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++from django.urls import path
++
++# Mock models for testing
++class Note:
++    def __init__(self, id, text, notes):
++        self.id = id
++        self.text = text
++        self.notes = notes
++        self.pk = id
++    
++    def __str__(self):
++        return self.text
++
++# Current approach - requires overriding the entire get() method
++class CustomAutocompleteJsonView(AutocompleteJsonView):
++    def get(self, request, *args, **kwargs):
++        self.term, self.model_admin, self.source_field, to_field_name = self.process_request(request)
++
++        if not self.has_perm(request):
++            raise PermissionDenied
++
++        self.object_list = self.get_queryset()
++        context = self.get_context_data()
++        return JsonResponse({
++            'results': [
++                {'id': str(getattr(obj, to_field_name)), 'text': str(obj), 'notes': obj.notes}  # <-- customization here
++                for obj in context['object_list']
++            ],
++            'pagination': {'more': context['page_obj'].has_next()},
++        })
++
++# Desired approach - only override serialize_result()
++class ImprovedAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        return super().serialize_result(obj, to_field_name) | {'notes': obj.notes}
++
++# Test the concept
++if __name__ == "__main__":
++    # Create mock objects
++    objects = [
++        Note(1, "First note", "Important details"),
++        Note(2, "Second note", "More details"),
++    ]
++    
++    print("Current approach requires overriding entire get() method")
++    print("Desired approach would only require overriding serialize_result() method")
+diff --git a/test_custom_autocomplete.py b/test_custom_autocomplete.py
+new file mode 100644
+index 0000000000..44580b93f1
+--- /dev/null
++++ b/test_custom_autocomplete.py
+@@ -0,0 +1,162 @@
++"""
++Test to demonstrate the new serialize_result functionality.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings first
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        SECRET_KEY='test-key',
++        MIDDLEWARE=[],
++        ROOT_URLCONF='',
++        USE_TZ=True,
++    )
++    django.setup()
++
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++from django.db import models
++from django.apps import apps
++
++# Create test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    bio = models.TextField()
++    birth_year = models.IntegerField()
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Book(models.Model):
++    title = models.CharField(max_length=200)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Custom autocomplete view that adds author details
++class AuthorAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        # Add extra fields using the new dict union operator
++        return result | {
++            'bio': obj.bio,
++            'birth_year': obj.birth_year,
++        }
++
++# Alternative approach using dict.update()
++class AuthorAutocompleteJsonViewAlt(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        result.update({
++            'bio': obj.bio,
++            'birth_year': obj.birth_year,
++        })
++        return result
++
++# Admin classes
++class AuthorAdmin(admin.ModelAdmin):
++    search_fields = ['name']
++
++class BookAdmin(admin.ModelAdmin):
++    autocomplete_fields = ['author']
++
++# Test the functionality
++def test_custom_serialize():
++    
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Author)
++        schema_editor.create_model(Book)
++    
++    # Create test data
++    author = Author.objects.create(
++        name="Jane Austen",
++        bio="English novelist known for her social commentary",
++        birth_year=1775
++    )
++    
++    # Setup admin
++    test_site = admin.AdminSite(name='test_site')
++    test_site.register(Author, AuthorAdmin)
++    test_site.register(Book, BookAdmin)
++    
++    # Create request
++    factory = RequestFactory()
++    superuser = User.objects.create_superuser('admin', 'admin@test.com', 'pass')
++    
++    request = factory.get('/autocomplete/', {
++        'app_label': 'test_app',
++        'model_name': 'book',
++        'field_name': 'author',
++        'term': 'jane'
++    })
++    request.user = superuser
++    
++    # Test standard view
++    standard_view = AutocompleteJsonView()
++    standard_view.admin_site = test_site
++    response = standard_view.get(request)
++    data = json.loads(response.content.decode('utf-8'))
++    
++    print("Standard AutocompleteJsonView result:")
++    print(json.dumps(data, indent=2))
++    print("\nNote: Only 'id' and 'text' fields are present\n")
++    
++    # Test custom view
++    custom_view = AuthorAutocompleteJsonView()
++    custom_view.admin_site = test_site
++    response = custom_view.get(request)
++    data = json.loads(response.content.decode('utf-8'))
++    
++    print("Custom AutocompleteJsonView result:")
++    print(json.dumps(data, indent=2))
++    print("\nNote: Additional 'bio' and 'birth_year' fields are now included!")
++    
++    # Verify the results
++    assert len(data['results']) == 1
++    result = data['results'][0]
++    assert result['id'] == str(author.pk)
++    assert result['text'] == 'Jane Austen'
++    assert result['bio'] == author.bio
++    assert result['birth_year'] == author.birth_year
++    
++    print("\n✓ Test passed! The serialize_result method works correctly.")
++
++if __name__ == '__main__':
++    # Register the test app
++    from django.apps import AppConfig
++    
++    class TestAppConfig(AppConfig):
++        name = 'test_app'
++        label = 'test_app'
++    
++    apps.app_configs['test_app'] = TestAppConfig('test_app', None)
++    apps.all_models['test_app'] = {}
++    apps.all_models['test_app']['author'] = Author
++    apps.all_models['test_app']['book'] = Book
++    
++    test_custom_serialize()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0a2ee1d882
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python
++"""
++Test edge cases for the serialize_result method.
++"""
++import os
++import sys
++import django
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, str(Path(__file__).parent))
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++
++# Import test models
++from admin_views.models import Question, Answer
++from admin_views.admin import QuestionAdmin, AnswerAdmin
++
++
++class EdgeCaseAutocompleteJsonView(AutocompleteJsonView):
++    """Test various edge cases in serialize_result."""
++    
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        
++        # Test that we can access various attributes
++        result['pk'] = obj.pk
++        result['model_name'] = obj._meta.model_name
++        result['to_field_value'] = getattr(obj, to_field_name)
++        
++        # Test that we can handle None values
++        result['optional_field'] = getattr(obj, 'optional_field', None)
++        
++        # Test that we can add computed values
++        result['text_length'] = len(str(obj))
++        
++        # Test that we can add nested dictionaries
++        result['metadata'] = {
++            'type': 'question',
++            'has_answers': hasattr(obj, 'answer_set'),
++        }
++        
++        return result
++
++
++def test_edge_cases():
++    print("Testing edge cases for serialize_result\n")
++    
++    # Create test data
++    q = Question.objects.create(question="What are edge cases?")
++    
++    # Create admin site
++    test_site = admin.AdminSite(name='test_site')
++    test_site.register(Question, QuestionAdmin)
++    test_site.register(Answer, AnswerAdmin)
++    
++    # Create superuser
++    superuser = User.objects.create_superuser('admin', 'admin@test.com', 'pass')
++    
++    # Create request
++    factory = RequestFactory()
++    request = factory.get('/autocomplete/', {
++        'app_label': Answer._meta.app_label,
++        'model_name': Answer._meta.model_name,
++        'field_name': 'question',
++        'term': 'edge'
++    })
++    request.user = superuser
++    
++    # Test edge case view
++    view = EdgeCaseAutocompleteJsonView.as_view(admin_site=test_site)
++    response = view(request)
++    data = json.loads(response.content.decode('utf-8'))
++    
++    print("Response data:")
++    print(json.dumps(data, indent=2))
++    
++    # Verify the results
++    assert len(data['results']) == 1
++    result = data['results'][0]
++    
++    print("\nVerifying edge case handling:")
++    print(f"✓ Primary key: {result['pk']}")
++    print(f"✓ Model name: {result['model_name']}")
++    print(f"✓ To field value: {result['to_field_value']}")
++    print(f"✓ Optional field (None): {result['optional_field']}")
++    print(f"✓ Text length: {result['text_length']}")
++    print(f"✓ Nested metadata: {result['metadata']}")
++    
++    # Clean up
++    Question.objects.all().delete()
++    User.objects.all().delete()
++    
++    print("\n✓ All edge case tests passed!")
++
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/test_serialize_result.py b/test_serialize_result.py
+new file mode 100644
+index 0000000000..73069d0cc8
+--- /dev/null
++++ b/test_serialize_result.py
+@@ -0,0 +1,113 @@
++"""
++Test that the new serialize_result method works correctly and can be overridden.
++"""
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory, TestCase
++from django.urls import reverse
++from admin_views.models import Question, Answer
++from admin_views.admin import QuestionAdmin, AnswerAdmin
++
++# Custom autocomplete view that adds extra fields
++class CustomAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        # Add custom field
++        result['custom_field'] = f"Custom: {obj.question}"
++        return result
++
++# Test admin site
++test_site = admin.AdminSite(name='test_autocomplete')
++test_site.register(Question, QuestionAdmin)
++test_site.register(Answer, AnswerAdmin)
++
++class SerializeResultTestCase(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.superuser = User.objects.create_superuser(
++            username='super', password='secret', email='super@example.com'
++        )
++        self.question = Question.objects.create(question='Test question?')
++        
++    def test_default_serialize_result(self):
++        """Test that the default serialize_result works correctly."""
++        opts = {
++            'app_label': Answer._meta.app_label,
++            'model_name': Answer._meta.model_name,
++            'field_name': 'question',
++            'term': 'test'
++        }
++        request = self.factory.get('/autocomplete/', opts)
++        request.user = self.superuser
++        
++        view = AutocompleteJsonView()
++        view.admin_site = test_site
++        response = view.get(request)
++        
++        self.assertEqual(response.status_code, 200)
++        data = json.loads(response.content.decode('utf-8'))
++        
++        # Check that results have the expected format
++        self.assertEqual(len(data['results']), 1)
++        result = data['results'][0]
++        self.assertEqual(result['id'], str(self.question.pk))
++        self.assertEqual(result['text'], str(self.question))
++        # Should not have custom fields
++        self.assertNotIn('custom_field', result)
++        
++    def test_custom_serialize_result(self):
++        """Test that serialize_result can be overridden to add custom fields."""
++        opts = {
++            'app_label': Answer._meta.app_label,
++            'model_name': Answer._meta.model_name,
++            'field_name': 'question',
++            'term': 'test'
++        }
++        request = self.factory.get('/autocomplete/', opts)
++        request.user = self.superuser
++        
++        view = CustomAutocompleteJsonView()
++        view.admin_site = test_site
++        response = view.get(request)
++        
++        self.assertEqual(response.status_code, 200)
++        data = json.loads(response.content.decode('utf-8'))
++        
++        # Check that results have the expected format with custom field
++        self.assertEqual(len(data['results']), 1)
++        result = data['results'][0]
++        self.assertEqual(result['id'], str(self.question.pk))
++        self.assertEqual(result['text'], str(self.question))
++        # Should have custom field
++        self.assertIn('custom_field', result)
++        self.assertEqual(result['custom_field'], f"Custom: {self.question.question}")
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++                'django.contrib.admin',
++                'admin_views',
++            ],
++            SECRET_KEY='test-secret-key',
++            USE_TZ=True,
++        )
++        django.setup()
++    
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__"])
+diff --git a/test_serialize_result_feature.py b/test_serialize_result_feature.py
+new file mode 100644
+index 0000000000..56dad9cce7
+--- /dev/null
++++ b/test_serialize_result_feature.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python
++"""
++Test script to demonstrate the new serialize_result feature.
++"""
++import os
++import sys
++import django
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, str(Path(__file__).parent))
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++
++# Import test models
++from admin_views.models import Question, Answer
++from admin_views.admin import QuestionAdmin, AnswerAdmin
++
++# Create a custom autocomplete view that adds extra fields
++class CustomAutocompleteJsonView(AutocompleteJsonView):
++    def serialize_result(self, obj, to_field_name):
++        # Get the default serialization
++        result = super().serialize_result(obj, to_field_name)
++        # Add custom fields
++        result['custom_field'] = f"Custom data for: {obj}"
++        result['pk'] = obj.pk
++        result['question_length'] = len(str(obj))
++        return result
++
++def main():
++    print("Testing the new serialize_result feature in AutocompleteJsonView\n")
++    
++    # Create test data
++    q1 = Question.objects.create(question="What is Django?")
++    q2 = Question.objects.create(question="How does autocomplete work?")
++    q3 = Question.objects.create(question="What is serialize_result?")
++    
++    # Create admin site
++    test_site = admin.AdminSite(name='test_site')
++    test_site.register(Question, QuestionAdmin)
++    test_site.register(Answer, AnswerAdmin)
++    
++    # Create superuser
++    superuser = User.objects.create_superuser('admin', 'admin@test.com', 'pass')
++    
++    # Create request
++    factory = RequestFactory()
++    request = factory.get('/autocomplete/', {
++        'app_label': Answer._meta.app_label,
++        'model_name': Answer._meta.model_name,
++        'field_name': 'question',
++        'term': 'what'  # Search for questions containing "what"
++    })
++    request.user = superuser
++    
++    print("1. Testing standard AutocompleteJsonView:")
++    print("-" * 50)
++    
++    # Test standard view
++    standard_view = AutocompleteJsonView()
++    standard_view.admin_site = test_site
++    response = standard_view.get(request)
++    data = json.loads(response.content.decode('utf-8'))
++    
++    print("Results from standard view:")
++    for result in data['results']:
++        print(f"  - ID: {result['id']}, Text: {result['text']}")
++        print(f"    Fields: {list(result.keys())}")
++    
++    print("\n2. Testing CustomAutocompleteJsonView with serialize_result override:")
++    print("-" * 50)
++    
++    # Test custom view
++    custom_view = CustomAutocompleteJsonView()
++    custom_view.admin_site = test_site
++    response = custom_view.get(request)
++    data = json.loads(response.content.decode('utf-8'))
++    
++    print("Results from custom view:")
++    for result in data['results']:
++        print(f"  - ID: {result['id']}, Text: {result['text']}")
++        print(f"    Custom Field: {result['custom_field']}")
++        print(f"    PK: {result['pk']}")
++        print(f"    Question Length: {result['question_length']}")
++        print(f"    All Fields: {list(result.keys())}")
++    
++    print("\n3. Demonstrating the maintainability benefit:")
++    print("-" * 50)
++    print("Before this change, adding custom fields required overriding the entire get() method.")
++    print("Now, you only need to override serialize_result(), which is much simpler and")
++    print("more maintainable. The rest of the get() method logic remains unchanged.")
++    
++    # Clean up
++    Question.objects.all().delete()
++    User.objects.all().delete()
++    
++    print("\n✓ Test completed successfully!")
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/admin_views/test_serialize_result.py b/tests/admin_views/test_serialize_result.py
+new file mode 100644
+index 0000000000..ad4f93178d
+--- /dev/null
++++ b/tests/admin_views/test_serialize_result.py
+@@ -0,0 +1,127 @@
++import json
++from django.contrib import admin
++from django.contrib.admin.views.autocomplete import AutocompleteJsonView
++from django.contrib.auth.models import User
++from django.test import RequestFactory, TestCase
++from django.urls import reverse
++
++from .models import Question, Answer
++from .admin import QuestionAdmin, AnswerAdmin
++
++
++class CustomAutocompleteJsonView(AutocompleteJsonView):
++    """Custom view that adds extra fields to autocomplete results."""
++    def serialize_result(self, obj, to_field_name):
++        result = super().serialize_result(obj, to_field_name)
++        # Add custom fields
++        result['custom_field'] = f"Custom: {obj.question}"
++        result['question_length'] = len(obj.question)
++        return result
++
++
++class SerializeResultTests(TestCase):
++    """Test the new serialize_result method functionality."""
++    
++    @classmethod
++    def setUpTestData(cls):
++        cls.superuser = User.objects.create_superuser(
++            username='super', password='secret', email='super@example.com'
++        )
++        
++        # Create test questions
++        cls.q1 = Question.objects.create(question="What is Django?")
++        cls.q2 = Question.objects.create(question="How does autocomplete work?")
++        cls.q3 = Question.objects.create(question="What is serialize_result?")
++    
++    def setUp(self):
++        self.factory = RequestFactory()
++        
++        # Setup admin site
++        self.site = admin.AdminSite(name='test_admin')
++        self.site.register(Question, QuestionAdmin)
++        self.site.register(Answer, AnswerAdmin)
++    
++    def _make_request(self, view_class, term='what'):
++        """Helper to make autocomplete request."""
++        request = self.factory.get('/autocomplete/', {
++            'app_label': Answer._meta.app_label,
++            'model_name': Answer._meta.model_name,
++            'field_name': 'question',
++            'term': term
++        })
++        request.user = self.superuser
++        
++        return view_class.as_view(admin_site=self.site)(request)
++    
++    def test_default_serialize_result(self):
++        """Test that the default serialize_result works correctly."""
++        response = self._make_request(AutocompleteJsonView)
++        self.assertEqual(response.status_code, 200)
++        
++        data = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(len(data['results']), 2)  # Two questions contain "what"
++        
++        # Check that results have only id and text
++        for result in data['results']:
++            self.assertIn('id', result)
++            self.assertIn('text', result)
++            self.assertEqual(len(result), 2)  # Only id and text
++    
++    def test_custom_serialize_result(self):
++        """Test that serialize_result can be overridden to add custom fields."""
++        response = self._make_request(CustomAutocompleteJsonView)
++        self.assertEqual(response.status_code, 200)
++        
++        data = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(len(data['results']), 2)  # Two questions contain "what"
++        
++        # Check that results have custom fields
++        for result in data['results']:
++            self.assertIn('id', result)
++            self.assertIn('text', result)
++            self.assertIn('custom_field', result)
++            self.assertIn('question_length', result)
++            self.assertEqual(len(result), 4)  # id, text, custom_field, question_length
++            
++            # Verify custom field content
++            self.assertTrue(result['custom_field'].startswith('Custom: '))
++            self.assertIsInstance(result['question_length'], int)
++    
++    def test_serialize_result_with_dict_update(self):
++        """Test using dict update in serialize_result."""
++        class UpdateAutocompleteJsonView(AutocompleteJsonView):
++            def serialize_result(self, obj, to_field_name):
++                result = super().serialize_result(obj, to_field_name)
++                result.update({
++                    'extra': 'data',
++                    'pk': obj.pk,
++                })
++                return result
++        
++        response = self._make_request(UpdateAutocompleteJsonView)
++        self.assertEqual(response.status_code, 200)
++        
++        data = json.loads(response.content.decode('utf-8'))
++        for result in data['results']:
++            self.assertEqual(result['extra'], 'data')
++            self.assertIsInstance(result['pk'], int)
++    
++    def test_serialize_result_maintains_compatibility(self):
++        """Test that the refactoring maintains backward compatibility."""
++        # The standard view should work exactly as before
++        response = self._make_request(AutocompleteJsonView, term='')
++        self.assertEqual(response.status_code, 200)
++        
++        data = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(len(data['results']), 3)  # All three questions
++        
++        # Results should be in the expected format
++        expected_questions = {
++            str(self.q1.pk): str(self.q1),
++            str(self.q2.pk): str(self.q2),
++            str(self.q3.pk): str(self.q3),
++        }
++        
++        for result in data['results']:
++            self.assertIn(result['id'], expected_questions)
++            self.assertEqual(result['text'], expected_questions[result['id']])

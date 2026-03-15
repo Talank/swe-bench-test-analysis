@@ -1,0 +1,615 @@
+diff --git a/django/contrib/admin/checks.py b/django/contrib/admin/checks.py
+index f82c20c2f1..9fd77b5d41 100644
+--- a/django/contrib/admin/checks.py
++++ b/django/contrib/admin/checks.py
+@@ -720,33 +720,33 @@ class ModelAdminChecks(BaseModelAdminChecks):
+             return []
+         elif hasattr(obj, item):
+             return []
+-        elif hasattr(obj.model, item):
++        else:
+             try:
+                 field = obj.model._meta.get_field(item)
+             except FieldDoesNotExist:
+-                return []
+-            else:
+-                if isinstance(field, models.ManyToManyField):
++                try:
++                    field = getattr(obj.model, item)
++                except AttributeError:
+                     return [
+                         checks.Error(
+-                            "The value of '%s' must not be a ManyToManyField." % label,
++                            "The value of '%s' refers to '%s', which is not a callable, "
++                            "an attribute of '%s', or an attribute or method on '%s.%s'." % (
++                                label, item, obj.__class__.__name__,
++                                obj.model._meta.app_label, obj.model._meta.object_name,
++                            ),
+                             obj=obj.__class__,
+-                            id='admin.E109',
++                            id='admin.E108',
+                         )
+                     ]
+-                return []
+-        else:
+-            return [
+-                checks.Error(
+-                    "The value of '%s' refers to '%s', which is not a callable, "
+-                    "an attribute of '%s', or an attribute or method on '%s.%s'." % (
+-                        label, item, obj.__class__.__name__,
+-                        obj.model._meta.app_label, obj.model._meta.object_name,
+-                    ),
+-                    obj=obj.__class__,
+-                    id='admin.E108',
+-                )
+-            ]
++            if isinstance(field, models.ManyToManyField):
++                return [
++                    checks.Error(
++                        "The value of '%s' must not be a ManyToManyField." % label,
++                        obj=obj.__class__,
++                        id='admin.E109',
++                    )
++                ]
++            return []
+ 
+     def _check_list_display_links(self, obj):
+         """ Check that list_display_links is a unique subset of list_display.
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..b00afb053e
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,200 @@
++"""
++Comprehensive test for admin.E108 fix covering all cases from the problem statement.
++"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings before importing models
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin import checks
++from django.core.exceptions import FieldDoesNotExist
++
++
++# Test Case 1: Normal field that works fine
++class NormalModel(models.Model):
++    name = models.CharField(max_length=100)
++    number = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test Case 2: Field with descriptor that throws on class access (like PositionField)
++class PositionFieldDescriptor:
++    def __init__(self, field):
++        self.field = field
++
++    def __get__(self, instance, owner):
++        if instance is None:
++            raise AttributeError("Cannot access PositionField on model class")
++        return getattr(instance, self.field.attname)
++
++    def __set__(self, instance, value):
++        setattr(instance, self.field.attname, value)
++
++
++class PositionField(models.IntegerField):
++    def contribute_to_class(self, cls, name, **kwargs):
++        super().contribute_to_class(cls, name, **kwargs)
++        setattr(cls, self.attname, PositionFieldDescriptor(self))
++
++
++class ModelWithPositionField(models.Model):
++    name = models.CharField(max_length=100)
++    order = PositionField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test Case 3: ManyToManyField (should raise E109)
++class ModelWithM2M(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField('self')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test Case 4: Model with property/method
++class ModelWithMethod(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def custom_method(self):
++        return "custom"
++    
++    @property
++    def custom_property(self):
++        return "property"
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test Case 5: Descriptor that returns None (original bug #28490)
++class NoneDescriptor:
++    def __get__(self, instance, owner):
++        return None
++    
++    def __set__(self, instance, value):
++        pass
++
++
++class ModelWithNoneDescriptor(models.Model):
++    name = models.CharField(max_length=100)
++    none_field = NoneDescriptor()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def run_checks(admin_class, model_class, expected_errors=0, expected_error_ids=None):
++    """Helper to run checks and validate results"""
++    from django.contrib.admin.sites import AdminSite
++    
++    site = AdminSite()
++    admin_obj = admin_class(model_class, site)
++    checker = checks.ModelAdminChecks()
++    errors = checker._check_list_display(admin_obj)
++    
++    print(f"\nTesting {model_class.__name__} with {admin_class.__name__}:")
++    print(f"  list_display: {admin_obj.list_display}")
++    print(f"  Errors found: {len(errors)}")
++    
++    for error in errors:
++        print(f"    - {error.id}: {error.msg}")
++    
++    assert len(errors) == expected_errors, f"Expected {expected_errors} errors but got {len(errors)}"
++    
++    if expected_error_ids:
++        actual_ids = [e.id for e in errors]
++        assert actual_ids == expected_error_ids, f"Expected error IDs {expected_error_ids} but got {actual_ids}"
++    
++    print("  [PASS] Test passed!")
++    return errors
++
++
++def test_all_cases():
++    """Test all cases from the problem statement"""
++    
++    # Test 1: Normal fields should work
++    class NormalAdmin(admin.ModelAdmin):
++        list_display = ['name', 'number']
++    
++    run_checks(NormalAdmin, NormalModel, expected_errors=0)
++    
++    # Test 2: PositionField should work (this was broken before the fix)
++    class PositionFieldAdmin(admin.ModelAdmin):
++        list_display = ['name', 'order']
++    
++    run_checks(PositionFieldAdmin, ModelWithPositionField, expected_errors=0)
++    
++    # Test 3: ManyToManyField should raise E109
++    class M2MAdmin(admin.ModelAdmin):
++        list_display = ['name', 'tags']
++    
++    run_checks(M2MAdmin, ModelWithM2M, expected_errors=1, expected_error_ids=['admin.E109'])
++    
++    # Test 4: Methods and properties should work
++    class MethodAdmin(admin.ModelAdmin):
++        list_display = ['name', 'custom_method', 'custom_property']
++    
++    run_checks(MethodAdmin, ModelWithMethod, expected_errors=0)
++    
++    # Test 5: Admin methods should work
++    class AdminWithMethod(admin.ModelAdmin):
++        list_display = ['name', 'admin_method']
++        
++        def admin_method(self, obj):
++            return "admin"
++    
++    run_checks(AdminWithMethod, NormalModel, expected_errors=0)
++    
++    # Test 6: Invalid field should raise E108
++    class InvalidFieldAdmin(admin.ModelAdmin):
++        list_display = ['name', 'nonexistent_field']
++    
++    run_checks(InvalidFieldAdmin, NormalModel, expected_errors=1, expected_error_ids=['admin.E108'])
++    
++    # Test 7: Callable items should work
++    def custom_callable(obj):
++        return "callable"
++    
++    class CallableAdmin(admin.ModelAdmin):
++        list_display = ['name', custom_callable]
++    
++    run_checks(CallableAdmin, NormalModel, expected_errors=0)
++    
++    # Test 8: None descriptor should work (bug #28490)
++    class NoneDescriptorAdmin(admin.ModelAdmin):
++        list_display = ['name', 'none_field']
++    
++    run_checks(NoneDescriptorAdmin, ModelWithNoneDescriptor, expected_errors=0)
++    
++    print("\n[SUCCESS] All tests passed!")
++
++
++if __name__ == "__main__":
++    test_all_cases()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..dc5535022d
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,107 @@
++"""
++Test edge cases for the admin.E108 fix.
++"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings before importing models
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin import checks
++from django.core.exceptions import FieldDoesNotExist
++
++
++# Test edge case: field exists in _meta but hasattr returns False
++class EdgeCaseModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Override hasattr to always return False for 'name' 
++original_hasattr = hasattr
++def mock_hasattr(obj, name):
++    if obj is EdgeCaseModel and name == 'name':
++        return False
++    return original_hasattr(obj, name)
++
++
++def test_edge_case():
++    """Test that _meta.get_field is tried even when hasattr returns False"""
++    import builtins
++    
++    # Temporarily replace hasattr
++    builtins.hasattr = mock_hasattr
++    
++    try:
++        class EdgeCaseAdmin(admin.ModelAdmin):
++            list_display = ['name']
++        
++        from django.contrib.admin.sites import AdminSite
++        site = AdminSite()
++        admin_obj = EdgeCaseAdmin(EdgeCaseModel, site)
++        checker = checks.ModelAdminChecks()
++        errors = checker._check_list_display(admin_obj)
++        
++        print(f"Errors: {errors}")
++        assert len(errors) == 0, f"Expected no errors but got {errors}"
++        print("[PASS] Edge case test passed - field found via _meta.get_field even though hasattr returned False")
++        
++    finally:
++        # Restore original hasattr
++        builtins.hasattr = original_hasattr
++
++
++def test_getattr_returns_none():
++    """Test the original bug #28490 - descriptor returning None"""
++    class NoneDescriptor:
++        def __get__(self, instance, owner):
++            return None
++    
++    class NoneModel(models.Model):
++        name = models.CharField(max_length=100)
++        none_field = NoneDescriptor()
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class NoneAdmin(admin.ModelAdmin):
++        list_display = ['name', 'none_field']
++    
++    from django.contrib.admin.sites import AdminSite
++    site = AdminSite()
++    admin_obj = NoneAdmin(NoneModel, site)
++    checker = checks.ModelAdminChecks()
++    errors = checker._check_list_display(admin_obj)
++    
++    print(f"\nNone descriptor test - Errors: {errors}")
++    assert len(errors) == 0, f"Expected no errors but got {errors}"
++    print("[PASS] None descriptor test passed")
++
++
++if __name__ == "__main__":
++    test_edge_case()
++    test_getattr_returns_none()
++    print("\n[SUCCESS] All edge case tests passed!")
+diff --git a/test_m2m_validation.py b/test_m2m_validation.py
+new file mode 100644
+index 0000000000..58bb6ea9c6
+--- /dev/null
++++ b/test_m2m_validation.py
+@@ -0,0 +1,74 @@
++"""
++Test that ManyToManyField validation still works correctly with the fix.
++"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings before importing models
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin import checks
++
++
++# Test M2M field accessed via _meta.get_field
++class M2MDescriptor:
++    def __get__(self, instance, owner):
++        if instance is None:
++            raise AttributeError("Cannot access on class")
++        return None
++
++
++class M2MModel(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField('self')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Replace the tags descriptor to make hasattr return False
++M2MModel.tags = M2MDescriptor()
++
++
++def test_m2m_validation():
++    """Test that M2M fields still raise E109 error even when accessed via get_field"""
++    
++    class M2MAdmin(admin.ModelAdmin):
++        list_display = ['name', 'tags']
++    
++    from django.contrib.admin.sites import AdminSite
++    site = AdminSite()
++    admin_obj = M2MAdmin(M2MModel, site)
++    checker = checks.ModelAdminChecks()
++    errors = checker._check_list_display(admin_obj)
++    
++    print(f"Errors: {errors}")
++    assert len(errors) == 1, f"Expected 1 error but got {len(errors)}"
++    assert errors[0].id == 'admin.E109', f"Expected admin.E109 but got {errors[0].id}"
++    print(f"[PASS] M2M validation test passed - correctly raised {errors[0].id}")
++
++
++if __name__ == "__main__":
++    test_m2m_validation()
++    print("\n[SUCCESS] M2M validation test passed!")
+diff --git a/test_position_field.py b/test_position_field.py
+new file mode 100644
+index 0000000000..1726cd6924
+--- /dev/null
++++ b/test_position_field.py
+@@ -0,0 +1,97 @@
++"""
++Test script to reproduce the admin.E108 issue with PositionField-like fields.
++"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings before importing models
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin import checks
++from django.core.exceptions import FieldDoesNotExist
++from django.test import TestCase
++
++
++# Simulate a PositionField that throws an exception when accessed on the model class
++class PositionFieldDescriptor:
++    def __init__(self, field):
++        self.field = field
++
++    def __get__(self, instance, owner):
++        if instance is None:
++            # This simulates the behavior of PositionField which throws an exception
++            # when accessed on the model class rather than an instance
++            raise AttributeError("Cannot access PositionField on model class")
++        return getattr(instance, self.field.attname)
++
++    def __set__(self, instance, value):
++        setattr(instance, self.field.attname, value)
++
++
++class PositionField(models.IntegerField):
++    """Simulates django-positions PositionField behavior"""
++    
++    def contribute_to_class(self, cls, name, **kwargs):
++        super().contribute_to_class(cls, name, **kwargs)
++        # Replace the field with a descriptor that throws on class access
++        setattr(cls, self.attname, PositionFieldDescriptor(self))
++
++
++class Thing(models.Model):
++    number = models.IntegerField(default=0)
++    order = PositionField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++@admin.register(Thing)
++class ThingAdmin(admin.ModelAdmin):
++    list_display = ['number', 'order']
++
++
++def test_check():
++    """Test the admin check"""
++    # Create a mock admin site
++    from django.contrib.admin.sites import AdminSite
++    site = AdminSite()
++    
++    # Create the admin instance
++    admin_obj = ThingAdmin(Thing, site)
++    
++    # Run the checks
++    checker = checks.ModelAdminChecks()
++    errors = checker._check_list_display(admin_obj)
++    
++    print("Errors found:", errors)
++    for error in errors:
++        print(f"  - {error.id}: {error.msg}")
++    
++    # The test should pass (no errors) if the fix is correct
++    assert len(errors) == 0, f"Expected no errors but got {len(errors)}"
++    print("\nTest passed! No admin.E108 errors.")
++
++
++if __name__ == "__main__":
++    test_check()
+diff --git a/tests/modeladmin/test_checks.py b/tests/modeladmin/test_checks.py
+index a1b7001f68..146eab3aa1 100644
+--- a/tests/modeladmin/test_checks.py
++++ b/tests/modeladmin/test_checks.py
+@@ -509,6 +509,52 @@ class ListDisplayTests(CheckTestCase):
+ 
+         self.assertIsValid(TestModelAdmin, ValidationTestModel)
+ 
++    def test_field_with_descriptor_raising_attribute_error(self):
++        """
++        Test that fields with descriptors that raise AttributeError when
++        accessed on the model class (like PositionField) are still valid.
++        """
++        # Create a descriptor that raises AttributeError on class access
++        class PositionFieldDescriptor:
++            def __get__(self, instance, owner):
++                if instance is None:
++                    raise AttributeError("Cannot access on class")
++                return 0
++        
++        # Patch the model to have such a field
++        original_position = getattr(ValidationTestModel, 'position', None)
++        try:
++            # Add the descriptor to the model
++            ValidationTestModel.position = PositionFieldDescriptor()
++            # Also ensure it's in _meta.get_field
++            from django.db import models
++            position_field = models.IntegerField()
++            position_field.name = 'position'
++            position_field.attname = 'position'
++            position_field.model = ValidationTestModel
++            
++            # Mock _meta.get_field to return our field
++            original_get_field = ValidationTestModel._meta.get_field
++            def mock_get_field(name):
++                if name == 'position':
++                    return position_field
++                return original_get_field(name)
++            
++            ValidationTestModel._meta.get_field = mock_get_field
++            
++            class TestModelAdmin(ModelAdmin):
++                list_display = ('name', 'position')
++            
++            self.assertIsValid(TestModelAdmin, ValidationTestModel)
++        finally:
++            # Clean up
++            if original_position is not None:
++                ValidationTestModel.position = original_position
++            elif hasattr(ValidationTestModel, 'position'):
++                delattr(ValidationTestModel, 'position')
++            if hasattr(ValidationTestModel._meta, 'get_field'):
++                ValidationTestModel._meta.get_field = original_get_field
++
+ 
+ class ListDisplayLinksCheckTests(CheckTestCase):

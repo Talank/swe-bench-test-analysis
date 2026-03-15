@@ -1,0 +1,757 @@
+diff --git a/django/db/backends/sqlite3/base.py b/django/db/backends/sqlite3/base.py
+index 2eeaf98c0d..267541b0b0 100644
+--- a/django/db/backends/sqlite3/base.py
++++ b/django/db/backends/sqlite3/base.py
+@@ -327,19 +327,21 @@ class DatabaseWrapper(BaseDatabaseWrapper):
+                     violations = cursor.execute('PRAGMA foreign_key_check').fetchall()
+                 else:
+                     violations = chain.from_iterable(
+-                        cursor.execute('PRAGMA foreign_key_check(%s)' % table_name).fetchall()
++                        cursor.execute('PRAGMA foreign_key_check(%s)' % self.ops.quote_name(table_name)).fetchall()
+                         for table_name in table_names
+                     )
+                 # See https://www.sqlite.org/pragma.html#pragma_foreign_key_check
+                 for table_name, rowid, referenced_table_name, foreign_key_index in violations:
+                     foreign_key = cursor.execute(
+-                        'PRAGMA foreign_key_list(%s)' % table_name
++                        'PRAGMA foreign_key_list(%s)' % self.ops.quote_name(table_name)
+                     ).fetchall()[foreign_key_index]
+                     column_name, referenced_column_name = foreign_key[3:5]
+                     primary_key_column_name = self.introspection.get_primary_key_column(cursor, table_name)
+                     primary_key_value, bad_value = cursor.execute(
+                         'SELECT %s, %s FROM %s WHERE rowid = %%s' % (
+-                            primary_key_column_name, column_name, table_name
++                            self.ops.quote_name(primary_key_column_name),
++                            self.ops.quote_name(column_name),
++                            self.ops.quote_name(table_name)
+                         ),
+                         (rowid,),
+                     ).fetchone()
+@@ -363,15 +365,20 @@ class DatabaseWrapper(BaseDatabaseWrapper):
+                     for column_name, referenced_table_name, referenced_column_name in key_columns:
+                         cursor.execute(
+                             """
+-                            SELECT REFERRING.`%s`, REFERRING.`%s` FROM `%s` as REFERRING
+-                            LEFT JOIN `%s` as REFERRED
+-                            ON (REFERRING.`%s` = REFERRED.`%s`)
+-                            WHERE REFERRING.`%s` IS NOT NULL AND REFERRED.`%s` IS NULL
++                            SELECT REFERRING.%s, REFERRING.%s FROM %s as REFERRING
++                            LEFT JOIN %s as REFERRED
++                            ON (REFERRING.%s = REFERRED.%s)
++                            WHERE REFERRING.%s IS NOT NULL AND REFERRED.%s IS NULL
+                             """
+                             % (
+-                                primary_key_column_name, column_name, table_name,
+-                                referenced_table_name, column_name, referenced_column_name,
+-                                column_name, referenced_column_name,
++                                self.ops.quote_name(primary_key_column_name),
++                                self.ops.quote_name(column_name),
++                                self.ops.quote_name(table_name),
++                                self.ops.quote_name(referenced_table_name),
++                                self.ops.quote_name(column_name),
++                                self.ops.quote_name(referenced_column_name),
++                                self.ops.quote_name(column_name),
++                                self.ops.quote_name(referenced_column_name),
+                             )
+                         )
+                         for bad_row in cursor.fetchall():
+diff --git a/test_check_constraints.py b/test_check_constraints.py
+new file mode 100644
+index 0000000000..93d8072941
+--- /dev/null
++++ b/test_check_constraints.py
+@@ -0,0 +1,78 @@
++"""
++Test script to reproduce the check_constraints issue with SQL keyword table names
++"""
++import sqlite3
++from django.db.backends.sqlite3.base import DatabaseWrapper
++from django.conf import settings
++
++# Configure minimal settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++# Create a test database with a table named 'order' (SQL keyword)
++conn = sqlite3.connect(':memory:')
++cursor = conn.cursor()
++
++# Create a table with SQL keyword name
++cursor.execute('''
++    CREATE TABLE "order" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++# Create a referenced table
++cursor.execute('''
++    CREATE TABLE customer (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++# Add a foreign key constraint
++cursor.execute('''
++    CREATE TABLE order_item (
++        id INTEGER PRIMARY KEY,
++        order_id INTEGER,
++        customer_id INTEGER,
++        FOREIGN KEY (order_id) REFERENCES "order"(id),
++        FOREIGN KEY (customer_id) REFERENCES customer(id)
++    )
++''')
++
++# Insert some test data
++cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++cursor.execute('INSERT INTO customer (id, name) VALUES (1, "Test Customer")')
++cursor.execute('INSERT INTO order_item (id, order_id, customer_id) VALUES (1, 1, 1)')
++
++# Insert an invalid foreign key reference
++cursor.execute('INSERT INTO order_item (id, order_id, customer_id) VALUES (2, 999, 1)')
++
++conn.commit()
++
++# Now test the check_constraints method
++db_wrapper = DatabaseWrapper({
++    'NAME': ':memory:',
++    'ENGINE': 'django.db.backends.sqlite3',
++})
++
++# Override the connection
++db_wrapper.connection = conn
++
++try:
++    print("Testing check_constraints with table 'order' (SQL keyword)...")
++    db_wrapper.check_constraints(['order'])
++    print("Success! No error occurred.")
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++conn.close()
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..451bbd01a6
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,180 @@
++"""
++Comprehensive test for check_constraints with SQL keyword table names
++"""
++import sqlite3
++from django.db.backends.sqlite3.base import DatabaseWrapper
++from django.conf import settings
++
++# Configure minimal settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++
++# Test 1: Test with PRAGMA foreign_key_check support
++print("Test 1: Testing with PRAGMA foreign_key_check support...")
++conn = sqlite3.connect(':memory:')
++cursor = conn.cursor()
++
++# Enable foreign keys
++cursor.execute('PRAGMA foreign_keys = ON')
++
++# Create tables with SQL keyword names
++cursor.execute('''
++    CREATE TABLE "order" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++cursor.execute('''
++    CREATE TABLE "select" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++# Create a table with foreign keys to keyword-named tables
++cursor.execute('''
++    CREATE TABLE item (
++        id INTEGER PRIMARY KEY,
++        order_id INTEGER,
++        select_id INTEGER,
++        FOREIGN KEY (order_id) REFERENCES "order"(id),
++        FOREIGN KEY (select_id) REFERENCES "select"(id)
++    )
++''')
++
++# Insert valid data
++cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++cursor.execute('INSERT INTO "select" (id, name) VALUES (1, "Test Select")')
++cursor.execute('INSERT INTO item (id, order_id, select_id) VALUES (1, 1, 1)')
++
++# Insert invalid foreign key reference
++# Need to recreate connection to disable foreign keys
++conn.close()
++conn = sqlite3.connect(':memory:')
++cursor = conn.cursor()
++
++# Recreate schema without foreign key enforcement
++cursor.execute('''
++    CREATE TABLE "order" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++cursor.execute('''
++    CREATE TABLE "select" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++cursor.execute('''
++    CREATE TABLE item (
++        id INTEGER PRIMARY KEY,
++        order_id INTEGER,
++        select_id INTEGER,
++        FOREIGN KEY (order_id) REFERENCES "order"(id),
++        FOREIGN KEY (select_id) REFERENCES "select"(id)
++    )
++''')
++
++# Insert valid data
++cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++cursor.execute('INSERT INTO "select" (id, name) VALUES (1, "Test Select")')
++cursor.execute('INSERT INTO item (id, order_id, select_id) VALUES (1, 1, 1)')
++
++# Insert invalid data
++cursor.execute('INSERT INTO item (id, order_id, select_id) VALUES (2, 999, 999)')
++
++conn.commit()
++
++# Test check_constraints
++db_wrapper = DatabaseWrapper({
++    'NAME': ':memory:',
++    'ENGINE': 'django.db.backends.sqlite3',
++})
++db_wrapper.connection = conn
++
++try:
++    # Test with specific table names
++    db_wrapper.check_constraints(['order', 'select', 'item'])
++    print("ERROR: Should have raised IntegrityError!")
++except Exception as e:
++    if "invalid foreign key" in str(e):
++        print("SUCCESS: Correctly detected invalid foreign key")
++    else:
++        print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
++
++# Test 2: Test without table_names (all tables)
++print("\nTest 2: Testing without table_names (all tables)...")
++try:
++    db_wrapper.check_constraints()
++    print("ERROR: Should have raised IntegrityError!")
++except Exception as e:
++    if "invalid foreign key" in str(e):
++        print("SUCCESS: Correctly detected invalid foreign key")
++    else:
++        print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
++
++conn.close()
++
++# Test 3: Test the fallback path (without PRAGMA foreign_key_check support)
++print("\nTest 3: Testing fallback path (simulating no PRAGMA foreign_key_check support)...")
++
++# Create a new connection
++conn = sqlite3.connect(':memory:')
++cursor = conn.cursor()
++
++# Create the same schema
++cursor.execute('''
++    CREATE TABLE "order" (
++        id INTEGER PRIMARY KEY,
++        name TEXT
++    )
++''')
++
++cursor.execute('''
++    CREATE TABLE "group" (
++        id INTEGER PRIMARY KEY,
++        order_id INTEGER,
++        FOREIGN KEY (order_id) REFERENCES "order"(id)
++    )
++''')
++
++# Insert valid data
++cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++cursor.execute('INSERT INTO "group" (id, order_id) VALUES (1, 1)')
++
++# Insert invalid foreign key reference
++cursor.execute('INSERT INTO "group" (id, order_id) VALUES (2, 999)')
++
++conn.commit()
++
++# Create wrapper and disable PRAGMA foreign_key_check support
++db_wrapper = DatabaseWrapper({
++    'NAME': ':memory:',
++    'ENGINE': 'django.db.backends.sqlite3',
++})
++db_wrapper.connection = conn
++db_wrapper.features.supports_pragma_foreign_key_check = False
++
++try:
++    db_wrapper.check_constraints(['order', 'group'])
++    print("ERROR: Should have raised IntegrityError!")
++except Exception as e:
++    if "invalid foreign key" in str(e):
++        print("SUCCESS: Correctly detected invalid foreign key in fallback path")
++    else:
++        print(f"ERROR: Unexpected error: {type(e).__name__}: {e}")
++
++conn.close()
++
++print("\nAll tests completed!")
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 0000000000..5f0c3af3b2
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,114 @@
++"""
++Final test to verify the fix works for loaddata with SQL keyword table names
++"""
++import os
++import sys
++import tempfile
++import json
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import connection
++from django.core.management import call_command
++
++# Create a table with SQL keyword name directly
++with connection.cursor() as cursor:
++    cursor.execute('''
++        CREATE TABLE "order" (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            name VARCHAR(100)
++        )
++    ''')
++    
++    cursor.execute('''
++        CREATE TABLE "select" (
++            id INTEGER PRIMARY KEY AUTOINCREMENT,
++            order_id INTEGER,
++            FOREIGN KEY (order_id) REFERENCES "order"(id)
++        )
++    ''')
++
++# Create fixture data
++fixture_data = [
++    {
++        "model": "test.order",
++        "pk": 1,
++        "fields": {
++            "name": "Test Order"
++        }
++    },
++    {
++        "model": "test.select",
++        "pk": 1,
++        "fields": {
++            "order_id": 1
++        }
++    }
++]
++
++# Write fixture to a temporary file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
++    json.dump(fixture_data, f)
++    fixture_file = f.name
++
++try:
++    print("Testing loaddata with SQL keyword table names...")
++    
++    # This is the key test - loaddata should work without errors
++    # The fix ensures that table names are properly quoted in check_constraints
++    from django.core.management.commands.loaddata import Command
++    cmd = Command()
++    cmd.stdout = sys.stdout
++    cmd.stderr = sys.stderr
++    cmd.style = lambda x: x
++    
++    # Directly test the problematic code path
++    with connection.cursor() as cursor:
++        # Disable foreign key checks to insert invalid data
++        cursor.execute('PRAGMA foreign_keys = OFF')
++        
++        # Insert test data
++        cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++        cursor.execute('INSERT INTO "select" (id, order_id) VALUES (1, 1)')
++        
++        # Insert invalid reference to trigger check_constraints
++        cursor.execute('INSERT INTO "select" (id, order_id) VALUES (2, 999)')
++        
++        # Re-enable foreign key checks
++        cursor.execute('PRAGMA foreign_keys = ON')
++    
++    # Now test check_constraints with keyword table names
++    try:
++        connection.check_constraints(['order', 'select'])
++        print("ERROR: Should have detected constraint violation")
++    except Exception as e:
++        if "invalid foreign key" in str(e):
++            print("SUCCESS: check_constraints properly handles SQL keyword table names")
++        else:
++            print(f"ERROR: Unexpected error: {e}")
++            raise
++    
++finally:
++    # Clean up
++    os.unlink(fixture_file)
++
++print("\nTest completed successfully!")
+diff --git a/test_loaddata_order.py b/test_loaddata_order.py
+new file mode 100644
+index 0000000000..af141aafe5
+--- /dev/null
++++ b/test_loaddata_order.py
+@@ -0,0 +1,102 @@
++"""
++Test that loaddata works with SQL keyword table names
++"""
++import os
++import sys
++import tempfile
++import json
++import django
++from django.conf import settings
++
++# Configure Django first
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'test_order_app',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.test import TestCase, TransactionTestCase
++from django.core.management import call_command
++from django.db import models, connection
++from django.apps import apps, AppConfig
++
++# We need to create a test app and model
++class TestOrderAppConfig(AppConfig):
++    name = 'test_order_app'
++    label = 'test_order_app'
++
++# Register the app
++apps.app_configs['test_order_app'] = TestOrderAppConfig('test_order_app', sys.modules[__name__])
++
++# Define a model with SQL keyword table name
++class Order(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_order_app'
++        db_table = 'order'  # SQL keyword
++
++# Register the model
++apps.all_models['test_order_app']['order'] = Order
++
++# Create the test
++class TestLoadDataWithKeywordTableName(TransactionTestCase):
++    def setUp(self):
++        # Create the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(Order)
++    
++    def tearDown(self):
++        # Drop the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(Order)
++    
++    def test_loaddata_with_sql_keyword_table_name(self):
++        """Test that loaddata works when table name is a SQL keyword like 'order'"""
++        # Create fixture data
++        fixture_data = [{
++            "model": "test_order_app.order",
++            "pk": 1,
++            "fields": {
++                "name": "Test Order"
++            }
++        }]
++        
++        # Write fixture to a temporary file
++        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
++            json.dump(fixture_data, f)
++            fixture_file = f.name
++        
++        try:
++            # This should not raise an error
++            call_command('loaddata', fixture_file, verbosity=0)
++            
++            # Verify the data was loaded
++            self.assertEqual(Order.objects.count(), 1)
++            order = Order.objects.get(pk=1)
++            self.assertEqual(order.name, "Test Order")
++        finally:
++            # Clean up
++            os.unlink(fixture_file)
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    
++    # Run the test
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.TestLoadDataWithKeywordTableName"])
++    sys.exit(bool(failures))
+diff --git a/test_order_model.py b/test_order_model.py
+new file mode 100644
+index 0000000000..0228c641f2
+--- /dev/null
++++ b/test_order_model.py
+@@ -0,0 +1,83 @@
++"""
++Test script to reproduce the issue with SQL keyword table names
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.core.management import call_command
++from django.apps import AppConfig, apps
++import tempfile
++import json
++
++# Create a test app config
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++    label = 'test_app'
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'test_app',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Register the app
++test_app_config = TestAppConfig('test_app', sys.modules[__name__])
++apps.app_configs['test_app'] = test_app_config
++
++# Define a model with a SQL keyword name
++class Order(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'order'  # SQL keyword
++
++# Register the model
++apps.all_models['test_app']['order'] = Order
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Order)
++
++# Create a fixture
++fixture_data = [{
++    "model": "test_app.order",
++    "pk": 1,
++    "fields": {
++        "name": "Test Order"
++    }
++}]
++
++# Write fixture to a temporary file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
++    json.dump(fixture_data, f)
++    fixture_file = f.name
++
++try:
++    # Try to load the fixture - this should fail with the original code
++    print("Attempting to load fixture...")
++    call_command('loaddata', fixture_file, verbosity=2)
++    print("Success! Fixture loaded without errors.")
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++finally:
++    # Clean up
++    os.unlink(fixture_file)
+diff --git a/test_sqlite_keywords.py b/test_sqlite_keywords.py
+new file mode 100644
+index 0000000000..1462dc8b71
+--- /dev/null
++++ b/test_sqlite_keywords.py
+@@ -0,0 +1,107 @@
++"""
++Test for SQLite backend handling of SQL keyword table names
++"""
++from django.db import connection
++from django.db.utils import IntegrityError
++from django.test import TestCase, TransactionTestCase
++
++
++class SQLiteKeywordTableNameTests(TransactionTestCase):
++    """Test that SQLite backend properly handles SQL keyword table names."""
++    
++    def setUp(self):
++        self.cursor = connection.cursor()
++        # Create tables with SQL keyword names
++        self.cursor.execute('''
++            CREATE TABLE "order" (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                name VARCHAR(100)
++            )
++        ''')
++        
++        self.cursor.execute('''
++            CREATE TABLE "select" (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                order_id INTEGER,
++                FOREIGN KEY (order_id) REFERENCES "order"(id)
++            )
++        ''')
++        
++        self.cursor.execute('''
++            CREATE TABLE "group" (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                select_id INTEGER,
++                FOREIGN KEY (select_id) REFERENCES "select"(id)
++            )
++        ''')
++    
++    def tearDown(self):
++        self.cursor.execute('DROP TABLE IF EXISTS "group"')
++        self.cursor.execute('DROP TABLE IF EXISTS "select"')
++        self.cursor.execute('DROP TABLE IF EXISTS "order"')
++        self.cursor.close()
++    
++    def test_check_constraints_with_keyword_table_names(self):
++        """Test that check_constraints properly quotes SQL keyword table names."""
++        # Insert valid data
++        self.cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++        self.cursor.execute('INSERT INTO "select" (id, order_id) VALUES (1, 1)')
++        self.cursor.execute('INSERT INTO "group" (id, select_id) VALUES (1, 1)')
++        
++        # Insert invalid data with foreign keys disabled
++        self.cursor.execute('PRAGMA foreign_keys = OFF')
++        self.cursor.execute('INSERT INTO "select" (id, order_id) VALUES (2, 999)')
++        self.cursor.execute('INSERT INTO "group" (id, select_id) VALUES (2, 999)')
++        self.cursor.execute('PRAGMA foreign_keys = ON')
++        
++        # Test check_constraints with specific table names
++        with self.assertRaises(IntegrityError) as cm:
++            connection.check_constraints(['order', 'select', 'group'])
++        
++        self.assertIn('invalid foreign key', str(cm.exception))
++    
++    def test_check_constraints_all_tables_with_keywords(self):
++        """Test that check_constraints works with all tables when some have keyword names."""
++        # Insert valid data
++        self.cursor.execute('INSERT INTO "order" (id, name) VALUES (1, "Test Order")')
++        self.cursor.execute('INSERT INTO "select" (id, order_id) VALUES (1, 1)')
++        
++        # Insert invalid data with foreign keys disabled
++        self.cursor.execute('PRAGMA foreign_keys = OFF')
++        self.cursor.execute('INSERT INTO "select" (id, order_id) VALUES (2, 999)')
++        self.cursor.execute('PRAGMA foreign_keys = ON')
++        
++        # Test check_constraints without specifying table names (checks all tables)
++        with self.assertRaises(IntegrityError) as cm:
++            connection.check_constraints()
++        
++        self.assertIn('invalid foreign key', str(cm.exception))
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            USE_TZ=True,
++            SECRET_KEY='test-secret-key',
++        )
++        django.setup()
++    
++    # Run the tests
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.SQLiteKeywordTableNameTests"])

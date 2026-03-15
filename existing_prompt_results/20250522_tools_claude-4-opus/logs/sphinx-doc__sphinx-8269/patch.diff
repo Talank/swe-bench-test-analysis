@@ -1,0 +1,589 @@
+diff --git a/sphinx/builders/linkcheck.py b/sphinx/builders/linkcheck.py
+index 9b54afc7c..1083e82ec 100644
+--- a/sphinx/builders/linkcheck.py
++++ b/sphinx/builders/linkcheck.py
+@@ -166,6 +166,7 @@ class CheckExternalLinksBuilder(Builder):
+                     # Read the whole document and see if #anchor exists
+                     response = requests.get(req_url, stream=True, config=self.app.config,
+                                             auth=auth_info, **kwargs)
++                    response.raise_for_status()
+                     found = check_anchor(response, unquote(anchor))
+ 
+                     if not found:
+diff --git a/test_404_with_anchor.py b/test_404_with_anchor.py
+new file mode 100644
+index 000000000..36773a25b
+--- /dev/null
++++ b/test_404_with_anchor.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Test specifically for 404 errors with anchors."""
++
++import pytest
++from unittest import mock
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from requests.exceptions import HTTPError
++from requests.models import Response
++import json
++
++
++def test_404_with_anchor():
++    """Test that linkcheck reports 404 error instead of 'Anchor not found' for non-existent pages with anchors."""
++    
++    # Create test content
++    srcdir = path(__file__).parent.abspath() / 'test_404_anchor'
++    srcdir.makedirs(exist_ok=True)
++    
++    (srcdir / 'conf.py').write_text("""
++project = 'Test'
++linkcheck_anchors = True
++""")
++    
++    (srcdir / 'index.rst').write_text("""
++Test
++====
++
++`404 link with anchor <https://www.google.com/nonexistent.html#anchor>`_
++""")
++    
++    # Create a mock that simulates network behavior
++    def mock_get(url, **kwargs):
++        mock_response = mock.Mock(spec=Response)
++        mock_response.url = url
++        mock_response.history = []
++        
++        if 'nonexistent.html' in url:
++            # Simulate 404 error
++            mock_response.status_code = 404
++            mock_response.reason = 'Not Found'
++            http_error = HTTPError(f'404 Client Error: Not Found for url: {url}')
++            http_error.response = mock_response
++            mock_response.raise_for_status.side_effect = http_error
++        else:
++            # Default to 200 OK
++            mock_response.status_code = 200
++            mock_response.reason = 'OK'
++            mock_response.raise_for_status.return_value = None
++            mock_response.iter_content.return_value = ['<html></html>']
++        
++        return mock_response
++    
++    with mock.patch('sphinx.util.requests.get', side_effect=mock_get):
++        with mock.patch('sphinx.util.requests.head', side_effect=mock_get):
++            app = SphinxTestApp('linkcheck', srcdir=srcdir)
++            app.build()
++    
++    # Check text output
++    output_txt = (app.outdir / 'output.txt').read_text()
++    print("Text output:", output_txt)
++    
++    # Check JSON output for more details
++    output_json = (app.outdir / 'output.json').read_text()
++    data = json.loads(output_json.strip())
++    print("JSON output:", json.dumps(data, indent=2))
++    
++    # Should contain the actual HTTP error, not "Anchor not found"
++    assert '404 Client Error' in output_txt
++    assert 'Anchor' not in output_txt
++    assert data['status'] == 'broken'
++    assert '404 Client Error' in data['info']
++    
++    # Cleanup
++    srcdir.rmtree()
++
++
++if __name__ == '__main__':
++    test_404_with_anchor()
++    print("Test passed!")
+diff --git a/test_linkcheck_anchors_false.py b/test_linkcheck_anchors_false.py
+new file mode 100644
+index 000000000..dbb1100b5
+--- /dev/null
++++ b/test_linkcheck_anchors_false.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++"""Test linkcheck behavior when linkcheck_anchors is False."""
++
++import pytest
++from unittest import mock
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from requests.exceptions import HTTPError
++from requests.models import Response
++import json
++
++
++def test_linkcheck_anchors_false():
++    """Test that linkcheck works correctly when linkcheck_anchors is False."""
++    
++    # Create test content
++    srcdir = path(__file__).parent.abspath() / 'test_anchors_false'
++    srcdir.makedirs(exist_ok=True)
++    
++    (srcdir / 'conf.py').write_text("""
++project = 'Test'
++linkcheck_anchors = False
++""")
++    
++    (srcdir / 'index.rst').write_text("""
++Test
++====
++
++`404 link with anchor <https://www.google.com/nonexistent.html#anchor>`_
++`Valid link with anchor <https://www.google.com/valid.html#anchor>`_
++""")
++    
++    # Create a mock that simulates network behavior
++    def mock_head(url, **kwargs):
++        mock_response = mock.Mock(spec=Response)
++        mock_response.url = url
++        mock_response.history = []
++        
++        if 'nonexistent.html' in url:
++            # Simulate 404 error
++            mock_response.status_code = 404
++            mock_response.reason = 'Not Found'
++            http_error = HTTPError(f'404 Client Error: Not Found for url: {url}')
++            http_error.response = mock_response
++            mock_response.raise_for_status.side_effect = http_error
++        else:
++            # Default to 200 OK
++            mock_response.status_code = 200
++            mock_response.reason = 'OK'
++            mock_response.raise_for_status.return_value = None
++        
++        return mock_response
++    
++    def mock_get(url, **kwargs):
++        # Should use HEAD when anchors are disabled, but fallback to GET
++        return mock_head(url, **kwargs)
++    
++    with mock.patch('sphinx.util.requests.get', side_effect=mock_get):
++        with mock.patch('sphinx.util.requests.head', side_effect=mock_head):
++            app = SphinxTestApp('linkcheck', srcdir=srcdir)
++            app.build()
++    
++    # Check text output
++    output_txt = (app.outdir / 'output.txt').read_text()
++    print("Text output:")
++    print(output_txt)
++    
++    # Should contain 404 error for nonexistent page
++    assert '404 Client Error' in output_txt
++    # Should NOT check anchors
++    assert 'Anchor' not in output_txt
++    # Valid link should be OK
++    assert 'https://www.google.com/valid.html#anchor' not in output_txt  # not in broken links
++    
++    # Cleanup
++    srcdir.rmtree()
++
++
++if __name__ == '__main__':
++    test_linkcheck_anchors_false()
++    print("Test passed!")
+diff --git a/test_linkcheck_fix.py b/test_linkcheck_fix.py
+new file mode 100644
+index 000000000..a42da8526
+--- /dev/null
++++ b/test_linkcheck_fix.py
+@@ -0,0 +1,117 @@
++#!/usr/bin/env python3
++"""Test that the linkcheck fix works correctly."""
++
++import pytest
++from unittest import mock
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from requests.exceptions import HTTPError
++from requests.models import Response
++
++
++def test_linkcheck_reports_http_errors_with_anchors():
++    """Test that linkcheck reports HTTP errors instead of 'Anchor not found' when linkcheck_anchors is True."""
++    
++    # Create a mock response that returns 404
++    mock_response_404 = mock.Mock(spec=Response)
++    mock_response_404.status_code = 404
++    mock_response_404.url = 'https://example.com/notfound.html'
++    mock_response_404.reason = 'Not Found'
++    mock_response_404.history = []
++    
++    # Make raise_for_status raise HTTPError
++    http_error = HTTPError('404 Client Error: Not Found for url: https://example.com/notfound.html')
++    http_error.response = mock_response_404
++    mock_response_404.raise_for_status.side_effect = http_error
++    
++    # Create test content
++    srcdir = path(__file__).parent.abspath() / 'test_linkcheck_fix'
++    srcdir.makedirs(exist_ok=True)
++    
++    (srcdir / 'conf.py').write_text("""
++project = 'Test'
++linkcheck_anchors = True
++""")
++    
++    (srcdir / 'index.rst').write_text("""
++Test
++====
++
++`404 link with anchor <https://example.com/notfound.html#anchor>`_
++""")
++    
++    # Mock requests.get to return our 404 response
++    with mock.patch('sphinx.util.requests.get', return_value=mock_response_404):
++        with mock.patch('sphinx.util.requests.head', return_value=mock_response_404):
++            app = SphinxTestApp('linkcheck', srcdir=srcdir)
++            app.build()
++    
++    # Check output
++    output_txt = (app.outdir / 'output.txt').read_text()
++    print("Output:", output_txt)
++    
++    # Should contain the actual HTTP error, not "Anchor not found"
++    assert '404 Client Error' in output_txt
++    assert 'Anchor' not in output_txt
++    
++    # Cleanup
++    srcdir.rmtree()
++
++
++def test_linkcheck_anchor_not_found_on_valid_page():
++    """Test that linkcheck still reports 'Anchor not found' when page exists but anchor doesn't."""
++    
++    # Create a mock response that returns 200 OK
++    mock_response_200 = mock.Mock(spec=Response)
++    mock_response_200.status_code = 200
++    mock_response_200.url = 'https://example.com/valid.html'
++    mock_response_200.reason = 'OK'
++    mock_response_200.history = []
++    mock_response_200.raise_for_status.return_value = None
++    
++    # Mock iter_content to return HTML without the anchor
++    mock_response_200.iter_content.return_value = [
++        '<html><body><h1 id="different">Different anchor</h1></body></html>'
++    ]
++    
++    # Create test content
++    srcdir = path(__file__).parent.abspath() / 'test_linkcheck_fix2'
++    srcdir.makedirs(exist_ok=True)
++    
++    (srcdir / 'conf.py').write_text("""
++project = 'Test'
++linkcheck_anchors = True
++""")
++    
++    (srcdir / 'index.rst').write_text("""
++Test
++====
++
++`Valid page but missing anchor <https://example.com/valid.html#missing>`_
++""")
++    
++    # Mock requests.get to return our 200 response
++    with mock.patch('sphinx.util.requests.get', return_value=mock_response_200):
++        with mock.patch('sphinx.util.requests.head', return_value=mock_response_200):
++            app = SphinxTestApp('linkcheck', srcdir=srcdir)
++            app.build()
++    
++    # Check output
++    output_txt = (app.outdir / 'output.txt').read_text()
++    print("Output:", output_txt)
++    
++    # Should contain "Anchor not found" since page exists but anchor doesn't
++    assert "Anchor 'missing' not found" in output_txt
++    
++    # Cleanup
++    srcdir.rmtree()
++
++
++if __name__ == '__main__':
++    print("Testing HTTP error reporting with anchors...")
++    test_linkcheck_reports_http_errors_with_anchors()
++    print("PASSED!\n")
++    
++    print("Testing anchor not found on valid page...")
++    test_linkcheck_anchor_not_found_on_valid_page()
++    print("PASSED!")
+diff --git a/test_mock_issue.py b/test_mock_issue.py
+new file mode 100644
+index 000000000..20d272455
+--- /dev/null
++++ b/test_mock_issue.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Test script to reproduce the linkcheck anchor issue with mocks."""
++
++import os
++import tempfile
++from unittest import mock
++from sphinx.cmd.build import build_main
++from requests.exceptions import HTTPError
++from requests.models import Response
++
++def test_linkcheck_anchor_issue_with_mock():
++    """Test that linkcheck reports HTTP errors instead of 'Anchor not found' when linkcheck_anchors is True."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create source and build directories
++        srcdir = os.path.join(tmpdir, 'source')
++        builddir = os.path.join(tmpdir, 'build')
++        os.makedirs(srcdir)
++        
++        # Create conf.py
++        conf_content = """
++project = 'Test Project'
++author = 'Test Author'
++release = '1.0'
++extensions = []
++linkcheck_anchors = True
++"""
++        with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++            f.write(conf_content)
++        
++        # Create index.rst with a link to a non-existent page with anchor
++        index_content = """
++Test Document
++=============
++
++This is a test document.
++
++`Link to non-existent page with anchor <https://example.com/test.txt#test>`_
++"""
++        with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++            f.write(index_content)
++        
++        # Mock the requests.get to return 404
++        mock_response = mock.Mock(spec=Response)
++        mock_response.status_code = 404
++        mock_response.url = 'https://example.com/test.txt'
++        mock_response.reason = 'Not Found'
++        mock_response.raise_for_status.side_effect = HTTPError('404 Client Error: Not Found for url: https://example.com/test.txt', response=mock_response)
++        
++        with mock.patch('sphinx.util.requests.get', return_value=mock_response):
++            # Run linkcheck
++            args = ['-b', 'linkcheck', srcdir, builddir]
++            result = build_main(args)
++        
++        # Check the output
++        output_file = os.path.join(builddir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("Output content:")
++                print(content)
++                
++                # Check if we get "Anchor not found" (current behavior)
++                if "Anchor 'test' not found" in content:
++                    print("\nCURRENT BEHAVIOR: Reports 'Anchor not found' even for 404 error")
++                elif "404 Client Error" in content:
++                    print("\nEXPECTED BEHAVIOR: Reports actual HTTP error (404)")
++                else:
++                    print("\nUNEXPECTED OUTPUT")
++        
++        # Also check JSON output
++        json_file = os.path.join(builddir, 'output.json')
++        if os.path.exists(json_file):
++            print("\nJSON output:")
++            with open(json_file, 'r') as f:
++                print(f.read())
++
++if __name__ == '__main__':
++    test_linkcheck_anchor_issue_with_mock()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 000000000..49cc678ed
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python3
++"""Test the exact scenario from the problem statement."""
++
++import os
++import tempfile
++import subprocess
++
++def test_problem_statement_scenario():
++    """Test the exact scenario described in the problem statement."""
++    
++    with tempfile.TemporaryDirectory() as tmpdir:
++        os.chdir(tmpdir)
++        
++        # Run sphinx-quickstart
++        subprocess.run([
++            'sphinx-quickstart', '--project', 'proj', '--sep', 
++            '--author', 'me', '--release', '1.0', '--language', 'en',
++            '-q'  # quiet mode
++        ], check=True)
++        
++        # Add the test link
++        with open('source/index.rst', 'a') as f:
++            f.write('\n`foo <https://google.com/test.txt#test>`_\n')
++        
++        # Add linkcheck_anchors = True to conf.py
++        with open('source/conf.py', 'a') as f:
++            f.write('\nlinkcheck_anchors = True\n')
++        
++        # Run linkcheck
++        result = subprocess.run(
++            ['make', 'linkcheck'], 
++            capture_output=True, 
++            text=True
++        )
++        
++        print("STDOUT:")
++        print(result.stdout)
++        print("\nSTDERR:")
++        print(result.stderr)
++        
++        # Check the output
++        output_file = 'build/linkcheck/output.txt'
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("\nOutput file content:")
++                print(content)
++                
++                # The fix should report HTTP error, not "Anchor not found"
++                # Note: The actual error might vary (DNS, connection refused, etc.)
++                # but it should NOT say "Anchor 'test' not found"
++                if "Anchor 'test' not found" in content:
++                    print("\nFAILED: Still reporting 'Anchor not found' instead of HTTP error")
++                    return False
++                else:
++                    print("\nSUCCESS: Not reporting 'Anchor not found' - reporting actual error instead")
++                    return True
++        else:
++            print("\nNo output file found")
++            return False
++
++if __name__ == '__main__':
++    success = test_problem_statement_scenario()
++    exit(0 if success else 1)
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 000000000..14e033de9
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python3
++"""Test script to reproduce the linkcheck anchor issue."""
++
++import os
++import tempfile
++import shutil
++from sphinx.cmd.build import build_main
++
++def test_linkcheck_anchor_issue():
++    """Test that linkcheck reports HTTP errors instead of 'Anchor not found' when linkcheck_anchors is True."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create source and build directories
++        srcdir = os.path.join(tmpdir, 'source')
++        builddir = os.path.join(tmpdir, 'build')
++        os.makedirs(srcdir)
++        
++        # Create conf.py
++        conf_content = """
++project = 'Test Project'
++author = 'Test Author'
++release = '1.0'
++extensions = []
++linkcheck_anchors = True
++"""
++        with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++            f.write(conf_content)
++        
++        # Create index.rst with a link to a non-existent page with anchor
++        index_content = """
++Test Document
++=============
++
++This is a test document.
++
++`Link to non-existent page with anchor <https://httpbin.org/status/404#test>`_
++"""
++        with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++            f.write(index_content)
++        
++        # Run linkcheck
++        args = ['-b', 'linkcheck', srcdir, builddir]
++        result = build_main(args)
++        
++        # Check the output
++        output_file = os.path.join(builddir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("Output content:")
++                print(content)
++                
++                # Check if we get "Anchor not found" (current behavior)
++                if "Anchor 'test' not found" in content:
++                    print("\nCURRENT BEHAVIOR: Reports 'Anchor not found' even for 404 error")
++                elif "404 Client Error" in content:
++                    print("\nEXPECTED BEHAVIOR: Reports actual HTTP error (404)")
++                else:
++                    print("\nUNEXPECTED OUTPUT")
++        
++        # Also check JSON output
++        json_file = os.path.join(builddir, 'output.json')
++        if os.path.exists(json_file):
++            print("\nJSON output:")
++            with open(json_file, 'r') as f:
++                print(f.read())
++
++if __name__ == '__main__':
++    test_linkcheck_anchor_issue()
+diff --git a/tests/test_build_linkcheck.py b/tests/test_build_linkcheck.py
+index 7d85f10c5..ff377c6ca 100644
+--- a/tests/test_build_linkcheck.py
++++ b/tests/test_build_linkcheck.py
+@@ -160,3 +160,44 @@ def test_linkcheck_request_headers(app, status, warning):
+                 assert headers["X-Secret"] == "open sesami"
+             else:
+                 assert headers["Accept"] == "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"
++
++
++@pytest.mark.sphinx('linkcheck', testroot='linkcheck', freshenv=True)
++def test_http_error_with_anchor(app, status, warning):
++    """Test that HTTP errors are reported instead of 'Anchor not found' for broken URLs with anchors."""
++    from unittest import mock
++    from requests.exceptions import HTTPError
++    from requests.models import Response
++    
++    # Mock response for 404 error
++    mock_response = mock.Mock(spec=Response)
++    mock_response.status_code = 404
++    mock_response.url = 'https://www.google.com/notfound.html'
++    mock_response.reason = 'Not Found'
++    mock_response.history = []
++    
++    http_error = HTTPError('404 Client Error: Not Found for url: https://www.google.com/notfound.html')
++    http_error.response = mock_response
++    mock_response.raise_for_status.side_effect = http_error
++    
++    def mock_get(url, **kwargs):
++        if 'notfound.html' in url:
++            return mock_response
++        # Let other requests go through normally
++        import requests as real_requests
++        return real_requests.get(url, **kwargs)
++    
++    # Add a test link that should return 404
++    test_content = '\n`404 link with anchor <https://www.google.com/notfound.html#anchor>`_'
++    links_file = app.srcdir / 'links.txt'
++    original_content = links_file.read_text()
++    links_file.write_text(original_content + test_content)
++    
++    with mock.patch('sphinx.util.requests.get', side_effect=mock_get):
++        app.builder.build_all()
++    
++    content = (app.outdir / 'output.txt').read_text()
++    
++    # Should report the HTTP error, not "Anchor not found"
++    assert 'notfound.html#anchor: 404 Client Error' in content
++    assert 'notfound.html#anchor: Anchor' not in content

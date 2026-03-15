@@ -1,0 +1,335 @@
+diff --git a/sphinx/domains/python.py b/sphinx/domains/python.py
+index 3ca730e30..408114d0a 100644
+--- a/sphinx/domains/python.py
++++ b/sphinx/domains/python.py
+@@ -100,7 +100,8 @@ def _parse_annotation(annotation: str) -> List[Node]:
+             for elem in node.elts:
+                 result.extend(unparse(elem))
+                 result.append(addnodes.desc_sig_punctuation('', ', '))
+-            result.pop()
++            if len(result) > 1:  # Only pop if there are elements (more than just '[')
++                result.pop()
+             result.append(addnodes.desc_sig_punctuation('', ']'))
+             return result
+         elif isinstance(node, ast.Module):
+@@ -118,7 +119,8 @@ def _parse_annotation(annotation: str) -> List[Node]:
+             for elem in node.elts:
+                 result.extend(unparse(elem))
+                 result.append(addnodes.desc_sig_punctuation('', ', '))
+-            result.pop()
++            if result:  # Only pop if there are elements
++                result.pop()
+             return result
+         else:
+             raise SyntaxError  # unsupported syntax
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 000000000..bbba21e9e
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,35 @@
++"""Comprehensive test for empty container type annotations."""
++from sphinx.domains.python import _parse_annotation
++
++test_cases = [
++    # Empty containers
++    ("Tuple[()]", "empty tuple"),
++    ("List[]", "empty list"),
++    
++    # Non-empty containers
++    ("Tuple[int]", "single element tuple"),
++    ("Tuple[int, str]", "multi-element tuple"),
++    ("List[int]", "single element list"),
++    ("List[int, str]", "multi-element list"),  # This might be invalid syntax but let's test
++    
++    # Nested cases
++    ("Tuple[Tuple[()]]", "tuple containing empty tuple"),
++    ("List[Tuple[()]]", "list of empty tuples"),
++    ("Tuple[List[]]", "tuple containing empty list"),
++]
++
++for annotation, description in test_cases:
++    print(f"\nTesting {description}: {annotation}")
++    try:
++        result = _parse_annotation(annotation)
++        print(f"  Success! Parsed {len(result)} nodes")
++        # Print a simple representation
++        simple_repr = []
++        for node in result:
++            if hasattr(node, 'astext'):
++                simple_repr.append(node.astext())
++            else:
++                simple_repr.append(str(type(node).__name__))
++        print(f"  Result: {''.join(simple_repr)}")
++    except Exception as e:
++        print(f"  Error: {type(e).__name__}: {e}")
+diff --git a/test_docs/source/conf.py b/test_docs/source/conf.py
+new file mode 100644
+index 000000000..e4b92841f
+--- /dev/null
++++ b/test_docs/source/conf.py
+@@ -0,0 +1,9 @@
++"""Sphinx configuration for testing."""
++import sys
++import os
++
++sys.path.insert(0, os.path.abspath('../..'))
++
++project = 'Test Empty Tuple'
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
+diff --git a/test_docs/source/index.rst b/test_docs/source/index.rst
+new file mode 100644
+index 000000000..4933d8d4f
+--- /dev/null
++++ b/test_docs/source/index.rst
+@@ -0,0 +1,7 @@
++Test Empty Tuple Documentation
++==============================
++
++.. automodule:: test_module_with_empty_tuple
++   :members:
++   :undoc-members:
++   :show-inheritance:
+diff --git a/test_empty_tuple_annotation.py b/test_empty_tuple_annotation.py
+new file mode 100644
+index 000000000..acf4a3509
+--- /dev/null
++++ b/test_empty_tuple_annotation.py
+@@ -0,0 +1,58 @@
++"""Test for empty tuple annotation fix."""
++import pytest
++from sphinx.domains.python import _parse_annotation
++
++
++def test_empty_tuple_annotation():
++    """Test that empty tuple annotations don't cause IndexError."""
++    # Test empty tuple
++    result = _parse_annotation("Tuple[()]")
++    assert len(result) == 3  # Tuple, [, ]
++    
++    # Verify the structure
++    assert result[0].astext() == "Tuple"
++    assert result[1].astext() == "["
++    assert result[2].astext() == "]"
++
++
++def test_empty_list_annotation():
++    """Test that empty list annotations don't cause IndexError."""
++    # Test empty list
++    result = _parse_annotation("List[]")
++    assert len(result) == 1  # List[]
++    assert result[0].astext() == "List[]"
++
++
++def test_non_empty_containers():
++    """Test that non-empty containers still work correctly."""
++    # Test non-empty tuple
++    result = _parse_annotation("Tuple[int, str]")
++    assert len(result) == 6  # Tuple, [, int, ,, str, ]
++    assert result[0].astext() == "Tuple"
++    assert result[2].astext() == "int"
++    assert result[4].astext() == "str"
++    
++    # Test non-empty list
++    result = _parse_annotation("List[int]")
++    assert len(result) == 4  # List, [, int, ]
++    assert result[0].astext() == "List"
++    assert result[2].astext() == "int"
++
++
++def test_nested_empty_containers():
++    """Test nested empty containers."""
++    # Tuple containing empty tuple
++    result = _parse_annotation("Tuple[Tuple[()]]")
++    assert len(result) == 6  # Tuple, [, Tuple, [, ], ]
++    
++    # List containing empty tuple
++    result = _parse_annotation("List[Tuple[()]]")
++    assert len(result) == 6  # List, [, Tuple, [, ], ]
++
++
++if __name__ == "__main__":
++    test_empty_tuple_annotation()
++    test_empty_list_annotation()
++    test_non_empty_containers()
++    test_nested_empty_containers()
++    print("All tests passed!")
+diff --git a/test_empty_tuple_bug.py b/test_empty_tuple_bug.py
+new file mode 100644
+index 000000000..bcddc7ff5
+--- /dev/null
++++ b/test_empty_tuple_bug.py
+@@ -0,0 +1,26 @@
++"""Test script to reproduce the empty tuple annotation bug."""
++import ast
++from sphinx.domains.python import unparse
++
++# Test case 1: Empty tuple
++empty_tuple_str = "Tuple[()]"
++try:
++    node = ast.parse(empty_tuple_str, mode='eval').body
++    result = unparse(node)
++    print(f"Success! Empty tuple unparsed: {result}")
++except IndexError as e:
++    print(f"Error with empty tuple: {e}")
++
++# Test case 2: Non-empty tuple for comparison
++non_empty_tuple_str = "Tuple[int, str]"
++try:
++    node = ast.parse(non_empty_tuple_str, mode='eval').body
++    result = unparse(node)
++    print(f"Success! Non-empty tuple unparsed: {result}")
++except IndexError as e:
++    print(f"Error with non-empty tuple: {e}")
++
++# Test case 3: Let's see what the AST looks like for empty tuple
++empty_tuple_ast = ast.parse("Tuple[()]", mode='eval').body
++print("\nAST dump for Tuple[()]:")
++print(ast.dump(empty_tuple_ast, indent=2))
+diff --git a/test_empty_tuple_fix.py b/test_empty_tuple_fix.py
+new file mode 100644
+index 000000000..7e39c1709
+--- /dev/null
++++ b/test_empty_tuple_fix.py
+@@ -0,0 +1,31 @@
++"""Test script to reproduce and test the empty tuple annotation bug."""
++from typing import Tuple
++
++def foo() -> Tuple[()]:
++    """Sample function with empty tuple return type."""
++    return ()
++
++def bar() -> Tuple[int, str]:
++    """Sample function with non-empty tuple return type."""
++    return (1, "test")
++
++# Let's test the _parse_annotation function directly
++from sphinx.domains.python import _parse_annotation
++
++# Test case 1: Empty tuple
++print("Testing empty tuple annotation...")
++try:
++    result = _parse_annotation("Tuple[()]")
++    print(f"Success! Result: {result}")
++except IndexError as e:
++    print(f"Error with empty tuple: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test case 2: Non-empty tuple
++print("\nTesting non-empty tuple annotation...")
++try:
++    result = _parse_annotation("Tuple[int, str]")
++    print(f"Success! Result: {result}")
++except IndexError as e:
++    print(f"Error with non-empty tuple: {e}")
+diff --git a/test_exact_scenario.py b/test_exact_scenario.py
+new file mode 100644
+index 000000000..a52f3d2d8
+--- /dev/null
++++ b/test_exact_scenario.py
+@@ -0,0 +1,23 @@
++"""Test the exact scenario from the problem statement."""
++from typing import Tuple
++
++def foo() -> Tuple[()]:
++    """Sample text."""
++    return ()
++
++# Test that Sphinx can parse this without error
++from sphinx.domains.python import _parse_annotation
++
++try:
++    result = _parse_annotation("Tuple[()]")
++    print("SUCCESS: Empty tuple annotation parsed correctly!")
++    print(f"Parsed nodes: {[node.astext() for node in result]}")
++    print(f"Full result: {result}")
++except IndexError as e:
++    print(f"FAILED with IndexError: {e}")
++    import traceback
++    traceback.print_exc()
++except Exception as e:
++    print(f"FAILED with unexpected error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_module_with_empty_tuple.py b/test_module_with_empty_tuple.py
+new file mode 100644
+index 000000000..fecd73b59
+--- /dev/null
++++ b/test_module_with_empty_tuple.py
+@@ -0,0 +1,39 @@
++"""Module with empty tuple type annotations for testing."""
++from typing import Tuple, List
++
++
++def foo() -> Tuple[()]:
++    """Sample function returning an empty tuple.
++    
++    Returns:
++        Tuple[()]: An empty tuple.
++    """
++    return ()
++
++
++def bar(x: List) -> Tuple[int, str]:
++    """Sample function with empty list parameter.
++    
++    Args:
++        x: A list.
++        
++    Returns:
++        Tuple[int, str]: A tuple with int and string.
++    """
++    return (42, "test")
++
++
++class MyClass:
++    """A class with methods using empty container annotations."""
++    
++    def method1(self) -> Tuple[()]:
++        """Method returning empty tuple."""
++        return ()
++    
++    def method2(self, items: List[Tuple[()]]) -> None:
++        """Method accepting list of empty tuples.
++        
++        Args:
++            items: A list of empty tuples.
++        """
++        pass
+diff --git a/test_parse_annotation_directly.py b/test_parse_annotation_directly.py
+new file mode 100644
+index 000000000..30d76c6c8
+--- /dev/null
++++ b/test_parse_annotation_directly.py
+@@ -0,0 +1,12 @@
++"""Direct test of _parse_annotation with empty tuple."""
++from sphinx.domains.python import _parse_annotation
++
++# This was the original issue - it should not raise IndexError anymore
++try:
++    result = _parse_annotation("Tuple[()]")
++    print("SUCCESS: Empty tuple annotation parsed without error!")
++    print(f"Result nodes: {[node.astext() for node in result]}")
++except IndexError as e:
++    print(f"FAILED: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/tests/test_domain_py.py b/tests/test_domain_py.py
+index cc3d3cf53..c1060a0b7 100644
+--- a/tests/test_domain_py.py
++++ b/tests/test_domain_py.py
+@@ -272,6 +272,12 @@ def test_parse_annotation():
+     assert_node(doctree, ([pending_xref, "None"],))
+     assert_node(doctree[0], pending_xref, refdomain="py", reftype="obj", reftarget="None")
+ 
++    # Empty tuple annotation
++    doctree = _parse_annotation("Tuple[()]")
++    assert_node(doctree, ([pending_xref, "Tuple"],
++                          [desc_sig_punctuation, "["],
++                          [desc_sig_punctuation, "]"]))
++
+ 
+ 
+ def test_pyfunction_signature(app):

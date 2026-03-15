@@ -1,0 +1,235 @@
+diff --git a/astropy/units/decorators.py b/astropy/units/decorators.py
+index 8bece5a850..0d725d3e3f 100644
+--- a/astropy/units/decorators.py
++++ b/astropy/units/decorators.py
+@@ -221,6 +221,9 @@ class QuantityInput:
+             with add_enabled_equivalencies(self.equivalencies):
+                 return_ = wrapped_function(*func_args, **func_kwargs)
+             if wrapped_signature.return_annotation is not inspect.Signature.empty:
++                # If return annotation is None, don't try to convert units
++                if wrapped_signature.return_annotation is None:
++                    return return_
+                 return return_.to(wrapped_signature.return_annotation)
+             else:
+                 return return_
+diff --git a/astropy/units/tests/py3_test_quantity_annotations.py b/astropy/units/tests/py3_test_quantity_annotations.py
+index 4956b0ec19..c3c46b1a1d 100644
+--- a/astropy/units/tests/py3_test_quantity_annotations.py
++++ b/astropy/units/tests/py3_test_quantity_annotations.py
+@@ -285,3 +285,32 @@ def test_return_annotation():
+     assert solarx.unit is u.deg
+     """
+     return src
++
++
++@py3only
++def test_none_return_annotation():
++    src = """
++    @u.quantity_input
++    def myfunc_args(solarx: u.arcsec) -> None:
++        # Function that returns None
++        return None
++
++    result = myfunc_args(1*u.arcsec)
++    assert result is None
++    """
++    return src
++
++
++@py3only 
++def test_constructor_none_return_annotation():
++    src = """
++    class TestClass:
++        @u.quantity_input
++        def __init__(self, voltage: u.V) -> None:
++            self.voltage = voltage
++    
++    # Should not raise an error
++    obj = TestClass(1.*u.V)
++    assert obj.voltage == 1.*u.V
++    """
++    return src
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..e6560557b1
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,87 @@
++import astropy.units as u
++import pytest
++
++
++class TestNoneReturnAnnotation:
++    """Test cases for None return type annotation"""
++    
++    def test_constructor_with_none_return(self):
++        """Test that constructors with -> None annotation work"""
++        @u.quantity_input
++        def __init__(self, voltage: u.V) -> None:
++            self.voltage = voltage
++            
++        # Should not raise an error
++        __init__(self, 1.*u.V)
++        assert self.voltage == 1.*u.V
++    
++    def test_function_returning_none_with_annotation(self):
++        """Test that functions returning None with -> None annotation work"""
++        @u.quantity_input
++        def process_voltage(voltage: u.V) -> None:
++            # Do some processing but return None
++            _ = voltage * 2
++            return None
++            
++        result = process_voltage(1.*u.V)
++        assert result is None
++    
++    def test_function_returning_quantity_with_unit_annotation(self):
++        """Test that functions returning quantities with unit annotations still work"""
++        @u.quantity_input
++        def double_voltage(voltage: u.V) -> u.mV:
++            return voltage * 2
++            
++        result = double_voltage(1.*u.V)
++        assert result.unit == u.mV
++        assert result.value == 2000  # 2V = 2000mV
++    
++    def test_function_without_return_annotation(self):
++        """Test that functions without return annotations still work"""
++        @u.quantity_input
++        def process_voltage(voltage: u.V):
++            return voltage * 2
++            
++        result = process_voltage(1.*u.V)
++        assert result == 2.*u.V
++    
++    def test_mixed_none_and_quantity_returns(self):
++        """Test function that can return either None or a Quantity"""
++        @u.quantity_input(voltage=u.V)
++        def maybe_process(voltage, process) -> u.mV:
++            if process:
++                return voltage * 2
++            else:
++                # This should raise an error because we're returning None
++                # but the annotation says we should return u.mV
++                return None
++                
++        # This should work
++        result = maybe_process(1.*u.V, True)
++        assert result.unit == u.mV
++        
++        # This should raise AttributeError because None doesn't have .to()
++        with pytest.raises(AttributeError):
++            maybe_process(1.*u.V, False)
++
++
++if __name__ == '__main__':
++    test = TestNoneReturnAnnotation()
++    
++    # Run all tests
++    test.test_constructor_with_none_return()
++    print("✓ Constructor with None return annotation works")
++    
++    test.test_function_returning_none_with_annotation()
++    print("✓ Function returning None with None annotation works")
++    
++    test.test_function_returning_quantity_with_unit_annotation()
++    print("✓ Function returning quantity with unit annotation works")
++    
++    test.test_function_without_return_annotation()
++    print("✓ Function without return annotation works")
++    
++    test.test_mixed_none_and_quantity_returns()
++    print("✓ Mixed None and quantity returns behave correctly")
++    
++    print("\nAll tests passed!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..6b89ebe61f
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,66 @@
++import astropy.units as u
++import pytest
++
++
++def test_none_type_annotation_edge_cases():
++    """Test various edge cases with None type annotations"""
++    
++    # Test 1: Constructor with None return type
++    class TestClass1:
++        @u.quantity_input
++        def __init__(self, voltage: u.V) -> None:
++            self.voltage = voltage
++    
++    obj = TestClass1(5*u.V)
++    assert obj.voltage == 5*u.V
++    
++    # Test 2: Regular method with None return type
++    @u.quantity_input
++    def process_data(data: u.m) -> None:
++        # Process data but return nothing
++        processed = data * 2
++        return None
++    
++    result = process_data(10*u.m)
++    assert result is None
++    
++    # Test 3: Method that actually returns None (not just annotated)
++    @u.quantity_input
++    def maybe_process(value: u.s) -> None:
++        if value.value > 5:
++            return None
++        return None
++    
++    assert maybe_process(10*u.s) is None
++    assert maybe_process(1*u.s) is None
++    
++    # Test 4: Method without explicit return (implicit None)
++    @u.quantity_input
++    def implicit_none(value: u.kg) -> None:
++        x = value * 2
++        # No return statement - Python implicitly returns None
++    
++    assert implicit_none(5*u.kg) is None
++    
++    # Test 5: Verify that non-None annotations still work
++    @u.quantity_input
++    def convert_units(value: u.m) -> u.km:
++        return value
++    
++    result = convert_units(1000*u.m)
++    assert result.unit == u.km
++    assert result.value == 1.0
++    
++    # Test 6: Verify error is still raised when returning None with unit annotation
++    @u.quantity_input
++    def bad_return(value: u.m) -> u.km:
++        return None
++    
++    with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'to'"):
++        bad_return(1*u.m)
++    
++    print("All edge case tests passed!")
++
++
++if __name__ == '__main__':
++    test_none_type_annotation_edge_cases()
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..c0bf30f92b
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,13 @@
++import astropy.units as u
++
++
++class PoC(object):
++
++    @u.quantity_input
++    def __init__(self, voltage: u.V) -> None:
++        pass
++
++
++if __name__ == '__main__':
++    poc = PoC(1.*u.V)
++    print("Test passed!")

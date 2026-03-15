@@ -1,0 +1,418 @@
+diff --git a/check_properties.py b/check_properties.py
+new file mode 100644
+index 0000000000..83922f8ab3
+--- /dev/null
++++ b/check_properties.py
+@@ -0,0 +1,27 @@
++from sympy import I, S
++
++# Check properties of (1 + I)**2
++expr = (1 + I)**2
++print(f"Expression: {expr}")
++print(f"is_real: {expr.is_real}")
++print(f"is_imaginary: {expr.is_imaginary}")
++print(f"is_complex: {expr.is_complex}")
++print(f"(I*expr).is_real: {(S.ImaginaryUnit*expr).is_real}")
++
++# Check expanded form
++expanded = expr.expand()
++print(f"\nExpanded: {expanded}")
++print(f"Expanded is_real: {expanded.is_real}")
++print(f"Expanded is_imaginary: {expanded.is_imaginary}")
++print(f"Expanded is_complex: {expanded.is_complex}")
++
++# Check the full expression
++e = -2*I + (1 + I)**2
++print(f"\nFull expression: {e}")
++print(f"Args: {e.args}")
++for i, arg in enumerate(e.args):
++    print(f"  Arg {i}: {arg}")
++    print(f"    is_real: {arg.is_real}")
++    print(f"    is_imaginary: {arg.is_imaginary}")
++    print(f"    is_complex: {arg.is_complex}")
++    print(f"    (I*arg).is_real: {(S.ImaginaryUnit*arg).is_real}")
+diff --git a/debug_e5.py b/debug_e5.py
+new file mode 100644
+index 0000000000..ae76883fbe
+--- /dev/null
++++ b/debug_e5.py
+@@ -0,0 +1,10 @@
++from sympy import I, symbols
++
++x = symbols('x', real=True)
++e5 = x + I*x - x
++print(f"e5 = {e5}")
++print(f"e5.is_zero = {e5.is_zero}")
++print(f"e5 simplified = {e5.simplify()}")
++print(f"Args: {e5.args}")
++for arg in e5.args:
++    print(f"  {arg}: is_real={arg.is_real}, is_imaginary={arg.is_imaginary}")
+diff --git a/debug_is_zero.py b/debug_is_zero.py
+new file mode 100644
+index 0000000000..9dd7737209
+--- /dev/null
++++ b/debug_is_zero.py
+@@ -0,0 +1,56 @@
++from sympy import I, S
++
++# Debug the _eval_is_zero logic
++e = -2*I + (1 + I)**2
++print(f"Expression: {e}")
++print(f"Args: {e.args}")
++print(f"is_commutative: {e.is_commutative}")
++
++# Simulate the logic in _eval_is_zero
++nz = []
++z = 0
++im_or_z = False
++im = False
++
++for a in e.args:
++    print(f"\nProcessing arg: {a}")
++    if a.is_real:
++        print("  -> is_real")
++        if a.is_zero:
++            z += 1
++        elif a.is_zero is False:
++            nz.append(a)
++        else:
++            print("  -> is_zero is None, would return")
++    elif a.is_imaginary:
++        print("  -> is_imaginary")
++        im = True
++    elif (S.ImaginaryUnit*a).is_real:
++        print("  -> (I*a).is_real")
++        im_or_z = True
++    else:
++        print("  -> None of the above, would return")
++
++print(f"\nAfter processing:")
++print(f"z = {z}")
++print(f"nz = {nz}")
++print(f"im = {im}")
++print(f"im_or_z = {im_or_z}")
++print(f"len(args) = {len(e.args)}")
++
++if z == len(e.args):
++    print("Would return True (all zeros)")
++elif len(nz) == len(e.args):
++    print("Would return None (all non-zero reals)")
++else:
++    from sympy.core.add import Add
++    b = Add(*nz)
++    print(f"b = Add(*nz) = {b}")
++    print(f"b.is_zero = {b.is_zero}")
++    if b.is_zero:
++        if not im_or_z and not im:
++            print("Would return True")
++        if im and not im_or_z:
++            print("Would return False")
++    if b.is_zero is False:
++        print("Would return False")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..54bfbc3eb1
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,16 @@
++from sympy import I, simplify
++
++# Reproduce the issue
++e = -2*I + (1 + I)**2
++print(f"Expression e: {e}")
++print(f"e.is_zero: {e.is_zero}")
++print(f"Simplified e: {simplify(e)}")
++print(f"simplify(e).is_zero: {simplify(e).is_zero}")
++
++# Let's also check what (1 + I)**2 evaluates to
++expanded = (1 + I)**2
++print(f"\n(1 + I)**2 = {expanded}")
++print(f"Expanded form: {expanded.expand()}")
++
++# Manual calculation: (1 + I)^2 = 1 + 2I + I^2 = 1 + 2I - 1 = 2I
++# So -2I + 2I = 0
+diff --git a/sympy/core/add.py b/sympy/core/add.py
+index 83a5f2aedc..11e8930b8e 100644
+--- a/sympy/core/add.py
++++ b/sympy/core/add.py
+@@ -560,8 +560,10 @@ def _eval_is_zero(self):
+         if b.is_zero:
+             if not im_or_z and not im:
+                 return True
+-            if im and not im_or_z:
+-                return False
++            # Don't return False when we have only imaginary terms
++            # They might cancel out, so return None (undecidable)
++            if im and not im_or_z and len(nz) == 0:
++                return None
+         if b.is_zero is False:
+             return False
+ 
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..460073d173
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,74 @@
++"""Comprehensive tests for the is_zero fix"""
++from sympy import I, symbols, sqrt, sin, cos, exp, log, simplify
++
++def test_comprehensive_is_zero():
++    """Test various cases for is_zero with complex expressions"""
++    
++    # Test 1: Original issue
++    e1 = -2*I + (1 + I)**2
++    assert e1.is_zero is None
++    assert simplify(e1) == 0
++    
++    # Test 2: Pure imaginary cancellation
++    e2 = 5*I - 5*I
++    assert e2.is_zero is True
++    
++    # Test 3: Pure imaginary non-cancellation
++    e3 = 3*I + 2*I
++    assert e3.is_zero is False
++    
++    # Test 4: Mixed real and imaginary
++    e4 = 1 + I - 1
++    assert e4.is_zero is False
++    
++    # Test 5: Complex expression with symbols
++    x = symbols('x', real=True, nonzero=True)
++    e5 = x + I*x - x
++    # This simplifies to I*x, which is not an Add
++    assert e5.is_zero is False
++    
++    # Test 6: Zero real part with imaginary
++    e6 = 0 + 3*I
++    assert e6.is_zero is False
++    
++    # Test 7: Multiple imaginary terms that might cancel
++    e7 = I + 2*I - 3*I + (1 - I)**2 - (1 - 2*I + I**2)
++    # (1-I)^2 = 1 - 2I + I^2 = 1 - 2I - 1 = -2I
++    # So we have: I + 2I - 3I + (-2I) - (1 - 2I - 1) = 0 + (-2I) - (-2I) = 0
++    assert e7.is_zero is None or e7.is_zero is True
++    
++    # Test 8: Nested complex expressions
++    e8 = (1 + I)**3 - (1 + 3*I + 3*I**2 + I**3)
++    # (1+I)^3 = 1 + 3I + 3I^2 + I^3 = 1 + 3I - 3 - I = -2 + 2I
++    # So this is: -2 + 2I - (1 + 3I - 3 - I) = -2 + 2I - (-2 + 2I) = 0
++    assert simplify(e8) == 0
++    
++    # Test 9: Ensure we don't break real number handling
++    from sympy import S
++    e9 = S(5) - S(3) - S(2)
++    assert e9.is_zero is True
++    
++    # Test 10: Ensure we don't break symbol handling
++    y = symbols('y')
++    e10 = y - y
++    assert e10.is_zero is True
++    
++    # Test 11: Complex with unknown symbols
++    z = symbols('z')  # no assumptions
++    e11 = z + I*z - z
++    assert e11.is_zero is None  # Can't determine without knowing if z is real
++    
++    # Test 12: Imaginary unit operations
++    e12 = I**2 + 1
++    assert e12.is_zero is True
++    
++    # Test 13: More complex powers
++    e13 = (2 + 3*I)**2 - (4 + 12*I - 9)
++    # (2+3I)^2 = 4 + 12I + 9I^2 = 4 + 12I - 9 = -5 + 12I
++    # So: -5 + 12I - (-5 + 12I) = 0
++    assert simplify(e13) == 0
++    
++    print("All comprehensive tests passed!")
++
++if __name__ == "__main__":
++    test_comprehensive_is_zero()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..dd96b0fbe7
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,48 @@
++from sympy import I, simplify, S
++
++# Test cases for the is_zero fix
++def test_is_zero_complex():
++    # Original failing case
++    e = -2*I + (1 + I)**2
++    print(f"Test 1: {e}")
++    print(f"  is_zero: {e.is_zero}")
++    print(f"  simplify(e): {simplify(e)}")
++    print(f"  simplify(e).is_zero: {simplify(e).is_zero}")
++    
++    # The expression should evaluate to zero
++    # (1 + I)^2 = 1 + 2I + I^2 = 1 + 2I - 1 = 2I
++    # So -2I + 2I = 0
++    
++    # After fix, e.is_zero should be None (undecidable) not False
++    assert e.is_zero is None, f"Expected None, got {e.is_zero}"
++    assert simplify(e).is_zero is True
++    
++    # Test some other cases
++    # Pure imaginary that doesn't cancel
++    e2 = 3*I + 2*I
++    print(f"\nTest 2: {e2}")
++    print(f"  is_zero: {e2.is_zero}")
++    assert e2.is_zero is False
++    
++    # Pure imaginary that cancels
++    e3 = 3*I - 3*I
++    print(f"\nTest 3: {e3}")
++    print(f"  is_zero: {e3.is_zero}")
++    assert e3.is_zero is True
++    
++    # Mixed real and imaginary
++    e4 = 1 + I - 1
++    print(f"\nTest 4: {e4}")
++    print(f"  is_zero: {e4.is_zero}")
++    assert e4.is_zero is False
++    
++    # Complex expression that might be zero
++    e5 = (1 + I)**2 - 2*I
++    print(f"\nTest 5: {e5}")
++    print(f"  is_zero: {e5.is_zero}")
++    # This should be None because it's not immediately clear if it's zero
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_is_zero_complex()
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 0000000000..59614ce687
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,45 @@
++"""Test for the is_zero fix on complex integers"""
++from sympy import I, simplify, symbols, sqrt
++
++def test_is_zero_complex_issue():
++    """Test the specific issue from the problem statement"""
++    # Original failing case
++    e = -2*I + (1 + I)**2
++    # Should return None (undecidable) not False
++    assert e.is_zero is None
++    # After simplification it should be True
++    assert simplify(e).is_zero is True
++    
++    # Additional test cases
++    
++    # Case 1: Pure imaginary terms that cancel
++    e1 = 3*I - 3*I
++    assert e1.is_zero is True
++    
++    # Case 2: Pure imaginary terms that don't cancel
++    e2 = 3*I + 2*I
++    assert e2.is_zero is False
++    
++    # Case 3: Complex expression with imaginary terms that might cancel
++    e3 = I*sqrt(2) - I*sqrt(2)
++    assert e3.is_zero is True
++    
++    # Case 4: Mix of real and imaginary where real part is zero
++    e4 = 5 - 5 + 3*I
++    assert e4.is_zero is False
++    
++    # Case 5: Complex power that evaluates to pure imaginary
++    e5 = (1 + I)**2 - 2*I
++    # This should be None because it's not immediately obvious
++    assert e5.is_zero is None
++    # But after simplification it should be 0
++    assert simplify(e5).is_zero is True
++    
++    # Case 6: More complex expression
++    e6 = (2 + 3*I)**2 - (4 + 12*I - 9)
++    assert e6.is_zero is None or e6.is_zero is True
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_is_zero_complex_issue()
+diff --git a/test_matrix_rank.py b/test_matrix_rank.py
+new file mode 100644
+index 0000000000..52f4be57df
+--- /dev/null
++++ b/test_matrix_rank.py
+@@ -0,0 +1,48 @@
++"""Test that the is_zero fix helps with matrix rank determination"""
++from sympy import Matrix, I, simplify
++
++def test_matrix_rank_with_complex():
++    """Test matrix rank with complex entries that might be zero"""
++    # Create a matrix where some entries might be zero after simplification
++    M = Matrix([
++        [1, 2, -2*I + (1 + I)**2],
++        [0, 1, 3],
++        [0, 0, 1]
++    ])
++    
++    print(f"Matrix M:")
++    print(M)
++    
++    # The third entry in the first row should simplify to 0
++    print(f"\nM[0,2] = {M[0,2]}")
++    print(f"M[0,2].is_zero = {M[0,2].is_zero}")
++    print(f"simplify(M[0,2]) = {simplify(M[0,2])}")
++    
++    # Simplify the matrix
++    M_simplified = simplify(M)
++    print(f"\nSimplified Matrix:")
++    print(M_simplified)
++    
++    # Check rank
++    print(f"\nRank of M: {M.rank()}")
++    print(f"Rank of simplified M: {M_simplified.rank()}")
++    
++    # Another example with a matrix that should have reduced rank
++    M2 = Matrix([
++        [1, I, -2*I + (1 + I)**2],
++        [2, 2*I, -4*I + 2*(1 + I)**2],
++        [0, 0, 1]
++    ])
++    
++    print(f"\n\nMatrix M2:")
++    print(M2)
++    
++    M2_simplified = simplify(M2)
++    print(f"\nSimplified Matrix M2:")
++    print(M2_simplified)
++    
++    print(f"\nRank of M2: {M2.rank()}")
++    print(f"Rank of simplified M2: {M2_simplified.rank()}")
++
++if __name__ == "__main__":
++    test_matrix_rank_with_complex()
+diff --git a/test_pr_issue.py b/test_pr_issue.py
+new file mode 100644
+index 0000000000..30d0ce72ce
+--- /dev/null
++++ b/test_pr_issue.py
+@@ -0,0 +1,23 @@
++"""Test for the specific issue mentioned in the PR"""
++from sympy import I, simplify
++
++def test_pr_issue():
++    """Test the exact example from the PR description"""
++    e = -2*I + (1 + I)**2
++    
++    # Before the fix, e.is_zero would incorrectly return False
++    # After the fix, it should return None (undecidable)
++    print(f"e = {e}")
++    print(f"e.is_zero = {e.is_zero}")
++    assert e.is_zero is None, f"Expected None, got {e.is_zero}"
++    
++    # Simplification should show it's actually zero
++    simplified = simplify(e)
++    print(f"simplify(e) = {simplified}")
++    print(f"simplify(e).is_zero = {simplified.is_zero}")
++    assert simplified.is_zero is True
++    
++    print("\nPR issue test passed!")
++
++if __name__ == "__main__":
++    test_pr_issue()

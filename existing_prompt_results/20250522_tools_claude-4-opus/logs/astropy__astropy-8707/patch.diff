@@ -1,0 +1,579 @@
+diff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py
+index 8c1ac5d738..ec21beeb48 100644
+--- a/astropy/io/fits/card.py
++++ b/astropy/io/fits/card.py
+@@ -547,12 +547,22 @@ class Card(_Verify):
+     @classmethod
+     def fromstring(cls, image):
+         """
+-        Construct a `Card` object from a (raw) string. It will pad the string
++        Construct a `Card` object from a (raw) string or bytes. It will pad the string
+         if it is not the length of a card image (80 columns).  If the card
+         image is longer than 80 columns, assume it contains ``CONTINUE``
+         card(s).
++        
++        Parameters
++        ----------
++        image : str or bytes
++            String or bytes containing the card image.
+         """
+ 
++        # Convert bytes to str if necessary
++        if isinstance(image, bytes):
++            from .util import decode_ascii
++            image = decode_ascii(image)
++
+         card = cls()
+         card._image = _pad(image)
+         card._verified = False
+diff --git a/astropy/io/fits/header.py b/astropy/io/fits/header.py
+index ad07e6d52d..3d8dbf8fe6 100644
+--- a/astropy/io/fits/header.py
++++ b/astropy/io/fits/header.py
+@@ -334,7 +334,7 @@ class Header:
+ 
+         Parameters
+         ----------
+-        data : str
++        data : str or bytes
+            String containing the entire header.
+ 
+         sep : str, optional
+@@ -348,6 +348,12 @@ class Header:
+             A new `Header` instance.
+         """
+ 
++        # Convert bytes to str if necessary
++        if isinstance(data, bytes):
++            data = decode_ascii(data)
++        if isinstance(sep, bytes):
++            sep = decode_ascii(sep)
++
+         cards = []
+ 
+         # If the card separator contains characters that may validly appear in
+diff --git a/debug_header.py b/debug_header.py
+new file mode 100644
+index 0000000000..cf762de3f0
+--- /dev/null
++++ b/debug_header.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python
++"""Debug script to see what's happening with header parsing."""
++
++from astropy.io import fits
++
++# Create a proper FITS header as bytes (each card is exactly 80 chars)
++header_lines = [
++    "SIMPLE  =                    T / Standard FITS format                           ",
++    "BITPIX  =                    8 / Number of bits per pixel                       ",
++    "NAXIS   =                    0 / Number of axes                                 ",
++    "END                                                                             "
++]
++
++# Check lengths
++for i, line in enumerate(header_lines):
++    print(f"Line {i}: len={len(line)}, repr={repr(line)}")
++
++# Pad to FITS block size (2880 bytes = 36 cards of 80 chars each)
++while len(header_lines) < 36:
++    header_lines.append(" " * 80)
++
++header_bytes = b''.join(line.encode('ascii') for line in header_lines)
++print(f"\nTotal header length: {len(header_bytes)} (should be 2880)")
++
++# Test parsing
++header = fits.Header.fromstring(header_bytes)
++print(f"\nParsed header has {len(header)} cards")
++for i, key in enumerate(header):
++    if key:  # Skip empty keys
++        print(f"Card {i}: key={repr(key)}, val={repr(header[key])}, comment={repr(header.comments[key])}")
+diff --git a/test_bytes_support.py b/test_bytes_support.py
+new file mode 100644
+index 0000000000..de1c169b9a
+--- /dev/null
++++ b/test_bytes_support.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++"""Test to be added to the test suite for bytes support in Header.fromstring and Card.fromstring."""
++
++import pytest
++from astropy.io import fits
++from astropy.utils.exceptions import AstropyUserWarning
++import warnings
++
++
++def test_header_fromstring_bytes():
++    """Test that Header.fromstring accepts bytes input."""
++    # Create a proper FITS header as bytes
++    header_lines = [
++        b"SIMPLE  =                    T / Standard FITS format                           ",
++        b"BITPIX  =                    8 / Number of bits per pixel                       ",
++        b"NAXIS   =                    0 / Number of axes                                 ",
++        b"END                                                                             "
++    ]
++    
++    # Pad to FITS block size
++    while len(header_lines) < 36:
++        header_lines.append(b" " * 80)
++    
++    header_bytes = b''.join(header_lines)
++    
++    # Test with bytes
++    header = fits.Header.fromstring(header_bytes)
++    assert header['SIMPLE'] == True
++    assert header['BITPIX'] == 8
++    assert header['NAXIS'] == 0
++    
++    # Test with string (should still work)
++    header_str = header_bytes.decode('ascii')
++    header2 = fits.Header.fromstring(header_str)
++    assert header == header2
++    
++    # Test with bytes and separator
++    header_with_sep = b"SIMPLE  =                    T\nBITPIX  =                    8\nEND"
++    header3 = fits.Header.fromstring(header_with_sep, sep=b'\n')
++    assert len(header3) == 2
++    assert header3['SIMPLE'] == True
++    assert header3['BITPIX'] == 8
++
++
++def test_card_fromstring_bytes():
++    """Test that Card.fromstring accepts bytes input."""
++    # Test with bytes
++    card_bytes = b"SIMPLE  =                    T / Standard FITS format                           "
++    card = fits.Card.fromstring(card_bytes)
++    assert card.keyword == 'SIMPLE'
++    assert card.value == True
++    assert card.comment == 'Standard FITS format'
++    
++    # Test with string (should still work)
++    card_str = card_bytes.decode('ascii')
++    card2 = fits.Card.fromstring(card_str)
++    assert card.keyword == card2.keyword
++    assert card.value == card2.value
++    assert card.comment == card2.comment
++    
++    # Test commentary card
++    comment_bytes = b"COMMENT This is a test comment                                                  "
++    card3 = fits.Card.fromstring(comment_bytes)
++    assert card3.keyword == 'COMMENT'
++    assert card3.value == 'This is a test comment'
++
++
++def test_non_ascii_bytes_warning():
++    """Test that non-ASCII bytes raise appropriate warning."""
++    # Header with non-ASCII bytes
++    header_with_non_ascii = b"COMMENT = '\xc3\xa9'                                                              " + \
++                            b"END                                                                             "
++    header_with_non_ascii += b' ' * (2880 - len(header_with_non_ascii))
++    
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        header = fits.Header.fromstring(header_with_non_ascii)
++        
++        # Check that warning was raised
++        assert len(w) == 1
++        assert issubclass(w[0].category, AstropyUserWarning)
++        assert 'non-ASCII characters' in str(w[0].message)
++    
++    # Card with non-ASCII bytes
++    card_with_non_ascii = b"COMMENT = '\xc3\xa9'                                                              "
++    
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        card = fits.Card.fromstring(card_with_non_ascii)
++        
++        assert len(w) == 1
++        assert issubclass(w[0].category, AstropyUserWarning)
++
++
++if __name__ == '__main__':
++    test_header_fromstring_bytes()
++    print("✓ test_header_fromstring_bytes passed")
++    
++    test_card_fromstring_bytes()
++    print("✓ test_card_fromstring_bytes passed")
++    
++    test_non_ascii_bytes_warning()
++    print("✓ test_non_ascii_bytes_warning passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_comprehensive_bytes.py b/test_comprehensive_bytes.py
+new file mode 100644
+index 0000000000..fd16817f37
+--- /dev/null
++++ b/test_comprehensive_bytes.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python
++"""Comprehensive test for Header.fromstring and Card.fromstring with bytes support."""
++
++import sys
++from astropy.io import fits
++
++def test_header_fromstring():
++    """Test Header.fromstring with various inputs."""
++    print("=" * 60)
++    print("Testing Header.fromstring")
++    print("=" * 60)
++    
++    # Test 1: Basic bytes input
++    print("\n1. Basic bytes input:")
++    header_bytes = b"SIMPLE  =                    T / Standard FITS format                           " + \
++                   b"BITPIX  =                    8 / Number of bits per pixel                       " + \
++                   b"NAXIS   =                    0 / Number of axes                                 " + \
++                   b"END                                                                             "
++    header_bytes += b' ' * (2880 - len(header_bytes))
++    
++    header = fits.Header.fromstring(header_bytes)
++    assert header['SIMPLE'] == True
++    assert header['BITPIX'] == 8
++    assert header['NAXIS'] == 0
++    print("   ✓ Basic bytes input works")
++    
++    # Test 2: String input (should still work)
++    print("\n2. String input:")
++    header_str = header_bytes.decode('ascii')
++    header = fits.Header.fromstring(header_str)
++    assert header['SIMPLE'] == True
++    print("   ✓ String input still works")
++    
++    # Test 3: Bytes with separator
++    print("\n3. Bytes with separator:")
++    header_with_sep = b"SIMPLE  =                    T\nBITPIX  =                    8\nNAXIS   =                    0\nEND"
++    header = fits.Header.fromstring(header_with_sep, sep=b'\n')
++    assert len(header) == 3
++    print("   ✓ Bytes with byte separator works")
++    
++    # Test 4: String separator with bytes data
++    print("\n4. String separator with bytes data:")
++    header = fits.Header.fromstring(header_with_sep, sep='\n')
++    assert len(header) == 3
++    print("   ✓ String separator with bytes data works")
++    
++    # Test 5: Empty header
++    print("\n5. Empty header:")
++    empty_header = b"END" + b' ' * 77
++    empty_header += b' ' * (2880 - len(empty_header))
++    header = fits.Header.fromstring(empty_header)
++    assert len(header) == 0
++    print("   ✓ Empty header works")
++
++def test_card_fromstring():
++    """Test Card.fromstring with various inputs."""
++    print("\n" + "=" * 60)
++    print("Testing Card.fromstring")
++    print("=" * 60)
++    
++    # Test 1: Basic bytes input
++    print("\n1. Basic bytes input:")
++    card_bytes = b"SIMPLE  =                    T / Standard FITS format                           "
++    card = fits.Card.fromstring(card_bytes)
++    assert card.keyword == 'SIMPLE'
++    assert card.value == True
++    assert card.comment == 'Standard FITS format'
++    print("   ✓ Basic bytes input works")
++    
++    # Test 2: String input (should still work)
++    print("\n2. String input:")
++    card_str = card_bytes.decode('ascii')
++    card = fits.Card.fromstring(card_str)
++    assert card.keyword == 'SIMPLE'
++    print("   ✓ String input still works")
++    
++    # Test 3: Commentary card
++    print("\n3. Commentary card:")
++    comment_bytes = b"COMMENT This is a comment                                                       "
++    card = fits.Card.fromstring(comment_bytes)
++    assert card.keyword == 'COMMENT'
++    assert card.value == 'This is a comment'
++    print("   ✓ Commentary card works")
++    
++    # Test 4: HIERARCH card
++    print("\n4. HIERARCH card:")
++    hierarch_bytes = b"HIERARCH ESO DET CHIP PXSPACE = 5e6                                            "
++    card = fits.Card.fromstring(hierarch_bytes)
++    assert card.keyword == 'ESO DET CHIP PXSPACE'
++    assert card.value == 5e6
++    print("   ✓ HIERARCH card works")
++    
++    # Test 5: Card with padding
++    print("\n5. Card with padding:")
++    short_card = b"NAXIS   =                    2"
++    card = fits.Card.fromstring(short_card)
++    assert card.keyword == 'NAXIS'
++    assert card.value == 2
++    print("   ✓ Card with padding works")
++
++def test_edge_cases():
++    """Test edge cases and error conditions."""
++    print("\n" + "=" * 60)
++    print("Testing edge cases")
++    print("=" * 60)
++    
++    # Test 1: Mixed bytes and string in Header.fromstring
++    print("\n1. Mixed types:")
++    try:
++        # This should work - bytes data with string separator
++        header_bytes = b"SIMPLE  =                    T\nEND"
++        header = fits.Header.fromstring(header_bytes, sep='\n')
++        print("   ✓ Bytes data with string separator works")
++    except Exception as e:
++        print(f"   ✗ Failed: {e}")
++    
++    # Test 2: Long card (CONTINUE cards)
++    print("\n2. Long card:")
++    long_value = 'A' * 100
++    card = fits.Card('LONGKEY', long_value)
++    card_str = str(card)
++    card_bytes = card_str.encode('ascii')
++    
++    # This should handle CONTINUE cards properly
++    new_card = fits.Card.fromstring(card_bytes)
++    assert new_card.keyword == 'LONGKEY'
++    assert new_card.value == long_value
++    print("   ✓ Long card with CONTINUE works")
++
++if __name__ == '__main__':
++    test_header_fromstring()
++    test_card_fromstring()
++    test_edge_cases()
++    print("\n" + "=" * 60)
++    print("All tests passed! ✓")
++    print("=" * 60)
+diff --git a/test_fromfile_compatibility.py b/test_fromfile_compatibility.py
+new file mode 100644
+index 0000000000..3a5f79865d
+--- /dev/null
++++ b/test_fromfile_compatibility.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""Test that Header.fromfile still works with both text and binary mode files."""
++
++import tempfile
++import os
++from astropy.io import fits
++
++# Create a proper FITS header
++header_lines = [
++    "SIMPLE  =                    T / Standard FITS format                           ",
++    "BITPIX  =                    8 / Number of bits per pixel                       ",
++    "NAXIS   =                    0 / Number of axes                                 ",
++    "END                                                                             "
++]
++
++# Pad to FITS block size
++while len(header_lines) < 36:
++    header_lines.append(" " * 80)
++
++header_str = ''.join(header_lines)
++header_bytes = header_str.encode('ascii')
++
++# Test with binary mode file
++print("Testing Header.fromfile with binary mode file...")
++with tempfile.NamedTemporaryFile(mode='wb', delete=False) as f:
++    f.write(header_bytes)
++    fname = f.name
++
++try:
++    with open(fname, 'rb') as f:
++        header = fits.Header.fromfile(f)
++    print("SUCCESS: Header.fromfile works with binary mode")
++    print(f"Header keywords: {list(header.keys())}")
++finally:
++    os.unlink(fname)
++
++# Test with text mode file
++print("\nTesting Header.fromfile with text mode file...")
++with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
++    f.write(header_str)
++    fname = f.name
++
++try:
++    with open(fname, 'r') as f:
++        header = fits.Header.fromfile(f)
++    print("SUCCESS: Header.fromfile works with text mode")
++    print(f"Header keywords: {list(header.keys())}")
++finally:
++    os.unlink(fname)
+diff --git a/test_fromstring_bytes.py b/test_fromstring_bytes.py
+new file mode 100644
+index 0000000000..a2047749a8
+--- /dev/null
++++ b/test_fromstring_bytes.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Test script to reproduce the issue with Header.fromstring and Card.fromstring not accepting bytes."""
++
++import sys
++from astropy.io import fits
++
++# Create a simple FITS header as bytes
++header_bytes = b"SIMPLE  =                    T / Standard FITS format                           BITPIX  =                    8 / Number of bits per pixel                      NAXIS   =                    0 / Number of axes                                END                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             "
++
++# Test Header.fromstring with bytes
++print("Testing Header.fromstring with bytes...")
++try:
++    header = fits.Header.fromstring(header_bytes)
++    print("SUCCESS: Header.fromstring accepts bytes")
++    print(f"Header keywords: {list(header.keys())}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Header.fromstring with string (should still work)
++print("\nTesting Header.fromstring with string...")
++try:
++    header_str = header_bytes.decode('ascii')
++    header = fits.Header.fromstring(header_str)
++    print("SUCCESS: Header.fromstring accepts string")
++    print(f"Header keywords: {list(header.keys())}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Card.fromstring with bytes
++print("\nTesting Card.fromstring with bytes...")
++card_bytes = b"SIMPLE  =                    T / Standard FITS format                           "
++try:
++    card = fits.Card.fromstring(card_bytes)
++    print("SUCCESS: Card.fromstring accepts bytes")
++    print(f"Card: {repr(card)}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Card.fromstring with string (should still work)
++print("\nTesting Card.fromstring with string...")
++try:
++    card_str = card_bytes.decode('ascii')
++    card = fits.Card.fromstring(card_str)
++    print("SUCCESS: Card.fromstring accepts string")
++    print(f"Card: {repr(card)}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
+diff --git a/test_fromstring_bytes_proper.py b/test_fromstring_bytes_proper.py
+new file mode 100644
+index 0000000000..386701d729
+--- /dev/null
++++ b/test_fromstring_bytes_proper.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python
++"""Test script to reproduce the issue with Header.fromstring and Card.fromstring not accepting bytes."""
++
++import sys
++from astropy.io import fits
++
++# Create a proper FITS header as bytes (each card is exactly 80 chars)
++header_lines = [
++    "SIMPLE  =                    T / Standard FITS format                           ",
++    "BITPIX  =                    8 / Number of bits per pixel                       ",
++    "NAXIS   =                    0 / Number of axes                                 ",
++    "END                                                                             "
++]
++
++# Pad to FITS block size (2880 bytes = 36 cards of 80 chars each)
++while len(header_lines) < 36:
++    header_lines.append(" " * 80)
++
++header_bytes = b''.join(line.encode('ascii') for line in header_lines)
++
++# Test Header.fromstring with bytes
++print("Testing Header.fromstring with bytes...")
++try:
++    header = fits.Header.fromstring(header_bytes)
++    print("SUCCESS: Header.fromstring accepts bytes")
++    print(f"Header keywords: {list(header.keys())}")
++    print(f"SIMPLE = {header['SIMPLE']}")
++    print(f"BITPIX = {header['BITPIX']}")
++    print(f"NAXIS = {header['NAXIS']}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Header.fromstring with string (should still work)
++print("\nTesting Header.fromstring with string...")
++try:
++    header_str = header_bytes.decode('ascii')
++    header = fits.Header.fromstring(header_str)
++    print("SUCCESS: Header.fromstring accepts string")
++    print(f"Header keywords: {list(header.keys())}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Card.fromstring with bytes
++print("\nTesting Card.fromstring with bytes...")
++card_bytes = b"SIMPLE  =                    T / Standard FITS format                           "
++try:
++    card = fits.Card.fromstring(card_bytes)
++    print("SUCCESS: Card.fromstring accepts bytes")
++    print(f"Card: {repr(card)}")
++    print(f"Keyword: {card.keyword}")
++    print(f"Value: {card.value}")
++    print(f"Comment: {card.comment}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test Card.fromstring with string (should still work)
++print("\nTesting Card.fromstring with string...")
++try:
++    card_str = card_bytes.decode('ascii')
++    card = fits.Card.fromstring(card_str)
++    print("SUCCESS: Card.fromstring accepts string")
++    print(f"Card: {repr(card)}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test with separator
++print("\nTesting Header.fromstring with bytes and separator...")
++header_with_sep = b"SIMPLE  =                    T / Standard FITS format\nBITPIX  =                    8 / Number of bits per pixel\nNAXIS   =                    0 / Number of axes\nEND"
++try:
++    header = fits.Header.fromstring(header_with_sep, sep=b'\n')
++    print("SUCCESS: Header.fromstring accepts bytes with byte separator")
++    print(f"Header keywords: {list(header.keys())}")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
+diff --git a/test_non_ascii_bytes.py b/test_non_ascii_bytes.py
+new file mode 100644
+index 0000000000..be2d07ee21
+--- /dev/null
++++ b/test_non_ascii_bytes.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++"""Test that non-ASCII bytes are handled correctly."""
++
++import warnings
++from astropy.io import fits
++from astropy.utils.exceptions import AstropyUserWarning
++
++# Test with non-ASCII bytes in header
++header_with_non_ascii = b"SIMPLE  =                    T / Standard FITS format                           " + \
++                        b"COMMENT = '\xc3\xa9'                                                              " + \
++                        b"END                                                                             "
++
++# Pad to proper size
++header_with_non_ascii += b' ' * (2880 - len(header_with_non_ascii))
++
++print("Testing Header.fromstring with non-ASCII bytes...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    header = fits.Header.fromstring(header_with_non_ascii)
++    
++    # Check if warning was raised
++    if w:
++        print(f"Warning raised: {w[0].message}")
++        print(f"Warning category: {w[0].category}")
++    
++    print(f"Header parsed successfully with {len(header)} cards")
++    for key in header:
++        if key:
++            print(f"  {key} = {repr(header[key])}")
++
++# Test Card.fromstring with non-ASCII bytes
++print("\nTesting Card.fromstring with non-ASCII bytes...")
++card_with_non_ascii = b"COMMENT = '\xc3\xa9'                                                              "
++
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    card = fits.Card.fromstring(card_with_non_ascii)
++    
++    if w:
++        print(f"Warning raised: {w[0].message}")
++    
++    print(f"Card parsed: {repr(card)}")

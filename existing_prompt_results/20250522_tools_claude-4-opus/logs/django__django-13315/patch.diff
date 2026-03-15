@@ -1,0 +1,426 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5d115458a1..f993bb9c98 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -100,7 +100,7 @@ def apply_limit_choices_to_to_formfield(formfield):
+     if hasattr(formfield, 'queryset') and hasattr(formfield, 'get_limit_choices_to'):
+         limit_choices_to = formfield.get_limit_choices_to()
+         if limit_choices_to is not None:
+-            formfield.queryset = formfield.queryset.complex_filter(limit_choices_to)
++            formfield.queryset = formfield.queryset.complex_filter(limit_choices_to).distinct()
+ 
+ 
+ def fields_for_model(model, fields=None, exclude=None, widgets=None,
+diff --git a/test_distinct_no_side_effects.py b/test_distinct_no_side_effects.py
+new file mode 100644
+index 0000000000..ec8c878462
+--- /dev/null
++++ b/test_distinct_no_side_effects.py
+@@ -0,0 +1,96 @@
++"""
++Test to ensure that adding .distinct() doesn't affect queries that don't have duplicates.
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q
++from django import forms
++from django.forms.models import apply_limit_choices_to_to_formfield
++
++
++# Create test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Product(models.Model):
++    name = models.CharField(max_length=200)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Review(models.Model):
++    text = models.TextField()
++    product = models.ForeignKey(
++        Product, 
++        on_delete=models.CASCADE,
++        limit_choices_to={'category__name': 'Electronics'}
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Review)
++
++
++# Create test data
++electronics = Category.objects.create(name="Electronics")
++books = Category.objects.create(name="Books")
++
++product1 = Product.objects.create(name="Laptop", category=electronics)
++product2 = Product.objects.create(name="Phone", category=electronics)
++product3 = Product.objects.create(name="Novel", category=books)
++
++# Test the formfield
++review_field = Review._meta.get_field('product')
++formfield = review_field.formfield()
++
++# Apply limit_choices_to
++apply_limit_choices_to_to_formfield(formfield)
++
++# Check results
++choices = list(formfield.choices)
++print(f"Number of choices: {len(choices)}")
++print(f"Choices: {[(c[0].value if hasattr(c[0], 'value') else c[0], c[1]) for c in choices]}")
++
++# Verify queryset
++products = list(formfield.queryset)
++print(f"Products in queryset: {[p.name for p in products]}")
++print(f"Queryset count: {formfield.queryset.count()}")
++
++# Ensure we only get electronics products
++assert len(products) == 2
++assert all(p.category.name == 'Electronics' for p in products)
++print("Test passed: No side effects from .distinct() on non-duplicate queries")
+diff --git a/test_limit_choices_to_distinct.py b/test_limit_choices_to_distinct.py
+new file mode 100644
+index 0000000000..bc48311abd
+--- /dev/null
++++ b/test_limit_choices_to_distinct.py
+@@ -0,0 +1,87 @@
++"""
++Test case for limit_choices_to with Q objects involving joins.
++This test should be added to the Django test suite.
++"""
++from django.test import TestCase
++from django.db import models
++from django.db.models import Q
++from django import forms
++from django.forms.models import apply_limit_choices_to_to_formfield
++
++
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'model_forms'
++
++
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    class Meta:
++        app_label = 'model_forms'
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=200)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'model_forms'
++
++
++class Comment(models.Model):
++    text = models.TextField()
++    article = models.ForeignKey(
++        Article, 
++        on_delete=models.CASCADE,
++        limit_choices_to=Q(tags__name='featured')
++    )
++    
++    class Meta:
++        app_label = 'model_forms'
++
++
++class LimitChoicesToDistinctTest(TestCase):
++    """Test that limit_choices_to with Q objects involving joins doesn't produce duplicates."""
++    
++    @classmethod
++    def setUpTestData(cls):
++        # Create test data
++        cls.author = Author.objects.create(name="Test Author")
++        cls.tag1 = Tag.objects.create(name="featured")
++        cls.tag2 = Tag.objects.create(name="featured")  # Duplicate tag name
++        cls.tag3 = Tag.objects.create(name="other")
++        
++        cls.article = Article.objects.create(title="Test Article", author=cls.author)
++        cls.article.tags.add(cls.tag1, cls.tag2)  # Add both featured tags
++        
++        # Create another article without featured tags
++        cls.article2 = Article.objects.create(title="Other Article", author=cls.author)
++        cls.article2.tags.add(cls.tag3)
++    
++    def test_limit_choices_to_with_q_object_no_duplicates(self):
++        """
++        When using limit_choices_to with a Q object that involves a join,
++        the resulting queryset should not contain duplicate options.
++        """
++        # Get the formfield
++        comment_field = Comment._meta.get_field('article')
++        formfield = comment_field.formfield()
++        
++        # Apply limit_choices_to
++        apply_limit_choices_to_to_formfield(formfield)
++        
++        # Get the choices (excluding the empty choice)
++        choices = [(choice[0].value if hasattr(choice[0], 'value') else choice[0], choice[1]) 
++                   for choice in formfield.choices if choice[0]]
++        
++        # Should only have one instance of the article, not duplicates
++        self.assertEqual(len(choices), 1)
++        self.assertEqual(choices[0][0], self.article.pk)
++        
++        # Verify the queryset is distinct
++        self.assertEqual(formfield.queryset.count(), 1)
++        self.assertEqual(list(formfield.queryset), [self.article])
+diff --git a/test_limit_choices_to_duplicates.py b/test_limit_choices_to_duplicates.py
+new file mode 100644
+index 0000000000..a076ca6f6d
+--- /dev/null
++++ b/test_limit_choices_to_duplicates.py
+@@ -0,0 +1,108 @@
++"""
++Test to reproduce the limit_choices_to duplicate options issue.
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q
++from django import forms
++from django.test import TestCase
++
++
++# Create test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=200)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Comment(models.Model):
++    text = models.TextField()
++    article = models.ForeignKey(
++        Article, 
++        on_delete=models.CASCADE,
++        limit_choices_to=Q(tags__name='featured')
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Article)
++    schema_editor.create_model(Comment)
++
++
++# Create test data
++author = Author.objects.create(name="Test Author")
++tag1 = Tag.objects.create(name="featured")
++tag2 = Tag.objects.create(name="featured")  # Duplicate tag name
++tag3 = Tag.objects.create(name="other")
++
++article = Article.objects.create(title="Test Article", author=author)
++article.tags.add(tag1, tag2)  # Add both featured tags
++
++# Test the formfield
++comment_field = Comment._meta.get_field('article')
++formfield = comment_field.formfield()
++
++# Apply limit_choices_to
++from django.forms.models import apply_limit_choices_to_to_formfield
++apply_limit_choices_to_to_formfield(formfield)
++
++# Check for duplicates
++choices = list(formfield.choices)
++print(f"Number of choices: {len(choices)}")
++print(f"Choices: {choices}")
++
++# Check if there are duplicates
++article_ids = []
++for choice in choices:
++    if choice[0]:  # Skip empty choice
++        # Extract the actual value from ModelChoiceIteratorValue
++        article_ids.append(choice[0].value)
++        
++print(f"Article IDs: {article_ids}")
++print(f"Unique article IDs: {set(article_ids)}")
++print(f"Has duplicates: {len(article_ids) != len(set(article_ids))}")
+diff --git a/tests/model_forms/models.py b/tests/model_forms/models.py
+index 1a2102f898..5e4f302f5a 100644
+--- a/tests/model_forms/models.py
++++ b/tests/model_forms/models.py
+@@ -475,3 +475,28 @@ class NullableUniqueCharFieldModel(models.Model):
+     email = models.EmailField(blank=True, null=True)
+     slug = models.SlugField(blank=True, null=True)
+     url = models.URLField(blank=True, null=True)
++
++
++# Models for testing limit_choices_to with joins
++class ArticleTag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    def __str__(self):
++        return self.name
++
++
++class TaggedArticle(models.Model):
++    title = models.CharField(max_length=200)
++    tags = models.ManyToManyField(ArticleTag)
++    
++    def __str__(self):
++        return self.title
++
++
++class ArticleComment(models.Model):
++    text = models.TextField()
++    article = models.ForeignKey(
++        TaggedArticle,
++        on_delete=models.CASCADE,
++        limit_choices_to=models.Q(tags__name='featured')
++    )
+diff --git a/tests/model_forms/tests.py b/tests/model_forms/tests.py
+index 9e900e35f4..4c6168f089 100644
+--- a/tests/model_forms/tests.py
++++ b/tests/model_forms/tests.py
+@@ -18,15 +18,15 @@ from django.template import Context, Template
+ from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
+ 
+ from .models import (
+-    Article, ArticleStatus, Author, Author1, Award, BetterWriter, BigInt, Book,
+-    Category, Character, Colour, ColourfulItem, CustomErrorMessage, CustomFF,
+-    CustomFieldForExclusionModel, DateTimePost, DerivedBook, DerivedPost,
+-    Document, ExplicitPK, FilePathModel, FlexibleDatePost, Homepage,
+-    ImprovedArticle, ImprovedArticleWithParentLink, Inventory,
+-    NullableUniqueCharFieldModel, Person, Photo, Post, Price, Product,
+-    Publication, PublicationDefaults, StrictAssignmentAll,
+-    StrictAssignmentFieldSpecific, Student, StumpJoke, TextFile, Triple,
+-    Writer, WriterProfile, test_images,
++    Article, ArticleComment, ArticleStatus, ArticleTag, Author, Author1, Award,
++    BetterWriter, BigInt, Book, Category, Character, Colour, ColourfulItem,
++    CustomErrorMessage, CustomFF, CustomFieldForExclusionModel, DateTimePost,
++    DerivedBook, DerivedPost, Document, ExplicitPK, FilePathModel,
++    FlexibleDatePost, Homepage, ImprovedArticle, ImprovedArticleWithParentLink,
++    Inventory, NullableUniqueCharFieldModel, Person, Photo, Post, Price,
++    Product, Publication, PublicationDefaults, StrictAssignmentAll,
++    StrictAssignmentFieldSpecific, Student, StumpJoke, TaggedArticle, TextFile,
++    Triple, Writer, WriterProfile, test_images,
+ )
+ 
+ if test_images:
+@@ -2829,6 +2829,42 @@ class LimitChoicesToTests(TestCase):
+             StumpJokeForm()
+             self.assertEqual(today_callable_dict.call_count, 3)
+ 
++    def test_limit_choices_to_with_q_object_no_duplicates(self):
++        """
++        When using limit_choices_to with a Q object that involves a join,
++        the resulting queryset should not contain duplicate options (#xxxxx).
++        """
++        # Create test data
++        tag1 = ArticleTag.objects.create(name="featured")
++        tag2 = ArticleTag.objects.create(name="featured")  # Duplicate tag name
++        tag3 = ArticleTag.objects.create(name="other")
++        
++        article = TaggedArticle.objects.create(title="Test Article")
++        article.tags.add(tag1, tag2)  # Add both featured tags
++        
++        # Create another article without featured tags
++        article2 = TaggedArticle.objects.create(title="Other Article")
++        article2.tags.add(tag3)
++        
++        # Get the formfield
++        comment_field = ArticleComment._meta.get_field('article')
++        formfield = comment_field.formfield()
++        
++        # Apply limit_choices_to
++        from django.forms.models import apply_limit_choices_to_to_formfield
++        apply_limit_choices_to_to_formfield(formfield)
++        
++        # Get the choices (excluding the empty choice)
++        choices = [choice for choice in formfield.choices if choice[0]]
++        
++        # Should only have one instance of the article, not duplicates
++        self.assertEqual(len(choices), 1)
++        self.assertEqual(choices[0][0].value, article.pk)
++        
++        # Verify the queryset is distinct
++        self.assertEqual(formfield.queryset.count(), 1)
++        self.assertEqual(list(formfield.queryset), [article])
++
+ 
+ class FormFieldCallbackTests(SimpleTestCase):

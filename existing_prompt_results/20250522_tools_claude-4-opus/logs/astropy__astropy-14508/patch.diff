@@ -1,0 +1,412 @@
+diff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py
+index 118bfced89..4f6aa3d655 100644
+--- a/astropy/io/fits/card.py
++++ b/astropy/io/fits/card.py
+@@ -1299,6 +1299,29 @@ def _format_value(value):
+ 
+ def _format_float(value):
+     """Format a floating number to make sure it gets the decimal point."""
++    # First, try using Python's default string representation
++    value_str = str(value)
++    
++    # Check if the string representation is acceptable:
++    # 1. It should not be longer than 20 characters
++    # 2. It should contain a decimal point or 'e'/'E' for scientific notation
++    if len(value_str) <= 20:
++        # Special handling for inf and nan - don't add .0
++        if value_str.lower() in ('inf', '-inf', 'nan'):
++            return value_str
++        
++        # Ensure it has a decimal point for FITS compliance
++        if "." not in value_str and "e" not in value_str.lower():
++            value_str += ".0"
++        # Normalize scientific notation to use uppercase E
++        if "e" in value_str:
++            value_str = value_str.replace("e", "E")
++        
++        # If it fits and has proper format, use it
++        if len(value_str) <= 20:
++            return value_str
++    
++    # Fall back to the original formatting if str() doesn't work
+     value_str = f"{value:.16G}"
+     if "." not in value_str and "E" not in value_str:
+         value_str += ".0"
+diff --git a/test_card_float_fix.py b/test_card_float_fix.py
+new file mode 100644
+index 0000000000..fb4ebae8c4
+--- /dev/null
++++ b/test_card_float_fix.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python
++"""Test the specific fix for Card float formatting issue."""
++
++import pytest
++from astropy.io import fits
++from astropy.io.fits.card import _format_float
++
++def test_issue_float_formatting():
++    """Test the specific issue from the problem statement."""
++    # The problematic case
++    keyword = "ESO IFM CL RADIUS"
++    value = 0.009125
++    comment = "[m] radius arround actuator to avoid"
++    
++    # Create card
++    card = fits.Card(f'HIERARCH {keyword}', value, comment)
++    
++    # Check that the comment is not truncated
++    assert card.comment == comment, f"Comment was truncated: '{card.comment}' != '{comment}'"
++    
++    # Check that the value is represented compactly
++    card_str = str(card)
++    assert '0.009125' in card_str, f"Value not represented compactly in: {card_str}"
++    assert comment in card_str, f"Full comment not in card string: {card_str}"
++    
++    # Check the formatted value directly
++    formatted = _format_float(value)
++    assert formatted == '0.009125', f"Unexpected format: {formatted}"
++    assert len(formatted) <= 20, f"Formatted value too long: {len(formatted)}"
++
++def test_various_float_values():
++    """Test various float values to ensure they're formatted correctly."""
++    test_cases = [
++        (0.009125, '0.009125'),
++        (0.1, '0.1'),
++        (0.125, '0.125'),
++        (0.0625, '0.0625'),
++        (0.03125, '0.03125'),
++        (1.0, '1.0'),
++        (123.456, '123.456'),
++        (-0.009125, '-0.009125'),
++        (1e10, '10000000000.0'),  # Should use regular notation if it fits
++        (1e-5, '1E-05'),  # Should use scientific notation
++        (1.23456789012345678901234567890, '1.2345678901234567'),  # Should be truncated to fit
++    ]
++    
++    for value, expected_substr in test_cases:
++        formatted = _format_float(value)
++        assert expected_substr in formatted or formatted == expected_substr, \
++            f"For {value}, expected '{expected_substr}' in '{formatted}'"
++        assert len(formatted) <= 20, f"Format too long for {value}: {len(formatted)} chars"
++
++def test_scientific_notation():
++    """Test that scientific notation is properly handled."""
++    # Values that should use scientific notation
++    test_cases = [
++        (1e-10, 'E'),  # Too small for regular notation
++        (1.23e20, 'E'),  # Too large for regular notation in 20 chars
++        (1.23456789e25, 'E'),  # Definitely too large
++    ]
++    
++    for value, expected_char in test_cases:
++        formatted = _format_float(value)
++        # Either it uses scientific notation or fits in regular notation
++        if expected_char not in formatted:
++            # Make sure it's still valid and within length limits
++            assert len(formatted) <= 20, f"Format too long for {value}: {formatted}"
++        else:
++            # If it uses scientific notation, make sure it's uppercase
++            assert 'e' not in formatted, f"Lowercase 'e' found in '{formatted}'"
++
++def test_special_values():
++    """Test special float values."""
++    import math
++    
++    # Test infinity and NaN
++    assert _format_float(float('inf')) == 'inf'
++    assert _format_float(float('-inf')) == '-inf'
++    assert _format_float(float('nan')) == 'nan'
++
++def test_decimal_point_requirement():
++    """Test that decimal points are added when needed."""
++    # Integer-valued floats should have decimal points
++    test_cases = [
++        (0.0, '.'),
++        (1.0, '.'),
++        (100.0, '.'),
++        (-1.0, '.'),
++    ]
++    
++    for value, expected_char in test_cases:
++        formatted = _format_float(value)
++        assert expected_char in formatted or 'E' in formatted, \
++            f"Expected decimal point or E in '{formatted}' for {value}"
++
++def test_long_comment_preservation():
++    """Test that using compact float representation allows longer comments."""
++    keyword = "TESTKEY"
++    value = 0.009125
++    
++    # Create a comment that would be truncated with the old formatting
++    # but fits with the new compact formatting
++    comment = "This is a long comment that should fit now"
++    
++    card = fits.Card(f'HIERARCH {keyword}', value, comment)
++    
++    # The comment should not be truncated
++    assert card.comment == comment, f"Comment was truncated: '{card.comment}'"
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..1e0897ebc9
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/env python
++"""Comprehensive test for the _format_float fix."""
++
++from astropy.io import fits
++from astropy.io.fits.card import _format_float
++import numpy as np
++
++def test_format_float():
++    """Test various float values to ensure proper formatting."""
++    test_cases = [
++        # (value, expected_contains_decimal, max_length)
++        (0.009125, True, 20),  # The problematic case from the issue
++        (0.1, True, 20),
++        (0.0, True, 20),
++        (1.0, True, 20),
++        (123456789.0, True, 20),
++        (1e10, False, 20),  # Scientific notation
++        (1e-10, False, 20),  # Scientific notation
++        (1.23456789012345678901234567890, True, 20),  # Very long decimal
++        (-0.009125, True, 20),  # Negative version
++        (np.float32(0.009125), True, 20),  # NumPy float32
++        (np.float64(0.009125), True, 20),  # NumPy float64
++        (float('inf'), False, 20),  # Special values
++        (float('-inf'), False, 20),
++        (float('nan'), False, 20),
++    ]
++    
++    print("Testing _format_float function:")
++    for value, should_have_decimal, max_len in test_cases:
++        result = _format_float(value)
++        has_decimal = '.' in result
++        length = len(result)
++        
++        # Check length constraint
++        if length > max_len:
++            print(f"  FAIL: {value} -> '{result}' (length {length} > {max_len})")
++        else:
++            status = "OK" if (not should_have_decimal or has_decimal) else "FAIL"
++            print(f"  {status}: {value} -> '{result}' (length {length})")
++
++def test_card_creation():
++    """Test Card creation with various float values."""
++    print("\nTesting Card creation:")
++    
++    # The specific case from the issue
++    keyword = "ESO IFM CL RADIUS"
++    value = 0.009125
++    comment = "[m] radius arround actuator to avoid"
++    
++    card = fits.Card(f'HIERARCH {keyword}', value, comment)
++    
++    # Check that the comment is not truncated
++    if card.comment == comment:
++        print(f"  OK: Comment preserved for value {value}")
++    else:
++        print(f"  FAIL: Comment truncated for value {value}")
++        print(f"    Original: '{comment}'")
++        print(f"    Result:   '{card.comment}'")
++    
++    # Check the string representation
++    card_str = str(card)
++    if '0.009125' in card_str and comment in card_str:
++        print(f"  OK: Card string contains correct value and full comment")
++    else:
++        print(f"  FAIL: Card string incorrect")
++        print(f"    Result: '{card_str}'")
++    
++    # Test a few more values
++    test_values = [0.125, 0.0625, 0.03125, 1.23456789]
++    for val in test_values:
++        card = fits.Card(f'HIERARCH {keyword}', val, comment)
++        if card.comment == comment:
++            print(f"  OK: Comment preserved for value {val}")
++        else:
++            print(f"  FAIL: Comment truncated for value {val}")
++
++def test_scientific_notation():
++    """Test that scientific notation is handled correctly."""
++    print("\nTesting scientific notation:")
++    
++    test_values = [
++        1e-10,
++        1e10,
++        1.23e-5,
++        -1.23e5,
++        1.23456789e15,
++    ]
++    
++    for value in test_values:
++        result = _format_float(value)
++        print(f"  {value} -> '{result}' (len={len(result)})")
++        
++        # Ensure E is uppercase
++        if 'e' in result:
++            print(f"    FAIL: Contains lowercase 'e'")
++        elif 'E' in result:
++            print(f"    OK: Contains uppercase 'E'")
++
++def test_integer_floats():
++    """Test floats that are integer values."""
++    print("\nTesting integer-valued floats:")
++    
++    test_values = [0.0, 1.0, -1.0, 100.0, -100.0]
++    
++    for value in test_values:
++        result = _format_float(value)
++        has_decimal = '.' in result or 'E' in result
++        print(f"  {value} -> '{result}' (has decimal/E: {has_decimal})")
++
++if __name__ == "__main__":
++    test_format_float()
++    test_card_creation()
++    test_scientific_notation()
++    test_integer_floats()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..1a90ae7e03
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test edge cases around the 20-character limit."""
++
++from astropy.io.fits.card import _format_float
++
++print("Testing edge cases around 20-character limit:")
++
++# Test values that produce strings of various lengths
++test_cases = [
++    # Values that should use str() representation
++    (1234567890123456789.0, 19),  # 19 chars
++    (12345678901234567890.0, 20),  # 20 chars  
++    (123456789012345678901.0, 21),  # 21 chars - should fall back to .16G
++    
++    # Values with many decimal places
++    (0.12345678901234567890, 20),  # Should be truncated to fit
++    (0.123456789012345678901234567890, 20),  # Should be truncated
++    
++    # Scientific notation edge cases
++    (1.23456789012345e-100, 20),  # Should use scientific notation
++    (1.23456789012345e100, 20),   # Should use scientific notation
++]
++
++for value, expected_max_len in test_cases:
++    formatted = _format_float(value)
++    length = len(formatted)
++    status = "OK" if length <= expected_max_len else "FAIL"
++    print(f"  {status}: {value} -> '{formatted}' (len={length}, expected<={expected_max_len})")
++    
++    # Verify it has proper format
++    if '.' not in formatted and 'E' not in formatted:
++        print(f"    WARNING: No decimal point or E in '{formatted}'")
++
++# Test that we prefer str() when it's shorter and valid
++print("\nTesting preference for str() representation:")
++test_values = [0.009125, 0.125, 0.25, 0.5, 0.75]
++for val in test_values:
++    formatted = _format_float(val)
++    str_repr = str(val)
++    if formatted == str_repr:
++        print(f"  ✓ {val}: Using str() representation '{formatted}'")
++    else:
++        print(f"  ✗ {val}: Not using str() representation. Got '{formatted}', str()='{str_repr}'")
+diff --git a/test_exact_reproduction.py b/test_exact_reproduction.py
+new file mode 100644
+index 0000000000..865a7ca266
+--- /dev/null
++++ b/test_exact_reproduction.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Exact reproduction of the issue from the problem statement."""
++
++from astropy.io import fits
++
++# Reproduce the exact example from the problem statement
++keyword = 'ESO IFM CL RADIUS'
++value = 0.009125
++comment = '[m] radius arround actuator to avoid'
++
++# Create a new card with the same contents
++new_c = fits.Card(f'HIERARCH {keyword}', value, comment)
++
++print("Testing the exact example from the problem statement:")
++print(f"repr(new_c) = {repr(new_c)}")
++print(f"str(new_c) = '{str(new_c)}'")
++
++# Check if the comment was truncated
++if new_c.comment == comment:
++    print("\n✓ SUCCESS: Comment was NOT truncated!")
++    print(f"  Full comment preserved: '{new_c.comment}'")
++else:
++    print("\n✗ FAILURE: Comment was truncated!")
++    print(f"  Original comment: '{comment}'")
++    print(f"  Truncated to: '{new_c.comment}'")
++
++# Check the value representation
++card_str = str(new_c)
++if '0.009125' in card_str:
++    print("\n✓ SUCCESS: Value is represented compactly as '0.009125'")
++else:
++    print("\n✗ FAILURE: Value is not represented compactly")
++    
++# The expected output (from the problem statement)
++expected_str = 'HIERARCH ESO IFM CL RADIUS = 0.009125 / [m] radius arround actuator to avoid    '
++if card_str == expected_str:
++    print("\n✓ SUCCESS: Card string exactly matches the expected output!")
++else:
++    print("\n✗ FAILURE: Card string does not match expected")
++    print(f"  Expected: '{expected_str}'")
++    print(f"  Got:      '{card_str}'")
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..9a5012c8dd
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python
++"""Test script to reproduce the issue with io.fits.Card float formatting."""
++
++from astropy.io import fits
++
++# Test the specific value mentioned in the issue
++value = 0.009125
++keyword = "ESO IFM CL RADIUS"
++comment = "[m] radius arround actuator to avoid"
++
++print(f"Testing value: {value}")
++print(f"Python str(value): '{str(value)}'")
++print(f"Length of str(value): {len(str(value))}")
++
++# Create a card with the problematic value
++card = fits.Card(f'HIERARCH {keyword}', value, comment)
++
++print(f"\nCard representation:")
++print(f"repr(card): {repr(card)}")
++print(f"str(card): '{str(card)}'")
++
++# Check if the comment was truncated
++if card.comment != comment:
++    print(f"\nWARNING: Comment was truncated!")
++    print(f"Original comment: '{comment}'")
++    print(f"Truncated comment: '{card.comment}'")
++
++# Test the _format_float function directly
++from astropy.io.fits.card import _format_float
++
++print(f"\n_format_float({value}) = '{_format_float(value)}'")
++print(f"Length of _format_float output: {len(_format_float(value))}")
++
++# Test other problematic values
++test_values = [0.009125, 0.1, 0.125, 0.0625, 0.03125]
++print("\nTesting various float values:")
++for val in test_values:
++    formatted = _format_float(val)
++    print(f"  {val} -> '{formatted}' (len={len(formatted)}, str={str(val)})")

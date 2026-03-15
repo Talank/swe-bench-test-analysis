@@ -1,0 +1,461 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index 90fc31bee5..b69c431971 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -202,6 +202,19 @@ class CreateModel(ModelOperation):
+                     managers=self.managers,
+                 ),
+             ]
++        elif (
++            isinstance(operation, AlterModelManagers)
++            and self.name_lower == operation.name_lower
++        ):
++            return [
++                CreateModel(
++                    self.name,
++                    fields=self.fields,
++                    options=self.options,
++                    bases=self.bases,
++                    managers=operation.managers,
++                ),
++            ]
+         elif (
+             isinstance(operation, FieldOperation)
+             and self.name_lower == operation.model_name_lower
+diff --git a/test_optimization.py b/test_optimization.py
+new file mode 100644
+index 0000000000..67cb900c98
+--- /dev/null
++++ b/test_optimization.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python
++"""Test script to verify CreateModel + AlterModelManagers optimization"""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations import operations
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++sys.path.insert(0, '/testbed')
++
++# Create minimal settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key'
++    )
++
++django.setup()
++
++# Define a custom manager for testing
++class CustomManager(models.Manager):
++    def get_queryset(self):
++        return super().get_queryset().filter(active=True)
++
++# Test the optimization
++def test_optimization():
++    print("Testing CreateModel + AlterModelManagers optimization...")
++    
++    # Create operations
++    create_op = operations.CreateModel(
++        name="TestModel",
++        fields=[
++            ("id", models.AutoField(primary_key=True)),
++            ("name", models.CharField(max_length=100)),
++            ("active", models.BooleanField(default=True)),
++        ],
++        options={"verbose_name": "Test Model"},
++    )
++    
++    alter_managers_op = operations.AlterModelManagers(
++        name="TestModel",
++        managers=[
++            ("objects", models.Manager()),
++            ("active_objects", CustomManager()),
++        ]
++    )
++    
++    # Original operations
++    original_ops = [create_op, alter_managers_op]
++    print(f"\nOriginal operations ({len(original_ops)}):")
++    for i, op in enumerate(original_ops):
++        print(f"  {i+1}. {op.__class__.__name__}: {op.name if hasattr(op, 'name') else ''}")
++    
++    # Optimize
++    optimizer = MigrationOptimizer()
++    optimized_ops = optimizer.optimize(original_ops, "test_app")
++    
++    print(f"\nOptimized operations ({len(optimized_ops)}):")
++    for i, op in enumerate(optimized_ops):
++        print(f"  {i+1}. {op.__class__.__name__}: {op.name if hasattr(op, 'name') else ''}")
++        if isinstance(op, operations.CreateModel):
++            print(f"     - fields: {len(op.fields)}")
++            print(f"     - options: {op.options}")
++            print(f"     - managers: {len(op.managers)} manager(s)")
++            for name, mgr in op.managers:
++                print(f"       * {name}: {mgr.__class__.__name__}")
++    
++    # Verify optimization worked
++    assert len(optimized_ops) == 1, f"Expected 1 operation, got {len(optimized_ops)}"
++    assert isinstance(optimized_ops[0], operations.CreateModel), "Expected CreateModel operation"
++    assert len(optimized_ops[0].managers) == 2, f"Expected 2 managers, got {len(optimized_ops[0].managers)}"
++    
++    print("\n✅ Optimization successful!")
++
++if __name__ == "__main__":
++    test_optimization()
+diff --git a/test_optimization_edge_cases.py b/test_optimization_edge_cases.py
+new file mode 100644
+index 0000000000..decd4c1e0e
+--- /dev/null
++++ b/test_optimization_edge_cases.py
+@@ -0,0 +1,125 @@
++#!/usr/bin/env python
++"""Test edge cases for CreateModel + AlterModelManagers optimization"""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations import operations
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++sys.path.insert(0, '/testbed')
++
++# Create minimal settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key'
++    )
++
++django.setup()
++
++# Define a custom manager for testing
++class CustomManager(models.Manager):
++    pass
++
++def test_edge_cases():
++    optimizer = MigrationOptimizer()
++    
++    print("Testing edge cases for CreateModel + AlterModelManagers optimization...\n")
++    
++    # Test 1: Operations in between that don't affect the model
++    print("Test 1: Operations in between that don't affect the model")
++    ops = [
++        operations.CreateModel("TestModel", fields=[("id", models.AutoField(primary_key=True))]),
++        operations.CreateModel("OtherModel", fields=[("id", models.AutoField(primary_key=True))]),
++        operations.AlterModelManagers("TestModel", managers=[("custom", CustomManager())]),
++    ]
++    result = optimizer.optimize(ops, "test_app")
++    print(f"  Original: {len(ops)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Result: {[op.__class__.__name__ for op in result]}")
++    print(f"  Models: {[getattr(op, 'name', 'N/A') for op in result]}")
++    for i, op in enumerate(result):
++        if hasattr(op, 'managers'):
++            print(f"  Operation {i} managers: {op.managers}")
++    assert len(result) == 2  # CreateModel(TestModel with managers), CreateModel(OtherModel)
++    # Find the TestModel operation
++    test_model_op = None
++    for op in result:
++        if hasattr(op, 'name') and op.name == 'TestModel':
++            test_model_op = op
++            break
++    assert test_model_op is not None
++    assert len(test_model_op.managers) == 1
++    assert test_model_op.managers[0][0] == "custom"
++    assert isinstance(test_model_op.managers[0][1], CustomManager)
++    print("  ✅ Passed\n")
++    
++    # Test 2: Operations that reference the model (should block optimization)
++    print("Test 2: Operations that reference the model (should block optimization)")
++    ops = [
++        operations.CreateModel("TestModel", fields=[("id", models.AutoField(primary_key=True))]),
++        operations.AddField("TestModel", "name", models.CharField(max_length=100)),
++        operations.AlterModelManagers("TestModel", managers=[("custom", CustomManager())]),
++    ]
++    result = optimizer.optimize(ops, "test_app")
++    print(f"  Original: {len(ops)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Result: {[op.__class__.__name__ for op in result]}")
++    # Should optimize AddField into CreateModel, then AlterModelManagers into that
++    assert len(result) == 1
++    assert isinstance(result[0], operations.CreateModel)
++    assert len(result[0].fields) == 2  # id and name
++    assert len(result[0].managers) == 1
++    assert result[0].managers[0][0] == "custom"
++    assert isinstance(result[0].managers[0][1], CustomManager)
++    print("  ✅ Passed\n")
++    
++    # Test 3: Multiple AlterModelManagers (last one wins)
++    print("Test 3: Multiple AlterModelManagers (last one wins)")
++    ops = [
++        operations.CreateModel("TestModel", fields=[("id", models.AutoField(primary_key=True))]),
++        operations.AlterModelManagers("TestModel", managers=[("objects", models.Manager())]),
++        operations.AlterModelManagers("TestModel", managers=[("custom", CustomManager())]),
++    ]
++    result = optimizer.optimize(ops, "test_app")
++    print(f"  Original: {len(ops)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Result: {[op.__class__.__name__ for op in result]}")
++    assert len(result) == 1
++    assert len(result[0].managers) == 1
++    assert result[0].managers[0][0] == "custom"
++    assert isinstance(result[0].managers[0][1], CustomManager)
++    print("  ✅ Passed\n")
++    
++    # Test 4: AlterModelManagers for different model (no optimization)
++    print("Test 4: AlterModelManagers for different model (no optimization)")
++    ops = [
++        operations.CreateModel("TestModel", fields=[("id", models.AutoField(primary_key=True))]),
++        operations.AlterModelManagers("OtherModel", managers=[("custom", CustomManager())]),
++    ]
++    result = optimizer.optimize(ops, "test_app")
++    print(f"  Original: {len(ops)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Result: {[op.__class__.__name__ for op in result]}")
++    assert len(result) == 2  # No optimization should occur
++    print("  ✅ Passed\n")
++    
++    print("All edge case tests passed! ✅")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..bbc2b45e2f
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,139 @@
++#!/usr/bin/env python
++"""
++Test that verifies the problem statement requirement:
++"During migration optimization, CreateModel + AlterModelOptions is reduced to just CreateModel, 
++with the model options. Similarly, CreateModel + AlterModelManagers can become just CreateModel."
++"""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations import operations, Migration
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++sys.path.insert(0, '/testbed')
++
++# Create minimal settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key'
++    )
++
++django.setup()
++
++def test_problem_statement():
++    """Test that both AlterModelOptions and AlterModelManagers optimize into CreateModel"""
++    print("Testing problem statement requirement...")
++    print("CreateModel + AlterModelOptions should reduce to CreateModel with options")
++    print("CreateModel + AlterModelManagers should reduce to CreateModel with managers\n")
++    
++    optimizer = MigrationOptimizer()
++    
++    # Test 1: CreateModel + AlterModelOptions (already implemented)
++    print("Test 1: CreateModel + AlterModelOptions")
++    ops1 = [
++        operations.CreateModel(
++            name="Article",
++            fields=[
++                ("id", models.AutoField(primary_key=True)),
++                ("title", models.CharField(max_length=200)),
++            ],
++        ),
++        operations.AlterModelOptions(
++            name="Article",
++            options={"verbose_name": "Article", "verbose_name_plural": "Articles"},
++        ),
++    ]
++    
++    result1 = optimizer.optimize(ops1, "test_app")
++    print(f"  Original: {len(ops1)} operations")
++    print(f"  Optimized: {len(result1)} operations")
++    assert len(result1) == 1
++    assert isinstance(result1[0], operations.CreateModel)
++    assert result1[0].options == {"verbose_name": "Article", "verbose_name_plural": "Articles"}
++    print("  ✅ CreateModel + AlterModelOptions optimization works!\n")
++    
++    # Test 2: CreateModel + AlterModelManagers (our implementation)
++    print("Test 2: CreateModel + AlterModelManagers")
++    
++    class PublishedManager(models.Manager):
++        def get_queryset(self):
++            return super().get_queryset().filter(status='published')
++    
++    ops2 = [
++        operations.CreateModel(
++            name="Post",
++            fields=[
++                ("id", models.AutoField(primary_key=True)),
++                ("title", models.CharField(max_length=200)),
++                ("status", models.CharField(max_length=20)),
++            ],
++        ),
++        operations.AlterModelManagers(
++            name="Post",
++            managers=[
++                ("objects", models.Manager()),
++                ("published", PublishedManager()),
++            ],
++        ),
++    ]
++    
++    result2 = optimizer.optimize(ops2, "test_app")
++    print(f"  Original: {len(ops2)} operations")
++    print(f"  Optimized: {len(result2)} operations")
++    assert len(result2) == 1
++    assert isinstance(result2[0], operations.CreateModel)
++    assert len(result2[0].managers) == 2
++    assert result2[0].managers[0][0] == "objects"
++    assert result2[0].managers[1][0] == "published"
++    print("  ✅ CreateModel + AlterModelManagers optimization works!\n")
++    
++    # Test 3: Both optimizations together
++    print("Test 3: CreateModel + AlterModelOptions + AlterModelManagers")
++    ops3 = [
++        operations.CreateModel(
++            name="BlogPost",
++            fields=[
++                ("id", models.AutoField(primary_key=True)),
++                ("title", models.CharField(max_length=200)),
++            ],
++        ),
++        operations.AlterModelOptions(
++            name="BlogPost",
++            options={"ordering": ["-created_at"]},
++        ),
++        operations.AlterModelManagers(
++            name="BlogPost",
++            managers=[("custom", models.Manager())],
++        ),
++    ]
++    
++    result3 = optimizer.optimize(ops3, "test_app")
++    print(f"  Original: {len(ops3)} operations")
++    print(f"  Optimized: {len(result3)} operations")
++    assert len(result3) == 1
++    assert isinstance(result3[0], operations.CreateModel)
++    assert result3[0].options == {"ordering": ["-created_at"]}
++    assert len(result3[0].managers) == 1
++    assert result3[0].managers[0][0] == "custom"
++    print("  ✅ Both optimizations work together!\n")
++    
++    print("All tests passed! The problem statement requirements are satisfied. ✅")
++
++if __name__ == "__main__":
++    test_problem_statement()
+diff --git a/tests/migrations/test_optimizer.py b/tests/migrations/test_optimizer.py
+index 59dd401a3c..a424db4bb0 100644
+--- a/tests/migrations/test_optimizer.py
++++ b/tests/migrations/test_optimizer.py
+@@ -1090,3 +1090,59 @@ class OptimizerTests(SimpleTestCase):
+                 ),
+             ],
+         )
++
++    def test_create_alter_model_managers(self):
++        """
++        CreateModel and AlterModelManagers should collapse into CreateModel.
++        """
++        managers = [("objects", EmptyManager())]
++        self.assertOptimizesTo(
++            [
++                migrations.CreateModel("Foo", fields=[]),
++                migrations.AlterModelManagers(
++                    name="Foo", managers=managers
++                ),
++            ],
++            [
++                migrations.CreateModel(
++                    "Foo", fields=[], managers=managers
++                ),
++            ],
++        )
++        
++        # Test with existing managers being replaced
++        self.assertOptimizesTo(
++            [
++                migrations.CreateModel("Foo", fields=[], managers=[("default", models.Manager())]),
++                migrations.AlterModelManagers(
++                    name="Foo", managers=managers
++                ),
++            ],
++            [
++                migrations.CreateModel(
++                    "Foo", fields=[], managers=managers
++                ),
++            ],
++        )
++        
++        # Test with fields and options
++        self.assertOptimizesTo(
++            [
++                migrations.CreateModel(
++                    "Foo", 
++                    fields=[("name", models.CharField(max_length=255))],
++                    options={"verbose_name": "Foo model"}
++                ),
++                migrations.AlterModelManagers(
++                    name="Foo", managers=managers
++                ),
++            ],
++            [
++                migrations.CreateModel(
++                    "Foo", 
++                    fields=[("name", models.CharField(max_length=255))],
++                    options={"verbose_name": "Foo model"},
++                    managers=managers
++                ),
++            ],
++        )

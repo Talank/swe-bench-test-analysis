@@ -1,0 +1,248 @@
+diff --git a/src/_pytest/pathlib.py b/src/_pytest/pathlib.py
+index f0bdb1481..b96cba069 100644
+--- a/src/_pytest/pathlib.py
++++ b/src/_pytest/pathlib.py
+@@ -558,7 +558,7 @@ def visit(
+     entries = sorted(os.scandir(path), key=lambda entry: entry.name)
+     yield from entries
+     for entry in entries:
+-        if entry.is_dir(follow_symlinks=False) and recurse(entry):
++        if entry.is_dir() and recurse(entry):
+             yield from visit(entry.path, recurse)
+ 
+ 
+diff --git a/test_symlink_comprehensive.py b/test_symlink_comprehensive.py
+new file mode 100644
+index 000000000..a916d6e9d
+--- /dev/null
++++ b/test_symlink_comprehensive.py
+@@ -0,0 +1,88 @@
++"""Comprehensive test for symlink directory collection."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++
++def test_symlink_scenarios():
++    """Test various symlink scenarios."""
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Scenario 1: Simple symlink to directory with tests
++        real_dir1 = tmpdir / "real_tests1"
++        real_dir1.mkdir()
++        (real_dir1 / "test_one.py").write_text("""
++def test_one():
++    assert True
++""")
++        
++        # Scenario 2: Nested symlinks
++        real_dir2 = tmpdir / "real_tests2"
++        real_dir2.mkdir()
++        sub_dir = real_dir2 / "subdir"
++        sub_dir.mkdir()
++        (sub_dir / "test_two.py").write_text("""
++def test_two():
++    assert True
++""")
++        
++        # Scenario 3: Symlink alongside regular files
++        mixed_dir = tmpdir / "mixed"
++        mixed_dir.mkdir()
++        (mixed_dir / "test_regular.py").write_text("""
++def test_regular():
++    assert True
++""")
++        
++        # Create test directory with symlinks
++        test_root = tmpdir / "tests"
++        test_root.mkdir()
++        
++        # Create symlinks
++        try:
++            (test_root / "symlink1").symlink_to(real_dir1)
++            (test_root / "symlink2").symlink_to(real_dir2)
++            (mixed_dir / "symlink_to_tests").symlink_to(real_dir1)
++        except OSError as e:
++            print(f"Could not create symlinks: {e}")
++            return
++        
++        # Run pytest on the test directory
++        import subprocess
++        result = subprocess.run(
++            [sys.executable, "-m", "pytest", "-v", str(test_root)],
++            capture_output=True,
++            text=True
++        )
++        
++        print("STDOUT:")
++        print(result.stdout)
++        print("\nSTDERR:")
++        print(result.stderr)
++        print(f"\nReturn code: {result.returncode}")
++        
++        # Check that all tests were collected
++        assert "test_one.py::test_one PASSED" in result.stdout
++        assert "test_two.py::test_two PASSED" in result.stdout
++        assert result.returncode == 0
++        
++        # Also test mixed directory
++        result2 = subprocess.run(
++            [sys.executable, "-m", "pytest", "-v", str(mixed_dir)],
++            capture_output=True,
++            text=True
++        )
++        
++        print("\n\nMixed directory test:")
++        print("STDOUT:")
++        print(result2.stdout)
++        
++        assert "test_regular.py::test_regular PASSED" in result2.stdout
++        assert "test_one.py::test_one PASSED" in result2.stdout
++
++
++if __name__ == "__main__":
++    test_symlink_scenarios()
+diff --git a/test_symlink_issue.py b/test_symlink_issue.py
+new file mode 100644
+index 000000000..950f49eef
+--- /dev/null
++++ b/test_symlink_issue.py
+@@ -0,0 +1,56 @@
++"""Test to reproduce the symlink directory collection issue."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++
++def test_symlink_directory_collection():
++    """Test that symlinked directories are collected."""
++    # Create a temporary directory structure
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Create a real test directory
++        real_test_dir = tmpdir / "real_tests"
++        real_test_dir.mkdir()
++        
++        # Create a test file in the real directory
++        test_file = real_test_dir / "test_example.py"
++        test_file.write_text("""
++def test_something():
++    assert True
++""")
++        
++        # Create a symlink to the real directory
++        symlink_dir = tmpdir / "tests" / "symlinked_tests"
++        symlink_dir.parent.mkdir()
++        
++        try:
++            symlink_dir.symlink_to(real_test_dir)
++        except OSError as e:
++            print(f"Could not create symlink: {e}")
++            return
++        
++        # Run pytest on the directory containing the symlink
++        import subprocess
++        result = subprocess.run(
++            [sys.executable, "-m", "pytest", "-v", str(tmpdir / "tests")],
++            capture_output=True,
++            text=True
++        )
++        
++        print("STDOUT:")
++        print(result.stdout)
++        print("\nSTDERR:")
++        print(result.stderr)
++        print(f"\nReturn code: {result.returncode}")
++        
++        # Check if the test was collected and run
++        assert "test_example.py::test_something PASSED" in result.stdout, \
++            "Test in symlinked directory was not collected"
++
++
++if __name__ == "__main__":
++    test_symlink_directory_collection()
+diff --git a/test_symlink_regression.py b/test_symlink_regression.py
+new file mode 100644
+index 000000000..cf9d8668a
+--- /dev/null
++++ b/test_symlink_regression.py
+@@ -0,0 +1,73 @@
++"""Test to ensure symlink directory collection regression doesn't reoccur."""
++import os
++import tempfile
++from pathlib import Path
++import pytest
++from _pytest.pathlib import visit
++
++
++def test_visit_follows_symlinks():
++    """Test that the visit function follows symlinks to directories."""
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Create a real directory with a file
++        real_dir = tmpdir / "real"
++        real_dir.mkdir()
++        (real_dir / "file.txt").write_text("content")
++        
++        # Create a symlink to the directory
++        symlink_dir = tmpdir / "symlink"
++        try:
++            symlink_dir.symlink_to(real_dir)
++        except OSError:
++            pytest.skip("Symlinks not supported")
++        
++        # Visit the tmpdir and collect all entries
++        entries = list(visit(str(tmpdir), lambda x: True))
++        entry_names = [e.name for e in entries]
++        
++        # Should find both the real directory and the symlink
++        assert "real" in entry_names
++        assert "symlink" in entry_names
++        
++        # The symlink should be recognized as a directory and visited
++        symlink_entry = next(e for e in entries if e.name == "symlink")
++        assert symlink_entry.is_dir()  # This should follow the symlink
++        
++        # Visit inside the symlink directory should work
++        symlink_contents = list(visit(str(symlink_dir), lambda x: True))
++        assert len(symlink_contents) == 1
++        assert symlink_contents[0].name == "file.txt"
++
++
++def test_is_dir_follows_symlinks():
++    """Test that is_dir() without follow_symlinks=False follows symlinks."""
++    with tempfile.TemporaryDirectory() as tmpdir:
++        tmpdir = Path(tmpdir)
++        
++        # Create a real directory
++        real_dir = tmpdir / "real"
++        real_dir.mkdir()
++        
++        # Create a symlink to the directory
++        symlink_dir = tmpdir / "symlink"
++        try:
++            symlink_dir.symlink_to(real_dir)
++        except OSError:
++            pytest.skip("Symlinks not supported")
++        
++        # Test with os.scandir
++        with os.scandir(str(tmpdir)) as entries:
++            for entry in entries:
++                if entry.name == "symlink":
++                    # Without follow_symlinks=False, is_dir() should return True
++                    assert entry.is_dir()
++                    # With follow_symlinks=False, is_dir() would return False
++                    assert not entry.is_dir(follow_symlinks=False)
++
++
++if __name__ == "__main__":
++    test_visit_follows_symlinks()
++    test_is_dir_follows_symlinks()
++    print("All tests passed!")

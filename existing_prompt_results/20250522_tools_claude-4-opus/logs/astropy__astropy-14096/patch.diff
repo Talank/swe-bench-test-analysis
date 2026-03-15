@@ -1,0 +1,567 @@
+diff --git a/astropy/coordinates/sky_coordinate.py b/astropy/coordinates/sky_coordinate.py
+index ab475f7d0d..601783f9e4 100644
+--- a/astropy/coordinates/sky_coordinate.py
++++ b/astropy/coordinates/sky_coordinate.py
+@@ -871,6 +871,23 @@ class SkyCoord(ShapedLikeNDArray):
+         Overrides getattr to return coordinates that this can be transformed
+         to, based on the alias attr in the primary transform graph.
+         """
++        # Check if the attribute is defined as a descriptor on the class hierarchy.
++        # This includes properties, methods, and other descriptors.
++        for cls in type(self).__mro__:
++            if attr in cls.__dict__:
++                # The attribute exists on the class. If it's a property that raised
++                # an AttributeError, we should re-invoke it to get the actual error
++                # instead of masking it with a generic message.
++                class_attr = cls.__dict__[attr]
++                if isinstance(class_attr, property) and class_attr.fget is not None:
++                    # Re-invoke the property to get the actual AttributeError
++                    # This will raise the original, more informative error
++                    class_attr.fget(self)
++                # For other descriptors or attributes, just report they don't exist
++                raise AttributeError(
++                    f"'{self.__class__.__name__}' object has no attribute '{attr}'"
++                )
++        
+         if "_sky_coord_frame" in self.__dict__:
+             if self._is_name(attr):
+                 return self  # Should this be a deepcopy of self?
+diff --git a/test_chain.py b/test_chain.py
+new file mode 100644
+index 0000000000..541688cb22
+--- /dev/null
++++ b/test_chain.py
+@@ -0,0 +1,39 @@
++import sys
++
++class Base:
++    _in_getattr = False
++    
++    def __getattr__(self, name):
++        # Prevent infinite recursion
++        if Base._in_getattr:
++            raise AttributeError(f"Base: no attribute {name}")
++        
++        Base._in_getattr = True
++        try:
++            # Check if it's a descriptor and try to get better error info
++            for cls in type(self).__mro__:
++                if name in cls.__dict__ and isinstance(cls.__dict__[name], property):
++                    # It's a property that failed. Try to call it again to get the real error
++                    try:
++                        # This will fail again, but we'll get the real error
++                        cls.__dict__[name].fget(self)
++                    except AttributeError as e:
++                        # Re-raise the real error
++                        raise e
++        finally:
++            Base._in_getattr = False
++            
++        raise AttributeError(f"Base: no attribute {name}")
++
++class Derived(Base):
++    @property
++    def prop(self):
++        return self.missing
++
++d = Derived()
++try:
++    d.prop
++except AttributeError as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..d5898736c7
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,77 @@
++import astropy.coordinates as coord
++
++
++class custom_coord(coord.SkyCoord):
++    @property
++    def prop_with_missing_attr(self):
++        """Property that accesses a non-existent attribute"""
++        return self.random_attr
++    
++    @property 
++    def prop_with_existing_attr(self):
++        """Property that accesses an existing attribute"""
++        return self.ra
++    
++    @property
++    def prop_with_error(self):
++        """Property that raises a different kind of error"""
++        raise ValueError("Some other error")
++    
++    def regular_method(self):
++        """Regular method for comparison"""
++        return "method result"
++
++
++# Test 1: Property accessing non-existent attribute (the reported issue)
++print("Test 1: Property accessing non-existent attribute")
++c = custom_coord('00h42m30s', '+41d12m00s', frame='icrs')
++try:
++    c.prop_with_missing_attr
++except AttributeError as e:
++    print(f"  Error: {e}")
++    print(f"  Success: Error mentions 'random_attr': {'random_attr' in str(e)}")
++
++# Test 2: Property accessing existing attribute (should work)
++print("\nTest 2: Property accessing existing attribute")
++try:
++    result = c.prop_with_existing_attr
++    print(f"  Result: {result}")
++    print("  Success: No error raised")
++except Exception as e:
++    print(f"  Error: {e}")
++
++# Test 3: Property raising non-AttributeError (should propagate normally)
++print("\nTest 3: Property raising ValueError")
++try:
++    c.prop_with_error
++except ValueError as e:
++    print(f"  Error: {e}")
++    print("  Success: ValueError propagated correctly")
++except Exception as e:
++    print(f"  Unexpected error type: {type(e).__name__}: {e}")
++
++# Test 4: Accessing non-existent regular attribute (original behavior)
++print("\nTest 4: Accessing non-existent regular attribute")
++try:
++    c.nonexistent
++except AttributeError as e:
++    print(f"  Error: {e}")
++    print(f"  Success: Error mentions 'nonexistent': {'nonexistent' in str(e)}")
++
++# Test 5: Accessing regular method (should work)
++print("\nTest 5: Accessing regular method")
++try:
++    result = c.regular_method()
++    print(f"  Result: {result}")
++    print("  Success: Method called successfully")
++except Exception as e:
++    print(f"  Error: {e}")
++
++# Test 6: Frame transformation (original SkyCoord functionality)
++print("\nTest 6: Frame transformation")
++try:
++    galactic = c.galactic
++    print(f"  Result: {galactic}")
++    print("  Success: Frame transformation worked")
++except Exception as e:
++    print(f"  Error: {e}")
+diff --git a/test_context.py b/test_context.py
+new file mode 100644
+index 0000000000..bc7745e9d7
+--- /dev/null
++++ b/test_context.py
+@@ -0,0 +1,20 @@
++import sys
++
++class TestClass:
++    @property 
++    def prop(self):
++        print("In prop getter")
++        return self.random_attr
++    
++    def __getattr__(self, name):
++        print(f"__getattr__ called with {name}")
++        print(f"Exception info: {sys.exc_info()}")
++        raise AttributeError(f"No attribute {name}")
++
++t = TestClass()
++try:
++    t.prop
++except AttributeError as e:
++    print(f"Final error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_detailed.py b/test_detailed.py
+new file mode 100644
+index 0000000000..0937eedaa9
+--- /dev/null
++++ b/test_detailed.py
+@@ -0,0 +1,30 @@
++import astropy.coordinates as coord
++import traceback
++
++
++class custom_coord(coord.SkyCoord):
++    @property
++    def prop(self):
++        print("Inside prop getter")
++        try:
++            result = self.random_attr
++            print(f"Got result: {result}")
++            return result
++        except AttributeError as e:
++            print(f"AttributeError in prop getter: {e}")
++            raise
++    
++    def __getattr__(self, attr):
++        print(f"custom_coord.__getattr__ called with attr={attr}")
++        return super().__getattr__(attr)
++
++
++# Test the issue
++c = custom_coord('00h42m30s', '+41d12m00s', frame='icrs')
++print("About to access c.prop")
++try:
++    c.prop
++except AttributeError as e:
++    print(f"\nFinal error message: {e}")
++    print("\nFull traceback:")
++    traceback.print_exc()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..b515b5fb5d
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,63 @@
++"""Test edge cases for the fix."""
++import astropy.coordinates as coord
++
++
++class CustomCoord(coord.SkyCoord):
++    @property
++    def nested_property(self):
++        # Property that accesses another property that fails
++        return self.failing_property
++    
++    @property
++    def failing_property(self):
++        # This property fails
++        return self.nonexistent
++    
++    @property
++    def property_with_hasattr(self):
++        # Using hasattr should not cause issues
++        if hasattr(self, 'nonexistent'):
++            return self.nonexistent
++        return "default"
++    
++    # Test property without getter (should not cause issues)
++    _value = None
++    @property
++    def prop_without_getter(self):
++        return self._value
++    
++    @prop_without_getter.setter
++    def prop_without_getter(self, value):
++        self._value = value
++
++
++c = CustomCoord('00h42m30s', '+41d12m00s', frame='icrs')
++
++# Test nested property failure
++print("Test 1: Nested property")
++try:
++    c.nested_property
++except AttributeError as e:
++    print(f"  Error: {e}")
++    # The error should mention 'nonexistent' from the inner property
++    assert 'nonexistent' in str(e), f"Expected 'nonexistent' in error, got: {e}"
++
++# Test hasattr in property
++print("\nTest 2: Property using hasattr")
++result = c.property_with_hasattr
++print(f"  Result: {result}")
++assert result == "default"
++
++# Test property with setter
++print("\nTest 3: Property with setter")
++c.prop_without_getter = 42
++result = c.prop_without_getter
++print(f"  Result: {result}")
++assert result == 42
++
++# Test accessing frame transformations still works
++print("\nTest 4: Frame transformation")
++galactic = c.galactic
++print(f"  Transformed to galactic: {galactic.l.deg:.2f}, {galactic.b.deg:.2f}")
++
++print("\nAll edge case tests passed!")
+diff --git a/test_exception_chain.py b/test_exception_chain.py
+new file mode 100644
+index 0000000000..1d23f3078f
+--- /dev/null
++++ b/test_exception_chain.py
+@@ -0,0 +1,30 @@
++import sys
++
++class Base:
++    def __getattr__(self, name):
++        # Check if we're being called because a descriptor raised AttributeError
++        # by examining the traceback
++        tb = sys.exc_info()[2]
++        if tb is not None:
++            # We're in an exception context
++            # Check if the previous frame was from a property getter
++            import traceback
++            stack = traceback.extract_tb(tb)
++            print(f"Stack when getting {name}:")
++            for frame in stack:
++                print(f"  {frame.filename}:{frame.lineno} in {frame.name}")
++        
++        raise AttributeError(f"Base: no attribute {name}")
++
++class Derived(Base):
++    @property
++    def prop(self):
++        return self.missing
++
++d = Derived()
++try:
++    d.prop
++except AttributeError as e:
++    print(f"Error: {e}")
++    print(f"Cause: {e.__cause__}")
++    print(f"Context: {e.__context__}")
+diff --git a/test_inspect.py b/test_inspect.py
+new file mode 100644
+index 0000000000..a3eb61547e
+--- /dev/null
++++ b/test_inspect.py
+@@ -0,0 +1,26 @@
++import inspect
++
++class Base:
++    def __getattr__(self, name):
++        # Get the call stack
++        stack = inspect.stack()
++        print(f"\n__getattr__ called for '{name}'")
++        print("Call stack:")
++        for i, frame_info in enumerate(stack[:5]):  # Show first 5 frames
++            print(f"  {i}: {frame_info.filename}:{frame_info.lineno} in {frame_info.function}")
++            # Check if we're being called from a property getter
++            if i == 1 and frame_info.function == 'prop' and 'self.missing' in frame_info.code_context[0]:
++                print(f"    -> Detected property 'prop' trying to access 'missing'")
++        
++        raise AttributeError(f"Base: no attribute {name}")
++
++class Derived(Base):
++    @property
++    def prop(self):
++        return self.missing
++
++d = Derived()
++try:
++    d.prop
++except AttributeError as e:
++    print(f"\nFinal error: {e}")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..b462abb225
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,17 @@
++import astropy.coordinates as coord
++
++
++class custom_coord(coord.SkyCoord):
++    @property
++    def prop(self):
++        return self.random_attr
++
++
++# Test the issue
++c = custom_coord('00h42m30s', '+41d12m00s', frame='icrs')
++try:
++    c.prop
++except AttributeError as e:
++    print(f"Error message: {e}")
++    print(f"Expected: 'custom_coord' object has no attribute 'random_attr'")
++    print(f"Actual: {e}")
+diff --git a/test_methods.py b/test_methods.py
+new file mode 100644
+index 0000000000..96350f5fe2
+--- /dev/null
++++ b/test_methods.py
+@@ -0,0 +1,43 @@
++"""Test that methods still work correctly with our fix."""
++import astropy.coordinates as coord
++
++
++class CustomCoord(coord.SkyCoord):
++    def method_with_missing_attr(self):
++        # This should raise AttributeError for 'missing_attr'
++        return self.missing_attr
++    
++    @classmethod
++    def class_method(cls):
++        return "class method result"
++    
++    @staticmethod
++    def static_method():
++        return "static method result"
++
++
++# Test that methods work correctly
++c = CustomCoord('00h42m30s', '+41d12m00s', frame='icrs')
++
++# Regular method that accesses missing attribute
++try:
++    c.method_with_missing_attr()
++except AttributeError as e:
++    print(f"Method error: {e}")
++    assert 'missing_attr' in str(e)
++
++# Class method should work
++result = c.class_method()
++print(f"Class method: {result}")
++assert result == "class method result"
++
++# Static method should work  
++result = c.static_method()
++print(f"Static method: {result}")
++assert result == "static method result"
++
++# Accessing the method itself should work
++method = c.method_with_missing_attr
++print(f"Got method: {method}")
++
++print("\nAll method tests passed!")
+diff --git a/test_property_chain.py b/test_property_chain.py
+new file mode 100644
+index 0000000000..c3dcaa51f2
+--- /dev/null
++++ b/test_property_chain.py
+@@ -0,0 +1,16 @@
++class Base:
++    def __getattr__(self, name):
++        raise AttributeError(f"Base: no attribute {name}")
++
++class Derived(Base):
++    @property
++    def prop(self):
++        return self.missing
++
++d = Derived()
++try:
++    d.prop
++except AttributeError as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_python_behavior.py b/test_python_behavior.py
+new file mode 100644
+index 0000000000..e97b7d1dba
+--- /dev/null
++++ b/test_python_behavior.py
+@@ -0,0 +1,29 @@
++class TestClass:
++    @property
++    def prop(self):
++        print("In prop getter")
++        raise AttributeError("Inner error from prop")
++    
++    def __getattr__(self, name):
++        print(f"__getattr__ called with {name}")
++        # Check if this is a descriptor on the class
++        obj_class = type(self)
++        descriptor = None
++        for cls in obj_class.__mro__:
++            if name in cls.__dict__:
++                descriptor = cls.__dict__[name]
++                break
++        
++        if descriptor is not None and hasattr(descriptor, '__get__'):
++            print(f"Found descriptor for {name}")
++            # This is a descriptor, don't mask errors from it
++            # We need to somehow detect that we're being called because
++            # the descriptor raised an AttributeError
++        
++        raise AttributeError(f"No attribute {name}")
++
++t = TestClass()
++try:
++    t.prop
++except AttributeError as e:
++    print(f"Final error: {e}")
+diff --git a/test_reraise.py b/test_reraise.py
+new file mode 100644
+index 0000000000..6ab516d890
+--- /dev/null
++++ b/test_reraise.py
+@@ -0,0 +1,21 @@
++class Base:
++    def __getattr__(self, name):
++        # Check if it's a descriptor
++        for cls in type(self).__mro__:
++            if name in cls.__dict__:
++                # Just re-raise without specifying anything
++                raise AttributeError()
++        raise AttributeError(f"Base: no attribute {name}")
++
++class Derived(Base):
++    @property
++    def prop(self):
++        return self.missing
++
++d = Derived()
++try:
++    d.prop
++except AttributeError as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_subclass_property_error.py b/test_subclass_property_error.py
+new file mode 100644
+index 0000000000..9cc5829b9d
+--- /dev/null
++++ b/test_subclass_property_error.py
+@@ -0,0 +1,50 @@
++"""Test that subclassed SkyCoord properties show correct AttributeError messages."""
++import pytest
++import astropy.coordinates as coord
++
++
++def test_subclass_property_attribute_error():
++    """Test that AttributeError from within a property shows the correct message."""
++    
++    class CustomCoord(coord.SkyCoord):
++        @property
++        def prop_with_missing_attr(self):
++            # This should raise AttributeError for 'missing_attr', not 'prop_with_missing_attr'
++            return self.missing_attr
++        
++        @property
++        def prop_with_existing_attr(self):
++            # This should work fine
++            return self.ra
++        
++        @property
++        def prop_with_other_error(self):
++            # This should raise ValueError, not AttributeError
++            raise ValueError("Custom error")
++    
++    c = CustomCoord('00h42m30s', '+41d12m00s', frame='icrs')
++    
++    # Test 1: Property accessing non-existent attribute
++    with pytest.raises(AttributeError) as exc_info:
++        c.prop_with_missing_attr
++    assert 'missing_attr' in str(exc_info.value)
++    assert 'prop_with_missing_attr' not in str(exc_info.value)
++    
++    # Test 2: Property accessing existing attribute should work
++    result = c.prop_with_existing_attr
++    assert result is not None
++    
++    # Test 3: Property raising non-AttributeError should propagate correctly
++    with pytest.raises(ValueError) as exc_info:
++        c.prop_with_other_error
++    assert "Custom error" in str(exc_info.value)
++    
++    # Test 4: Direct access to non-existent attribute (original behavior)
++    with pytest.raises(AttributeError) as exc_info:
++        c.nonexistent_attr
++    assert 'nonexistent_attr' in str(exc_info.value)
++
++
++if __name__ == "__main__":
++    test_subclass_property_attribute_error()
++    print("All tests passed!")

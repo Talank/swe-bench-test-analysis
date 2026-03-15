@@ -1,0 +1,523 @@
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index d517d7269b..c2aea9c730 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -914,7 +914,7 @@ class ForeignKey(ForeignObject):
+             return
+ 
+         using = router.db_for_read(self.remote_field.model, instance=model_instance)
+-        qs = self.remote_field.model._default_manager.using(using).filter(
++        qs = self.remote_field.model._base_manager.using(using).filter(
+             **{self.remote_field.field_name: value}
+         )
+         qs = qs.complex_filter(self.get_limit_choices_to())
+diff --git a/test_foreignkey_base_manager.py b/test_foreignkey_base_manager.py
+new file mode 100644
+index 0000000000..bc1ba4c114
+--- /dev/null
++++ b/test_foreignkey_base_manager.py
+@@ -0,0 +1,70 @@
++"""
++Test that ForeignKey validation uses base manager instead of default manager.
++"""
++from django.core.exceptions import ValidationError
++from django.db import models
++from django.test import TestCase
++
++
++class ActiveArticleManager(models.Manager):
++    """Manager that filters out archived articles."""
++    def get_queryset(self):
++        return super().get_queryset().filter(archived=False)
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    archived = models.BooleanField(default=False)
++    # Custom default manager that excludes archived articles
++    objects = ActiveArticleManager()
++    
++    class Meta:
++        app_label = 'test_foreignkey_base_manager'
++
++
++class FavoriteArticle(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_foreignkey_base_manager'
++
++
++class ForeignKeyBaseManagerTest(TestCase):
++    def test_foreignkey_validation_uses_base_manager(self):
++        """
++        ForeignKey validation should use _base_manager to allow references
++        to objects that are filtered out by the default manager.
++        """
++        # Create an archived article (not visible through default manager)
++        archived_article = Article._base_manager.create(
++            title="Archived Article", 
++            archived=True
++        )
++        
++        # Create an active article (visible through default manager)
++        active_article = Article.objects.create(
++            title="Active Article",
++            archived=False
++        )
++        
++        # Verify default manager doesn't include archived article
++        self.assertNotIn(archived_article, Article.objects.all())
++        self.assertIn(active_article, Article.objects.all())
++        
++        # Verify base manager includes both
++        self.assertIn(archived_article, Article._base_manager.all())
++        self.assertIn(active_article, Article._base_manager.all())
++        
++        # Test validation with archived article - should pass
++        favorite1 = FavoriteArticle(article=archived_article)
++        try:
++            favorite1.full_clean()
++        except ValidationError:
++            self.fail("ForeignKey validation should pass for archived article when using base manager")
++        
++        # Test validation with active article - should also pass
++        favorite2 = FavoriteArticle(article=active_article)
++        try:
++            favorite2.full_clean()
++        except ValidationError:
++            self.fail("ForeignKey validation should pass for active article")
+diff --git a/test_foreignkey_form_validation.py b/test_foreignkey_form_validation.py
+new file mode 100644
+index 0000000000..76a9470bf0
+--- /dev/null
++++ b/test_foreignkey_form_validation.py
+@@ -0,0 +1,102 @@
++"""Test ForeignKey validation in ModelForm context."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.forms import ModelForm
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test models
++class ArticleManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        return qs.filter(archived=False)
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    archived = models.BooleanField(default=False)
++    objects = ArticleManager()
++    
++    class Meta:
++        app_label = 'test_app'
++
++class FavoriteArticle(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++    schema_editor.create_model(FavoriteArticle)
++
++# Create test data
++archived_article = Article._base_manager.create(title="Archived Article", archived=True)
++active_article = Article.objects.create(title="Active Article", archived=False)
++
++print(f"Created archived article with id: {archived_article.id}")
++print(f"Created active article with id: {active_article.id}")
++
++# Test with ModelForm
++class FavoriteArticleForm(ModelForm):
++    class Meta:
++        model = FavoriteArticle
++        fields = '__all__'
++    
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        # Use the base manager to allow archived articles
++        self.fields['article'].queryset = Article._base_manager.all()
++
++# Test 1: Form with archived article
++print("\n--- Testing ModelForm with archived article ---")
++form1 = FavoriteArticleForm(data={'article': archived_article.id})
++print(f"Form is valid: {form1.is_valid()}")
++if form1.is_valid():
++    print("SUCCESS: Form validates with archived article!")
++    favorite1 = form1.save()
++    print(f"Saved FavoriteArticle with id: {favorite1.id}")
++else:
++    print(f"FAILED: Form errors: {form1.errors}")
++
++# Test 2: Form with active article
++print("\n--- Testing ModelForm with active article ---")
++form2 = FavoriteArticleForm(data={'article': active_article.id})
++print(f"Form is valid: {form2.is_valid()}")
++if form2.is_valid():
++    print("SUCCESS: Form validates with active article!")
++    favorite2 = form2.save()
++    print(f"Saved FavoriteArticle with id: {favorite2.id}")
++else:
++    print(f"FAILED: Form errors: {form2.errors}")
++
++# Test 3: Verify saved objects
++print("\n--- Verifying saved objects ---")
++all_favorites = FavoriteArticle._base_manager.all()
++for fav in all_favorites:
++    print(f"FavoriteArticle {fav.id}: article='{fav.article.title}' (archived={fav.article.archived})")
+diff --git a/test_foreignkey_validation.py b/test_foreignkey_validation.py
+new file mode 100644
+index 0000000000..e90f5fa491
+--- /dev/null
++++ b/test_foreignkey_validation.py
+@@ -0,0 +1,111 @@
++"""Test script to reproduce the ForeignKey validation issue with custom managers."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.forms import ModelForm
++from django.core.exceptions import ValidationError
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test models
++class ArticleManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        return qs.filter(archived=False)
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    archived = models.BooleanField(default=False)
++    # Don't include archived articles by default.
++    objects = ArticleManager()
++    
++    class Meta:
++        app_label = 'test_app'
++
++class FavoriteArticle(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++    schema_editor.create_model(FavoriteArticle)
++
++# Create test data
++# Create an archived article
++archived_article = Article._base_manager.create(title="Archived Article", archived=True)
++print(f"Created archived article with id: {archived_article.id}")
++
++# Create a non-archived article
++active_article = Article.objects.create(title="Active Article", archived=False)
++print(f"Created active article with id: {active_article.id}")
++
++# Test 1: Verify that archived article is not in default manager
++print(f"\nArticles in default manager: {list(Article.objects.values_list('id', 'title'))}")
++print(f"Articles in base manager: {list(Article._base_manager.values_list('id', 'title'))}")
++
++# Test 2: Try to create a FavoriteArticle with an archived article
++print("\n--- Testing ForeignKey validation ---")
++favorite = FavoriteArticle(article=archived_article)
++
++try:
++    # This should fail with current implementation
++    favorite.full_clean()
++    print("SUCCESS: Validation passed for archived article!")
++except ValidationError as e:
++    print(f"FAILED: Validation error: {e}")
++    print("This is the bug - archived article should be valid if we're using base manager")
++
++# Test 3: Try with active article
++print("\n--- Testing with active article ---")
++favorite2 = FavoriteArticle(article=active_article)
++try:
++    favorite2.full_clean()
++    print("SUCCESS: Validation passed for active article!")
++except ValidationError as e:
++    print(f"FAILED: Validation error: {e}")
++
++# Test 4: Test with ModelForm
++print("\n--- Testing with ModelForm ---")
++class FavoriteArticleForm(ModelForm):
++    class Meta:
++        model = FavoriteArticle
++        fields = '__all__'
++    
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        # Use the base manager to allow archived articles
++        self.fields['article'].queryset = Article._base_manager.all()
++
++# Try to validate form with archived article
++form_data = {'article': archived_article.id}
++form = FavoriteArticleForm(data=form_data)
++print(f"Form is valid: {form.is_valid()}")
++if not form.is_valid():
++    print(f"Form errors: {form.errors}")
+diff --git a/test_limit_choices_to.py b/test_limit_choices_to.py
+new file mode 100644
+index 0000000000..00d62d64a6
+--- /dev/null
++++ b/test_limit_choices_to.py
+@@ -0,0 +1,125 @@
++"""Test ForeignKey validation with limit_choices_to."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test models
++class ArticleManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        return qs.filter(archived=False)
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    archived = models.BooleanField(default=False)
++    featured = models.BooleanField(default=False)
++    objects = ArticleManager()
++    
++    class Meta:
++        app_label = 'test_app'
++
++class FavoriteArticle(models.Model):
++    # Only allow featured articles
++    article = models.ForeignKey(
++        Article, 
++        on_delete=models.CASCADE,
++        limit_choices_to={'featured': True}
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++    schema_editor.create_model(FavoriteArticle)
++
++# Create test data
++# Archived and featured article
++archived_featured = Article._base_manager.create(
++    title="Archived Featured", archived=True, featured=True
++)
++print(f"Created archived featured article with id: {archived_featured.id}")
++
++# Archived and not featured article
++archived_not_featured = Article._base_manager.create(
++    title="Archived Not Featured", archived=True, featured=False
++)
++print(f"Created archived not featured article with id: {archived_not_featured.id}")
++
++# Active and featured article
++active_featured = Article.objects.create(
++    title="Active Featured", archived=False, featured=True
++)
++print(f"Created active featured article with id: {active_featured.id}")
++
++# Active and not featured article
++active_not_featured = Article.objects.create(
++    title="Active Not Featured", archived=False, featured=False
++)
++print(f"Created active not featured article with id: {active_not_featured.id}")
++
++print("\n--- Testing ForeignKey validation with limit_choices_to ---")
++
++# Test 1: Archived featured article (should pass - it's featured)
++print("\nTest 1: Archived featured article")
++favorite1 = FavoriteArticle(article=archived_featured)
++try:
++    favorite1.full_clean()
++    print("SUCCESS: Validation passed for archived featured article!")
++except ValidationError as e:
++    print(f"FAILED: Validation error: {e}")
++
++# Test 2: Archived not featured article (should fail - not featured)
++print("\nTest 2: Archived not featured article")
++favorite2 = FavoriteArticle(article=archived_not_featured)
++try:
++    favorite2.full_clean()
++    print("UNEXPECTED: Validation passed for archived not featured article!")
++except ValidationError as e:
++    print(f"EXPECTED: Validation error: {e}")
++
++# Test 3: Active featured article (should pass)
++print("\nTest 3: Active featured article")
++favorite3 = FavoriteArticle(article=active_featured)
++try:
++    favorite3.full_clean()
++    print("SUCCESS: Validation passed for active featured article!")
++except ValidationError as e:
++    print(f"FAILED: Validation error: {e}")
++
++# Test 4: Active not featured article (should fail - not featured)
++print("\nTest 4: Active not featured article")
++favorite4 = FavoriteArticle(article=active_not_featured)
++try:
++    favorite4.full_clean()
++    print("UNEXPECTED: Validation passed for active not featured article!")
++except ValidationError as e:
++    print(f"EXPECTED: Validation error: {e}")
+diff --git a/tests/model_fields/models.py b/tests/model_fields/models.py
+index a11eb0ba44..1024103ab2 100644
+--- a/tests/model_fields/models.py
++++ b/tests/model_fields/models.py
+@@ -437,3 +437,21 @@ class UUIDChild(PrimaryKeyUUIDModel):
+ 
+ class UUIDGrandchild(UUIDChild):
+     pass
++
++
++# Models for testing ForeignKey validation with custom managers
++class ActiveArticleManager(models.Manager):
++    """Manager that filters out archived articles."""
++    def get_queryset(self):
++        return super().get_queryset().filter(archived=False)
++
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    archived = models.BooleanField(default=False)
++    # Custom default manager that excludes archived articles
++    objects = ActiveArticleManager()
++
++
++class FavoriteArticle(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
+diff --git a/tests/model_fields/test_foreignkey.py b/tests/model_fields/test_foreignkey.py
+index d30cca9b5c..6b7af60696 100644
+--- a/tests/model_fields/test_foreignkey.py
++++ b/tests/model_fields/test_foreignkey.py
+@@ -7,7 +7,9 @@ from django.db import models
+ from django.test import TestCase, skipIfDBFeature
+ from django.test.utils import isolate_apps
+ 
+-from .models import Bar, FkToChar, Foo, PrimaryKeyCharModel
++from .models import (
++    Article, Bar, FavoriteArticle, FkToChar, Foo, PrimaryKeyCharModel,
++)
+ 
+ 
+ class ForeignKeyTests(TestCase):
+@@ -147,3 +149,36 @@ class ForeignKeyTests(TestCase):
+         )
+         with self.assertRaisesMessage(FieldError, msg):
+             Related._meta.get_field('child').related_fields
++
++    def test_foreignkey_validation_with_custom_manager(self):
++        """
++        ForeignKey validation should use _base_manager to allow references
++        to objects that are filtered out by the default manager.
++        """
++        # Create an archived article (not visible through default manager)
++        archived_article = Article._base_manager.create(
++            title="Archived Article", 
++            archived=True
++        )
++        
++        # Create an active article (visible through default manager)
++        active_article = Article.objects.create(
++            title="Active Article",
++            archived=False
++        )
++        
++        # Verify default manager doesn't include archived article
++        self.assertNotIn(archived_article, Article.objects.all())
++        self.assertIn(active_article, Article.objects.all())
++        
++        # Verify base manager includes both
++        self.assertIn(archived_article, Article._base_manager.all())
++        self.assertIn(active_article, Article._base_manager.all())
++        
++        # Test validation with archived article - should pass
++        favorite1 = FavoriteArticle(article=archived_article)
++        favorite1.full_clean()  # Should not raise ValidationError
++        
++        # Test validation with active article - should also pass
++        favorite2 = FavoriteArticle(article=active_article)
++        favorite2.full_clean()  # Should not raise ValidationError

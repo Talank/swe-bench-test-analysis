@@ -1,0 +1,389 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..40ac5fe254
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,22 @@
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator
++from sympy.physics.quantum import IdentityOperator
++
++# Create an operator A
++A = Operator('A')
++Identity = IdentityOperator()
++
++# Test 1: A * Identity should give A
++result1 = A * Identity
++print(f"A * Identity = {result1}")
++print(f"Is A * Identity == A? {result1 == A}")
++
++# Test 2: Dagger(A) * Identity should give Dagger(A)
++B = Dagger(A)
++result2 = B * Identity
++print(f"\nDagger(A) * Identity = {result2}")
++print(f"Is Dagger(A) * Identity == Dagger(A)? {result2 == B}")
++
++# Let's also check the types
++print(f"\nType of result1: {type(result1)}")
++print(f"Type of result2: {type(result2)}")
+diff --git a/sympy/core/mul.py b/sympy/core/mul.py
+index d4af08fa73..0201f423db 100644
+--- a/sympy/core/mul.py
++++ b/sympy/core/mul.py
+@@ -634,6 +634,70 @@ def _handle_for_oo(c_part, coeff_sign):
+             coeff = c_part[0]
+             c_part = [Add(*[coeff*f for f in c_part[1].args])]
+ 
++        # Handle IdentityOperator from quantum module
++        from sympy.physics.quantum.operator import IdentityOperator
++        from sympy.physics.quantum.qexpr import QExpr
++        from sympy.physics.quantum.dagger import Dagger
++        from sympy.core import power
++        
++        # Helper function to check if an expression is quantum-related
++        def is_quantum_expr(expr):
++            if isinstance(expr, (QExpr, Dagger)):
++                return True
++            # Check if it's a power of a quantum expression
++            if isinstance(expr, power.Pow) and isinstance(expr.base, QExpr):
++                return True
++            # Check for quantum module classes by module name
++            module = getattr(type(expr), '__module__', '')
++            if module and 'sympy.physics.quantum' in module:
++                return True
++            return False
++        
++        # Check if we have IdentityOperator and at least one quantum expression
++        has_identity = False
++        has_quantum = False
++        identity_in_c = False
++        identity_in_nc = False
++        
++        # Check for IdentityOperator and quantum objects
++        for arg in c_part:
++            if isinstance(arg, IdentityOperator):
++                has_identity = True
++                identity_in_c = True
++            elif is_quantum_expr(arg):
++                has_quantum = True
++        
++        for arg in nc_part:
++            if isinstance(arg, IdentityOperator):
++                has_identity = True
++                identity_in_nc = True
++            elif is_quantum_expr(arg):
++                has_quantum = True
++        
++        # Only simplify if we have both IdentityOperator and quantum objects
++        if has_identity and has_quantum:
++            new_c_part = []
++            new_nc_part = []
++            
++            # Remove IdentityOperator from commutative part
++            if identity_in_c:
++                for arg in c_part:
++                    if not isinstance(arg, IdentityOperator):
++                        new_c_part.append(arg)
++                c_part = new_c_part
++            
++            # Remove IdentityOperator from non-commutative part
++            if identity_in_nc:
++                for arg in nc_part:
++                    if not isinstance(arg, IdentityOperator):
++                        new_nc_part.append(arg)
++                nc_part = new_nc_part
++            
++            # If nothing is left after removing IdentityOperator, 
++            # return just IdentityOperator
++            if not c_part and not nc_part:
++                return [IdentityOperator()], [], order_symbols
++
+         return c_part, nc_part, order_symbols
+ 
+     def _eval_power(self, e):
+diff --git a/sympy/physics/quantum/tests/test_operator.py b/sympy/physics/quantum/tests/test_operator.py
+index 7c8574fe14..f6e797ae4f 100644
+--- a/sympy/physics/quantum/tests/test_operator.py
++++ b/sympy/physics/quantum/tests/test_operator.py
+@@ -101,6 +101,10 @@ def test_identity():
+     assert Dagger(I) == I
+     assert qapply(I * O) == O
+     assert qapply(O * I) == O
++    
++    # Test Dagger multiplication with IdentityOperator
++    assert Dagger(O) * I == Dagger(O)
++    assert I * Dagger(O) == Dagger(O)
+ 
+     for n in [2, 3, 5]:
+         assert represent(IdentityOperator(n)) == eye(n)
+diff --git a/test_comprehensive_identity.py b/test_comprehensive_identity.py
+new file mode 100644
+index 0000000000..8e8dd48ae6
+--- /dev/null
++++ b/test_comprehensive_identity.py
+@@ -0,0 +1,68 @@
++from sympy import symbols, Mul, Add, I as ImaginaryUnit
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator, IdentityOperator, HermitianOperator, UnitaryOperator
++from sympy.physics.quantum.state import Ket, Bra
++from sympy.physics.quantum.commutator import Commutator
++from sympy.physics.quantum.anticommutator import AntiCommutator
++
++def test_comprehensive_identity():
++    """Comprehensive test for IdentityOperator simplification with various quantum objects."""
++    
++    # Create operators
++    I = IdentityOperator()
++    A = Operator('A')
++    B = Operator('B')
++    H = HermitianOperator('H')
++    U = UnitaryOperator('U')
++    
++    # Create states
++    psi = Ket('psi')
++    phi = Bra('phi')
++    
++    # Basic tests with Dagger
++    assert Dagger(A) * I == Dagger(A)
++    assert I * Dagger(A) == Dagger(A)
++    assert Dagger(H) * I == H  # Since H is Hermitian, Dagger(H) == H
++    assert I * Dagger(U) == Dagger(U)
++    
++    # Test with complex expressions
++    assert Dagger(A * B) * I == Dagger(A * B)
++    # Note: When multiplying I by an Add expression, it doesn't distribute automatically
++    # This is expected behavior in sympy
++    
++    # Test that numeric multiplication is preserved
++    x, y = symbols('x y')
++    assert isinstance(x * I, Mul)
++    assert isinstance(I * y, Mul)
++    assert isinstance(2 * I, Mul)
++    assert isinstance(ImaginaryUnit * I, Mul)
++    
++    # Test with multiple operators
++    assert A * I * B == A * B
++    assert Dagger(A) * I * Dagger(B) == Dagger(A) * Dagger(B)
++    
++    # Test identity squared
++    assert I * I == I
++    assert I * I * I == I
++    
++    # Test with commutators and anticommutators
++    comm = Commutator(A, B)
++    assert comm * I == comm
++    assert I * comm == comm
++    
++    anticomm = AntiCommutator(A, B)
++    assert anticomm * I == anticomm
++    assert I * anticomm == anticomm
++    
++    # Test that IdentityOperator doesn't simplify with non-quantum objects alone
++    assert isinstance(I * 5, Mul)
++    # String multiplication with IdentityOperator is not supported
++    
++    # Test with mixed quantum and classical expressions
++    # Note: (A + x) * I doesn't automatically distribute in sympy
++    assert isinstance((A + x) * I, Mul)
++    
++    print("All comprehensive tests passed!")
++
++if __name__ == "__main__":
++    test_comprehensive_identity()
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..3593e090a4
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,36 @@
++"""
++Final verification of the fix for Dagger() * IdentityOperator() simplification.
++
++This test verifies that the issue described in the problem statement is fixed:
++- A * Identity returns A (this already worked)
++- Dagger(A) * Identity now returns Dagger(A) (this was the bug)
++"""
++
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator, IdentityOperator
++
++def test_problem_statement():
++    """Test the exact scenario from the problem statement."""
++    A = Operator('A')
++    Identity = IdentityOperator()
++    
++    # This already worked
++    result1 = A * Identity
++    print(f"A * Identity = {result1}")
++    assert result1 == A, f"Expected A, got {result1}"
++    
++    # This was the bug
++    B = Dagger(A)
++    result2 = B * Identity
++    print(f"Dagger(A) * Identity = {result2}")
++    assert result2 == B, f"Expected Dagger(A), got {result2}"
++    
++    # Also test reverse order
++    result3 = Identity * B
++    print(f"Identity * Dagger(A) = {result3}")
++    assert result3 == B, f"Expected Dagger(A), got {result3}"
++    
++    print("\nAll tests from the problem statement pass! ✓")
++
++if __name__ == "__main__":
++    test_problem_statement()
+diff --git a/test_identity_dagger.py b/test_identity_dagger.py
+new file mode 100644
+index 0000000000..ce7c14b6fd
+--- /dev/null
++++ b/test_identity_dagger.py
+@@ -0,0 +1,34 @@
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator, IdentityOperator
++from sympy import Mul
++
++def test_dagger_identity_simplification():
++    """Test that Dagger(operator) * IdentityOperator simplifies correctly."""
++    A = Operator('A')
++    I = IdentityOperator()
++    
++    # Test regular operator multiplication with identity
++    assert A * I == A
++    assert I * A == A
++    
++    # Test Dagger multiplication with identity
++    B = Dagger(A)
++    assert B * I == B
++    assert I * B == B
++    
++    # Test that numeric multiplication is preserved
++    assert isinstance(3 * I, Mul)
++    assert isinstance(I * 3, Mul)
++    
++    # Test multiple identities
++    assert I * I == I
++    
++    # Test with complex expressions
++    C = Operator('C')
++    expr = Dagger(A * C) * I
++    assert expr == Dagger(A * C)
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_dagger_identity_simplification()
+diff --git a/test_mul_patch.py b/test_mul_patch.py
+new file mode 100644
+index 0000000000..bbdf1dc7f0
+--- /dev/null
++++ b/test_mul_patch.py
+@@ -0,0 +1,62 @@
++from sympy import Mul, S
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator, IdentityOperator
++
++# Store the original flatten method
++_original_flatten = Mul.flatten
++
++def quantum_aware_flatten(cls, seq):
++    """Custom flatten that handles IdentityOperator."""
++    # First, let the original flatten do its work
++    rv = _original_flatten(seq)
++    
++    if rv is None:
++        return rv
++    
++    # rv is a tuple (commutative_part, noncommutative_part, order)
++    c_part, nc_part, order = rv
++    
++    # Check for IdentityOperator in both parts
++    new_c_part = []
++    new_nc_part = []
++    has_identity = False
++    
++    # Check commutative part
++    for arg in c_part:
++        if isinstance(arg, IdentityOperator):
++            has_identity = True
++        else:
++            new_c_part.append(arg)
++    
++    # Check non-commutative part
++    for arg in nc_part:
++        if isinstance(arg, IdentityOperator):
++            has_identity = True
++        else:
++            new_nc_part.append(arg)
++    
++    # If we found and removed IdentityOperator, update the result
++    if has_identity:
++        # If nothing is left after removing IdentityOperator
++        if not new_c_part and not new_nc_part:
++            # Return just IdentityOperator
++            return [IdentityOperator()], [], order
++        else:
++            return new_c_part, new_nc_part, order
++    
++    return rv
++
++# Monkey patch the flatten method
++Mul.flatten = classmethod(quantum_aware_flatten)
++
++# Test it
++A = Operator('A')
++I = IdentityOperator()
++B = Dagger(A)
++
++print("Testing with patched Mul.flatten:")
++print(f"A * I = {A * I}")
++print(f"Dagger(A) * I = {B * I}")
++print(f"I * Dagger(A) = {I * B}")
++print(f"I * I = {I * I}")
++print(f"2 * I * Dagger(A) = {2 * I * B}")
+diff --git a/test_quantum_simplify.py b/test_quantum_simplify.py
+new file mode 100644
+index 0000000000..6b4fb68f13
+--- /dev/null
++++ b/test_quantum_simplify.py
+@@ -0,0 +1,41 @@
++from sympy import Mul, S
++from sympy.physics.quantum.dagger import Dagger
++from sympy.physics.quantum.operator import Operator, IdentityOperator
++
++def quantum_simplify(expr):
++    """Simplify quantum expressions by applying identity operator rules."""
++    if isinstance(expr, Mul):
++        # Get the arguments of the multiplication
++        args = list(expr.args)
++        
++        # Check if IdentityOperator is in the args
++        identity_indices = [i for i, arg in enumerate(args) if isinstance(arg, IdentityOperator)]
++        
++        if identity_indices:
++            # Remove all IdentityOperators
++            new_args = [arg for i, arg in enumerate(args) if i not in identity_indices]
++            
++            if not new_args:
++                # If all args were IdentityOperators, return one IdentityOperator
++                return IdentityOperator()
++            elif len(new_args) == 1:
++                # If only one arg remains, return it
++                return new_args[0]
++            else:
++                # Otherwise, return a new Mul with the remaining args
++                return Mul(*new_args)
++    
++    return expr
++
++# Test the function
++A = Operator('A')
++I = IdentityOperator()
++B = Dagger(A)
++
++print("Testing quantum_simplify:")
++print(f"A * I = {A * I}")
++print(f"quantum_simplify(A * I) = {quantum_simplify(A * I)}")
++print(f"Dagger(A) * I = {B * I}")
++print(f"quantum_simplify(Dagger(A) * I) = {quantum_simplify(B * I)}")
++print(f"I * Dagger(A) = {I * B}")
++print(f"quantum_simplify(I * Dagger(A)) = {quantum_simplify(I * B)}")

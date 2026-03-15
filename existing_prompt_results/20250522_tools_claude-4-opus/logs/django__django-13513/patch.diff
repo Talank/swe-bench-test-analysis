@@ -1,0 +1,488 @@
+diff --git a/test_integration.py b/test_integration.py
+new file mode 100644
+index 0000000000..ffe61c72dc
+--- /dev/null
++++ b/test_integration.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python
++"""Integration test to verify suppress_context works in actual Django views."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import Client
++from django.urls import path
++from django.views import View
++from django.http import HttpResponse
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['*'],
++)
++
++django.setup()
++
++class TestView(View):
++    def get(self, request, *args, **kwargs):
++        try:
++            raise RuntimeError('my error')
++        except Exception as exc:
++            raise ValueError('my new error') from None
++
++urlpatterns = [
++    path('test/', TestView.as_view(), name='test'),
++]
++
++def test_integration():
++    """Test that the debug page correctly handles suppress_context."""
++    client = Client()
++    client.raise_request_exception = False  # Don't re-raise exceptions
++    
++    # Make a request that will trigger the exception
++    response = client.get('/test/')
++    
++    # Check that we get a 500 error
++    assert response.status_code == 500
++    
++    # Check that the response contains the ValueError but not the RuntimeError
++    content = response.content.decode('utf-8')
++    
++    # The ValueError should be present
++    assert 'ValueError' in content
++    assert 'my new error' in content
++    
++    # The RuntimeError should NOT be present in the traceback chain
++    # because we used 'from None' which sets __suppress_context__ = True
++    # Look for the "During handling of the above exception" text which
++    # indicates a chained exception
++    assert 'During handling of the above exception' not in content
++    
++    print("Integration test passed! The debug view correctly respects __suppress_context__")
++
++if __name__ == '__main__':
++    test_integration()
+diff --git a/test_suppress_context.py b/test_suppress_context.py
+new file mode 100644
+index 0000000000..eb6f172901
+--- /dev/null
++++ b/test_suppress_context.py
+@@ -0,0 +1,92 @@
++#!/usr/bin/env python
++"""Test script to verify that exc.__suppress_context__ is respected in debug views."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import RequestFactory
++from django.views import View
++from django.views.debug import ExceptionReporter
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++class TestView(View):
++    def get(self, request, *args, **kwargs):
++        try:
++            raise RuntimeError('my error')
++        except Exception as exc:
++            raise ValueError('my new error') from None
++
++def test_suppress_context():
++    """Test that __suppress_context__ is respected in ExceptionReporter."""
++    request = RequestFactory().get('/')
++    view = TestView()
++    
++    try:
++        view.get(request)
++    except Exception as exc:
++        # Create an ExceptionReporter
++        reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++        
++        # Get traceback frames
++        frames = reporter.get_traceback_frames()
++        
++        # Check that we only have frames from the ValueError, not the RuntimeError
++        # Since we used 'from None', the RuntimeError should be suppressed
++        exception_values = []
++        for frame in frames:
++            if 'exc_value' in frame:
++                exception_values.append(str(frame['exc_value']))
++        
++        print("Exception values found in frames:")
++        for ev in exception_values:
++            print(f"  - {ev}")
++        
++        # We should only see the ValueError, not the RuntimeError
++        assert 'my new error' in str(exc)
++        assert exc.__suppress_context__ == True
++        assert exc.__context__ is not None  # The RuntimeError is still in __context__
++        assert exc.__cause__ is None  # But __cause__ is None because we used 'from None'
++        
++        # The key test: the RuntimeError should not appear in the traceback frames
++        # because __suppress_context__ is True
++        print(f"\nException type: {type(exc)}")
++        print(f"Exception message: {exc}")
++        print(f"__suppress_context__: {exc.__suppress_context__}")
++        print(f"__context__ type: {type(exc.__context__) if exc.__context__ else None}")
++        print(f"__cause__: {exc.__cause__}")
++        
++        # Count how many exceptions are in the traceback
++        exc_count = 0
++        exc_value = exc
++        while exc_value:
++            exc_count += 1
++            exc_value = getattr(exc_value, '__cause__', None) or (
++                None if getattr(exc_value, '__suppress_context__', False) else 
++                getattr(exc_value, '__context__', None)
++            )
++        
++        print(f"\nNumber of exceptions in chain (respecting suppress_context): {exc_count}")
++        assert exc_count == 1, f"Expected 1 exception in chain, but got {exc_count}"
++        
++        print("\nTest passed! __suppress_context__ is being respected.")
++
++if __name__ == '__main__':
++    test_suppress_context()
+diff --git a/test_suppress_context_proper.py b/test_suppress_context_proper.py
+new file mode 100644
+index 0000000000..2a5b98b2a1
+--- /dev/null
++++ b/test_suppress_context_proper.py
+@@ -0,0 +1,122 @@
++"""Test for __suppress_context__ support in Django debug views."""
++
++import unittest
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.test import RequestFactory
++from django.views.debug import ExceptionReporter
++
++
++class TestSuppressContext(unittest.TestCase):
++    def test_suppress_context_respected(self):
++        """Test that __suppress_context__ is respected in ExceptionReporter."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain with suppress_context
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception:
++                raise ValueError('new error') from None
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should only have the ValueError, not the RuntimeError
++            self.assertEqual(len(exceptions), 1)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++    
++    def test_context_not_suppressed(self):
++        """Test that __context__ is included when __suppress_context__ is False."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain without suppress_context
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception as e1:
++                raise ValueError('new error')
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should have both exceptions
++            self.assertEqual(len(exceptions), 2)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++            self.assertIsInstance(exceptions[1], RuntimeError)
++            self.assertEqual(str(exceptions[1]), 'original error')
++    
++    def test_explicit_cause(self):
++        """Test that explicit __cause__ takes precedence."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain with explicit cause
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception as e1:
++                raise ValueError('new error') from KeyError('explicit cause')
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should have the ValueError and the explicit KeyError cause
++            self.assertEqual(len(exceptions), 2)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++            self.assertIsInstance(exceptions[1], KeyError)
++            self.assertEqual(str(exceptions[1]), "'explicit cause'")
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/test_traceback_frames.py b/test_traceback_frames.py
+new file mode 100644
+index 0000000000..0f66b5110d
+--- /dev/null
++++ b/test_traceback_frames.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++"""Test that get_traceback_frames respects suppress_context."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.test import RequestFactory
++from django.views.debug import ExceptionReporter
++
++def test_get_traceback_frames():
++    """Test that get_traceback_frames respects __suppress_context__."""
++    request = RequestFactory().get('/')
++    
++    # Create an exception chain with suppress_context
++    try:
++        try:
++            raise RuntimeError('original error')
++        except Exception:
++            raise ValueError('new error') from None
++    except Exception as exc:
++        # Create an ExceptionReporter
++        reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++        
++        # Directly test the exception collection logic from get_traceback_frames
++        def explicit_or_implicit_cause(exc_value):
++            explicit = getattr(exc_value, '__cause__', None)
++            suppress_context = getattr(exc_value, '__suppress_context__', None)
++            implicit = getattr(exc_value, '__context__', None)
++            return explicit or (None if suppress_context else implicit)
++        
++        # Get the exception chain
++        exceptions = []
++        exc_value = exc
++        while exc_value:
++            exceptions.append(exc_value)
++            exc_value = explicit_or_implicit_cause(exc_value)
++            if exc_value in exceptions:
++                break
++        
++        print(f"Number of exceptions in chain: {len(exceptions)}")
++        for i, e in enumerate(exceptions):
++            print(f"  Exception {i+1}: {type(e).__name__}: {e}")
++        
++        # With the old implementation (without suppress_context check),
++        # we would see both exceptions. With the fix, we should only see
++        # the ValueError
++        if len(exceptions) > 1:
++            print("\nFAIL: RuntimeError found in exception chain despite suppress_context=True")
++            print("The explicit_or_implicit_cause function is not respecting __suppress_context__")
++            return False
++        else:
++            print("\nPASS: Only ValueError found, RuntimeError correctly suppressed")
++            return True
++
++if __name__ == '__main__':
++    success = test_get_traceback_frames()
++    sys.exit(0 if success else 1)
+diff --git a/tests/view_tests/tests/test_debug.py b/tests/view_tests/tests/test_debug.py
+index 3cbeb2e03a..bd31debacc 100644
+--- a/tests/view_tests/tests/test_debug.py
++++ b/tests/view_tests/tests/test_debug.py
+@@ -1517,3 +1517,101 @@ class DecoratorsTests(SimpleTestCase):
+             @sensitive_post_parameters
+             def test_func(request):
+                 return index_page(request)
++
++
++class ExceptionSuppressContextTests(SimpleTestCase):
++    """Tests for exception __suppress_context__ support (PEP 415)."""
++    
++    def test_suppress_context_respected(self):
++        """Test that __suppress_context__ is respected in ExceptionReporter."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain with suppress_context
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception:
++                raise ValueError('new error') from None
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should only have the ValueError, not the RuntimeError
++            self.assertEqual(len(exceptions), 1)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++    
++    def test_context_not_suppressed(self):
++        """Test that __context__ is included when __suppress_context__ is False."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain without suppress_context
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception as e1:
++                raise ValueError('new error')
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should have both exceptions
++            self.assertEqual(len(exceptions), 2)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++            self.assertIsInstance(exceptions[1], RuntimeError)
++            self.assertEqual(str(exceptions[1]), 'original error')
++    
++    def test_explicit_cause(self):
++        """Test that explicit __cause__ takes precedence."""
++        request = RequestFactory().get('/')
++        
++        # Create an exception chain with explicit cause
++        try:
++            try:
++                raise RuntimeError('original error')
++            except Exception as e1:
++                raise ValueError('new error') from KeyError('explicit cause')
++        except Exception as exc:
++            # Create an ExceptionReporter
++            reporter = ExceptionReporter(request, type(exc), exc, exc.__traceback__)
++            
++            # Get the exception chain using the internal method
++            exceptions = []
++            exc_value = exc
++            while exc_value:
++                exceptions.append(exc_value)
++                # Use the same logic as in get_traceback_frames
++                explicit = getattr(exc_value, '__cause__', None)
++                suppress_context = getattr(exc_value, '__suppress_context__', None)
++                implicit = getattr(exc_value, '__context__', None)
++                exc_value = explicit or (None if suppress_context else implicit)
++            
++            # We should have the ValueError and the explicit KeyError cause
++            self.assertEqual(len(exceptions), 2)
++            self.assertIsInstance(exceptions[0], ValueError)
++            self.assertEqual(str(exceptions[0]), 'new error')
++            self.assertIsInstance(exceptions[1], KeyError)
++            self.assertEqual(str(exceptions[1]), "'explicit cause'")

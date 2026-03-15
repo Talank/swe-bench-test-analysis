@@ -1,0 +1,250 @@
+diff --git a/analyze_fix.py b/analyze_fix.py
+new file mode 100644
+index 0000000000..090b641012
+--- /dev/null
++++ b/analyze_fix.py
+@@ -0,0 +1,34 @@
++from decimal import Decimal
++
++# Let's analyze different cases
++test_cases = [
++    ('0.00', 0),
++    ('0.0', 0),
++    ('0', 0),
++    ('1.00', 0),
++    ('1.23', 0),
++    ('0.00', 1),
++    ('0.00', 2),
++]
++
++for text, p in test_cases:
++    d = Decimal(text)
++    m = int(d) - d
++    tupl = d.as_tuple()
++    units = len(tupl[1])
++    
++    print(f"\ntext={text}, p={p}")
++    print(f"  d={d}, m={m}")
++    print(f"  tupl={tupl}")
++    print(f"  units={units}")
++    
++    # Current calculation
++    units_adj = units + (-tupl[2] if m else tupl[2])
++    prec = abs(p) + units_adj + 1
++    print(f"  Current: units_adj={units_adj}, prec={prec}")
++    
++    # The issue is that when m=0 (no fractional part) and the number has trailing zeros
++    # (negative exponent), we're subtracting instead of adding
++    # We should ensure prec is at least 1
++    prec_fixed = max(1, prec)
++    print(f"  Fixed: prec={prec_fixed}")
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 0000000000..4ee0fbee49
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,58 @@
++from decimal import Decimal, Context, ROUND_HALF_UP
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    USE_I18N=True,
++    USE_L10N=True,
++)
++django.setup()
++
++# Let's trace through the problematic part of floatformat
++text = '0.00'
++arg = 0
++
++d = Decimal(text)
++p = int(arg)
++m = int(d) - d
++
++print(f"d = {d}")
++print(f"p = {p}")
++print(f"m = {m}")
++print(f"not m and p < 0 = {not m and p < 0}")
++
++exp = Decimal(1).scaleb(-abs(p))
++print(f"exp = {exp}")
++
++tupl = d.as_tuple()
++print(f"tupl = {tupl}")
++print(f"tupl[1] = {tupl[1]}")  # digits
++print(f"tupl[2] = {tupl[2]}")  # exponent
++
++units = len(tupl[1])
++print(f"units = {units}")
++
++# The problematic calculation
++units += -tupl[2] if m else tupl[2]
++print(f"units after adjustment = {units}")
++
++prec = abs(p) + units + 1
++print(f"prec = {prec}")
++
++# This is where it fails
++try:
++    rounded_d = d.quantize(exp, ROUND_HALF_UP, Context(prec=prec))
++    print(f"rounded_d = {rounded_d}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Let's check what happens with '0.0'
++print("\n--- Testing with '0.0' ---")
++d2 = Decimal('0.0')
++tupl2 = d2.as_tuple()
++print(f"tupl2 = {tupl2}")
++units2 = len(tupl2[1])
++units2 += -tupl2[2] if m else tupl2[2]
++prec2 = abs(p) + units2 + 1
++print(f"prec2 = {prec2}")
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 23c3a08c67..e091f75cee 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -184,6 +184,8 @@ def floatformat(text, arg=-1):
+     units = len(tupl[1])
+     units += -tupl[2] if m else tupl[2]
+     prec = abs(p) + units + 1
++    # Ensure prec is at least 1 to avoid ValueError
++    prec = max(1, prec)
+ 
+     # Avoid conversion to scientific notation by accessing `sign`, `digits`,
+     # and `exponent` from Decimal.as_tuple() directly.
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..df1d7cf41e
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,44 @@
++from decimal import Decimal
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    USE_I18N=True,
++    USE_L10N=True,
++)
++django.setup()
++
++from django.template.defaultfilters import floatformat
++
++print("Testing floatformat with '0.00' and 0 decimal places:")
++try:
++    result = floatformat('0.00', 0)
++    print(f"floatformat('0.00', 0) = {result}")
++except Exception as e:
++    print(f"floatformat('0.00', 0) raised: {type(e).__name__}: {e}")
++
++print("\nTesting floatformat with Decimal('0.00') and 0 decimal places:")
++try:
++    result = floatformat(Decimal('0.00'), 0)
++    print(f"floatformat(Decimal('0.00'), 0) = {result}")
++except Exception as e:
++    print(f"floatformat(Decimal('0.00'), 0) raised: {type(e).__name__}: {e}")
++
++# Let's also test some similar cases
++print("\nTesting similar cases:")
++test_cases = [
++    ('0.0', 0),
++    ('0', 0),
++    ('1.00', 0),
++    (0.00, 0),
++    (Decimal('0.0'), 0),
++    (Decimal('0'), 0),
++]
++
++for value, arg in test_cases:
++    try:
++        result = floatformat(value, arg)
++        print(f"floatformat({repr(value)}, {arg}) = {result}")
++    except Exception as e:
++        print(f"floatformat({repr(value)}, {arg}) raised: {type(e).__name__}: {e}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..68b7a1e1e1
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,55 @@
++from decimal import Decimal
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    USE_I18N=True,
++    USE_L10N=True,
++)
++django.setup()
++
++from django.template.defaultfilters import floatformat
++
++# Test cases that should work after our fix
++test_cases = [
++    # (input, arg, expected)
++    ('0.00', 0, '0'),
++    (Decimal('0.00'), 0, '0'),
++    ('0.000', 0, '0'),
++    (Decimal('0.000'), 0, '0'),
++    ('1.00', 0, '1'),
++    (Decimal('1.00'), 0, '1'),
++    ('0.00', 1, '0.0'),
++    ('0.00', 2, '0.00'),
++    ('0.00', 3, '0.000'),
++    (Decimal('0.00'), 1, '0.0'),
++    (Decimal('0.00'), 2, '0.00'),
++    (Decimal('0.00'), 3, '0.000'),
++    # Negative arg cases
++    ('0.00', -1, '0'),
++    ('0.00', -2, '0'),
++    (Decimal('0.00'), -1, '0'),
++    (Decimal('0.00'), -2, '0'),
++    # Other zero representations
++    ('00.00', 0, '0'),
++    ('000.000', 0, '0'),
++    (Decimal('00.00'), 0, '0'),
++    (Decimal('000.000'), 0, '0'),
++]
++
++print("Testing comprehensive cases:")
++all_passed = True
++for value, arg, expected in test_cases:
++    try:
++        result = floatformat(value, arg)
++        if result == expected:
++            print(f"✓ floatformat({repr(value)}, {arg}) = {repr(result)}")
++        else:
++            print(f"✗ floatformat({repr(value)}, {arg}) = {repr(result)}, expected {repr(expected)}")
++            all_passed = False
++    except Exception as e:
++        print(f"✗ floatformat({repr(value)}, {arg}) raised: {type(e).__name__}: {e}")
++        all_passed = False
++
++print(f"\nAll tests passed: {all_passed}")
+diff --git a/tests/template_tests/filter_tests/test_floatformat.py b/tests/template_tests/filter_tests/test_floatformat.py
+index 361a888ce3..aac42362a6 100644
+--- a/tests/template_tests/filter_tests/test_floatformat.py
++++ b/tests/template_tests/filter_tests/test_floatformat.py
+@@ -151,3 +151,17 @@ class FunctionTests(SimpleTestCase):
+             self.assertEqual(floatformat(15.2042, "-3"), "15.204")
+             self.assertEqual(floatformat(Decimal("1.2345"), 2), "1.23")
+             self.assertEqual(floatformat(Decimal("15.2042"), -3), "15.204")
++
++    def test_zero_with_trailing_zeros(self):
++        """
++        Test that floatformat handles '0.00' with 0 decimal places without crashing.
++        """
++        self.assertEqual(floatformat('0.00', 0), '0')
++        self.assertEqual(floatformat(Decimal('0.00'), 0), '0')
++        self.assertEqual(floatformat('0.000', 0), '0')
++        self.assertEqual(floatformat(Decimal('0.000'), 0), '0')
++        # Also test with positive decimal places
++        self.assertEqual(floatformat('0.00', 1), '0.0')
++        self.assertEqual(floatformat('0.00', 2), '0.00')
++        self.assertEqual(floatformat(Decimal('0.00'), 1), '0.0')
++        self.assertEqual(floatformat(Decimal('0.00'), 2), '0.00')

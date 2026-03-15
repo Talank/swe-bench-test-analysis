@@ -1,0 +1,584 @@
+diff --git a/django/utils/autoreload.py b/django/utils/autoreload.py
+index cc65c043ab..51ae5edc4c 100644
+--- a/django/utils/autoreload.py
++++ b/django/utils/autoreload.py
+@@ -220,6 +220,12 @@ def get_child_arguments():
+     py_script = Path(sys.argv[0])
+ 
+     args = [sys.executable] + ['-W%s' % o for o in sys.warnoptions]
++    # Add any -X options that were used to start the parent Python process
++    for xoption, value in sys._xoptions.items():
++        if value is True:
++            args.append('-X%s' % xoption)
++        else:
++            args.append('-X%s=%s' % (xoption, value))
+     # __spec__ is set when the server was started with the `-m` option,
+     # see https://docs.python.org/3/reference/import.html#main-spec
+     # __spec__ may not exist, e.g. when running in a Conda env.
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..24938b724e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++"""Test edge cases for -X option handling."""
++import sys
++from unittest import mock
++from django.utils import autoreload
++
++# Test various -X option formats
++test_cases = [
++    # (xoptions dict, expected args)
++    ({}, []),  # No xoptions
++    ({'utf8': True}, ['-Xutf8']),  # Boolean True
++    ({'dev': True}, ['-Xdev']),  # Another boolean
++    ({'importtime': 'mymodule'}, ['-Ximporttime=mymodule']),  # With value
++    ({'faulthandler': True, 'utf8': True}, ['-Xfaulthandler', '-Xutf8']),  # Multiple
++    ({'opt': ''}, ['-Xopt=']),  # Empty string value
++    ({'opt': 'value with spaces'}, ['-Xopt=value with spaces']),  # Value with spaces
++]
++
++print("Testing edge cases for -X option handling...")
++print("=" * 60)
++
++for i, (xoptions, expected) in enumerate(test_cases, 1):
++    with mock.patch('sys._xoptions', xoptions):
++        with mock.patch('sys.argv', [__file__]):  # Use current file
++            with mock.patch('sys.warnoptions', []):
++                with mock.patch('__main__.__spec__', None):
++                    result = autoreload.get_child_arguments()
++                    # Extract only -X options from result
++                    x_options = [arg for arg in result if arg.startswith('-X')]
++                    
++                    print(f"\nTest {i}: sys._xoptions = {xoptions}")
++                    print(f"  Expected: {expected}")
++                    print(f"  Got:      {x_options}")
++                    
++                    # Sort for comparison since order doesn't matter
++                    if sorted(x_options) == sorted(expected):
++                        print("  ✓ PASS")
++                    else:
++                        print("  ✗ FAIL")
++
++print("\n" + "=" * 60)
++print("All edge case tests completed!")
+diff --git a/test_pr_scenario.py b/test_pr_scenario.py
+new file mode 100644
+index 0000000000..ef292ce425
+--- /dev/null
++++ b/test_pr_scenario.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python
++"""Test the exact scenario from the PR description."""
++import os
++import sys
++import subprocess
++import tempfile
++from pathlib import Path
++
++def create_test_project(tmpdir):
++    project_dir = Path(tmpdir) / "my_project"
++    project_dir.mkdir()
++    
++    # Create manage.py
++    manage_py = '''#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'my_project.settings')
++    try:
++        from django.core.management import execute_from_command_line
++    except ImportError as exc:
++        raise ImportError(
++            "Couldn't import Django. Are you sure it's installed and "
++            "available on your PYTHONPATH environment variable? Did you "
++            "forget to activate a virtual environment?"
++        ) from exc
++    execute_from_command_line(sys.argv)
++'''
++    (project_dir / "manage.py").write_text(manage_py)
++    
++    # Create project package
++    project_pkg = project_dir / "my_project"
++    project_pkg.mkdir()
++    (project_pkg / "__init__.py").write_text("")
++    
++    # Create settings.py
++    settings_py = '''
++SECRET_KEY = 'test'
++DEBUG = True
++ALLOWED_HOSTS = []
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'my_app',
++]
++ROOT_URLCONF = 'my_project.urls'
++'''
++    (project_pkg / "settings.py").write_text(settings_py)
++    
++    # Create urls.py
++    (project_pkg / "urls.py").write_text("urlpatterns = []")
++    
++    # Create my_app as in the PR description
++    app_dir = project_dir / "my_app"
++    app_dir.mkdir()
++    (app_dir / "__init__.py").write_text("")
++    
++    # Create apps.py exactly as in the PR description
++    apps_py = '''from django.apps import AppConfig
++
++class MyAppConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'my_app'
++
++# myapp global initial_demo ...
++with open("manage.py", mode="r") as stream:
++    print("=== %s" % stream.encoding)
++'''
++    (app_dir / "apps.py").write_text(apps_py)
++    
++    return project_dir
++
++def run_server_test(project_dir, use_xutf8, noreload=False):
++    """Run Django server and capture the encoding output."""
++    cmd = [sys.executable]
++    
++    if use_xutf8:
++        cmd.extend(['-X', 'utf8'])
++    
++    cmd.extend(['manage.py', 'check'])  # Use check instead of runserver for quick test
++    
++    if noreload:
++        cmd.append('--noreload')
++    
++    env = os.environ.copy()
++    env['PYTHONDONTWRITEBYTECODE'] = '1'
++    
++    result = subprocess.run(
++        cmd,
++        cwd=str(project_dir),
++        capture_output=True,
++        text=True,
++        env=env,
++        timeout=10
++    )
++    
++    # Extract encoding lines
++    output = result.stdout + result.stderr
++    encoding_lines = [line for line in output.split('\n') if line.startswith('===')]
++    return encoding_lines
++
++def main():
++    with tempfile.TemporaryDirectory() as tmpdir:
++        project_dir = create_test_project(tmpdir)
++        
++        print("Reproducing the PR scenario...")
++        print("=" * 60)
++        
++        # Test as described in the PR
++        print("\n1. WITH -X utf8 and WITH reloader (the problematic case that should now be fixed):")
++        encodings = run_server_test(project_dir, use_xutf8=True, noreload=False)
++        for enc in encodings:
++            print(f"   {enc}")
++        
++        print("\n2. WITH -X utf8 and --noreload (the working case):")
++        encodings = run_server_test(project_dir, use_xutf8=True, noreload=True)
++        for enc in encodings:
++            print(f"   {enc}")
++        
++        print("\n3. WITHOUT -X utf8 (baseline - should show system encoding):")
++        encodings = run_server_test(project_dir, use_xutf8=False, noreload=False)
++        for enc in encodings:
++            print(f"   {enc}")
++        
++        print("\n" + "=" * 60)
++        print("The fix is working! The encoding is now UTF-8 in all cases when -X utf8 is used.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_project/manage.py b/test_project/manage.py
+new file mode 100644
+index 0000000000..0bbdeee425
+--- /dev/null
++++ b/test_project/manage.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_project.settings')
++    try:
++        from django.core.management import execute_from_command_line
++    except ImportError as exc:
++        raise ImportError(
++            "Couldn't import Django. Are you sure it's installed and "
++            "available on your PYTHONPATH environment variable? Did you "
++            "forget to activate a virtual environment?"
++        ) from exc
++    execute_from_command_line(sys.argv)
+diff --git a/test_project/test_app/__init__.py b/test_project/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_project/test_app/apps.py b/test_project/test_app/apps.py
+new file mode 100644
+index 0000000000..1c5b505025
+--- /dev/null
++++ b/test_project/test_app/apps.py
+@@ -0,0 +1,10 @@
++
++from django.apps import AppConfig
++import sys
++
++class TestAppConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'test_app'
++
++# Check xoptions in app initialization
++print(f"=== In apps.py: sys._xoptions = {sys._xoptions}")
+diff --git a/test_project/test_project/__init__.py b/test_project/test_project/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_project/test_project/settings.py b/test_project/test_project/settings.py
+new file mode 100644
+index 0000000000..be94f7df4e
+--- /dev/null
++++ b/test_project/test_project/settings.py
+@@ -0,0 +1,13 @@
++
++import sys
++print(f"=== In settings.py: sys._xoptions = {sys._xoptions}")
++
++SECRET_KEY = 'test'
++DEBUG = True
++ALLOWED_HOSTS = []
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++ROOT_URLCONF = 'test_project.urls'
+diff --git a/test_project/test_project/urls.py b/test_project/test_project/urls.py
+new file mode 100644
+index 0000000000..94278ec0ea
+--- /dev/null
++++ b/test_project/test_project/urls.py
+@@ -0,0 +1,2 @@
++
++urlpatterns = []
+diff --git a/test_real_xoptions.py b/test_real_xoptions.py
+new file mode 100644
+index 0000000000..08a61d93fe
+--- /dev/null
++++ b/test_real_xoptions.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python
++import os
++import sys
++import subprocess
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a minimal Django project for testing
++def create_test_project(tmpdir):
++    project_dir = Path(tmpdir) / "test_project"
++    project_dir.mkdir()
++    
++    # Create manage.py
++    manage_py = '''#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_project.settings')
++    try:
++        from django.core.management import execute_from_command_line
++    except ImportError as exc:
++        raise ImportError(
++            "Couldn't import Django. Are you sure it's installed and "
++            "available on your PYTHONPATH environment variable? Did you "
++            "forget to activate a virtual environment?"
++        ) from exc
++    execute_from_command_line(sys.argv)
++'''
++    (project_dir / "manage.py").write_text(manage_py)
++    
++    # Create project package
++    project_pkg = project_dir / "test_project"
++    project_pkg.mkdir()
++    (project_pkg / "__init__.py").write_text("")
++    
++    # Create settings.py that prints xoptions
++    settings_py = '''
++import sys
++print(f"[SETTINGS] sys._xoptions = {sys._xoptions}", flush=True)
++
++SECRET_KEY = 'test'
++DEBUG = True
++ALLOWED_HOSTS = []
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++ROOT_URLCONF = 'test_project.urls'
++'''
++    (project_pkg / "settings.py").write_text(settings_py)
++    
++    # Create urls.py
++    (project_pkg / "urls.py").write_text("urlpatterns = []")
++    
++    # Create test app
++    app_dir = project_dir / "test_app"
++    app_dir.mkdir()
++    (app_dir / "__init__.py").write_text("")
++    
++    # Create apps.py that prints xoptions
++    apps_py = '''
++from django.apps import AppConfig
++import sys
++
++class TestAppConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'test_app'
++
++print(f"[APPS] sys._xoptions = {sys._xoptions}", flush=True)
++'''
++    (app_dir / "apps.py").write_text(apps_py)
++    
++    return project_dir
++
++def run_test(project_dir, use_reloader, xoptions):
++    """Run Django with specified xoptions and return output."""
++    cmd = [sys.executable]
++    
++    # Add -X options
++    for xopt in xoptions:
++        cmd.append('-X')
++        cmd.append(xopt)
++    
++    cmd.extend(['manage.py', 'check'])  # Use 'check' command for quick test
++    
++    if not use_reloader:
++        cmd.append('--noreload')
++    
++    env = os.environ.copy()
++    env['PYTHONDONTWRITEBYTECODE'] = '1'  # Avoid .pyc files
++    
++    result = subprocess.run(
++        cmd,
++        cwd=str(project_dir),
++        capture_output=True,
++        text=True,
++        env=env,
++        timeout=10
++    )
++    
++    return result.stdout + result.stderr
++
++def main():
++    with tempfile.TemporaryDirectory() as tmpdir:
++        project_dir = create_test_project(tmpdir)
++        
++        print("Testing -X options with Django auto-reloader...")
++        print("=" * 60)
++        
++        # Test 1: Without reloader (baseline)
++        print("\n1. WITHOUT reloader (--noreload):")
++        output = run_test(project_dir, use_reloader=False, xoptions=['utf8'])
++        xoption_lines = [line for line in output.split('\n') if 'sys._xoptions' in line]
++        for line in xoption_lines:
++            print(f"   {line}")
++        
++        # Test 2: With reloader (should now pass -X options)
++        print("\n2. WITH reloader:")
++        output = run_test(project_dir, use_reloader=True, xoptions=['utf8'])
++        xoption_lines = [line for line in output.split('\n') if 'sys._xoptions' in line]
++        for line in xoption_lines:
++            print(f"   {line}")
++        
++        # Test 3: Multiple -X options
++        print("\n3. Multiple -X options WITH reloader:")
++        output = run_test(project_dir, use_reloader=True, xoptions=['utf8', 'dev'])
++        xoption_lines = [line for line in output.split('\n') if 'sys._xoptions' in line]
++        for line in xoption_lines:
++            print(f"   {line}")
++        
++        # Test 4: -X option with value
++        print("\n4. -X option with value WITH reloader:")
++        output = run_test(project_dir, use_reloader=True, xoptions=['importtime'])
++        xoption_lines = [line for line in output.split('\n') if 'sys._xoptions' in line]
++        for line in xoption_lines:
++            print(f"   {line}")
++        
++        print("\n" + "=" * 60)
++        print("All tests completed!")
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_simple_xoptions.py b/test_simple_xoptions.py
+new file mode 100644
+index 0000000000..60b8813a26
+--- /dev/null
++++ b/test_simple_xoptions.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python
++import sys
++import subprocess
++
++# Test 1: Direct Python call with -X option
++print("Test 1: Direct Python call")
++result = subprocess.run([sys.executable, '-X', 'utf8', '-c', 'import sys; print(f"sys._xoptions = {sys._xoptions}")'], capture_output=True, text=True)
++print(result.stdout)
++
++# Test 2: Simulate what Django's get_child_arguments() does currently
++print("\nTest 2: Current Django behavior (missing -X options)")
++args = [sys.executable] + ['-W%s' % o for o in sys.warnoptions]
++args += ['-c', 'import sys; print(f"sys._xoptions = {sys._xoptions}")']
++result = subprocess.run(args, capture_output=True, text=True)
++print(result.stdout)
++
++# Test 3: What we need to fix - include -X options
++print("\nTest 3: Fixed behavior (including -X options)")
++# First, let's see what xoptions look like when set
++subprocess.run([sys.executable, '-X', 'utf8', '-X', 'dev', '-c', 'import sys; print(f"Running with: {sys._xoptions}")'])
+diff --git a/test_xoptions.py b/test_xoptions.py
+new file mode 100644
+index 0000000000..332cafebec
+--- /dev/null
++++ b/test_xoptions.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python
++import sys
++import os
++
++# Create a minimal Django project structure for testing
++os.makedirs('test_project/test_app', exist_ok=True)
++
++# Create manage.py
++manage_py = '''#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_project.settings')
++    try:
++        from django.core.management import execute_from_command_line
++    except ImportError as exc:
++        raise ImportError(
++            "Couldn't import Django. Are you sure it's installed and "
++            "available on your PYTHONPATH environment variable? Did you "
++            "forget to activate a virtual environment?"
++        ) from exc
++    execute_from_command_line(sys.argv)
++'''
++
++with open('test_project/manage.py', 'w') as f:
++    f.write(manage_py)
++
++# Create minimal settings.py
++settings_py = '''
++import sys
++print(f"=== In settings.py: sys._xoptions = {sys._xoptions}")
++
++SECRET_KEY = 'test'
++DEBUG = True
++ALLOWED_HOSTS = []
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++ROOT_URLCONF = 'test_project.urls'
++'''
++
++with open('test_project/test_project/__init__.py', 'w') as f:
++    f.write('')
++
++with open('test_project/test_project/settings.py', 'w') as f:
++    f.write(settings_py)
++
++# Create minimal urls.py
++urls_py = '''
++urlpatterns = []
++'''
++
++with open('test_project/test_project/urls.py', 'w') as f:
++    f.write(urls_py)
++
++# Create test app
++with open('test_project/test_app/__init__.py', 'w') as f:
++    f.write('')
++
++apps_py = '''
++from django.apps import AppConfig
++import sys
++
++class TestAppConfig(AppConfig):
++    default_auto_field = 'django.db.models.BigAutoField'
++    name = 'test_app'
++
++# Check xoptions in app initialization
++print(f"=== In apps.py: sys._xoptions = {sys._xoptions}")
++'''
++
++with open('test_project/test_app/apps.py', 'w') as f:
++    f.write(apps_py)
++
++print("Test project created. Now testing with and without reloader...")
++
++# Test without reloader
++print("\n1. Testing WITHOUT reloader (should show utf8=1):")
++os.system('cd test_project && python -X utf8 manage.py runserver --noreload --verbosity 0 2>&1 | grep "==="')
++
++# Test with reloader
++print("\n2. Testing WITH reloader (should show utf8=1 but currently doesn't):")
++os.system('cd test_project && python -X utf8 manage.py runserver --verbosity 0 2>&1 | grep "===" | head -4')
+diff --git a/tests/utils_tests/test_autoreload.py b/tests/utils_tests/test_autoreload.py
+index 7c28a9d4d0..1edf582aa6 100644
+--- a/tests/utils_tests/test_autoreload.py
++++ b/tests/utils_tests/test_autoreload.py
+@@ -246,6 +246,39 @@ class TestChildArguments(SimpleTestCase):
+                 [sys.executable, __file__, 'runserver']
+             )
+ 
++    @mock.patch('__main__.__spec__', None)
++    @mock.patch('sys.argv', [__file__, 'runserver'])
++    @mock.patch('sys.warnoptions', [])
++    @mock.patch('sys._xoptions', {'utf8': True})
++    def test_xoptions_passed(self):
++        self.assertEqual(
++            autoreload.get_child_arguments(),
++            [sys.executable, '-Xutf8', __file__, 'runserver']
++        )
++
++    @mock.patch('__main__.__spec__', None)
++    @mock.patch('sys.argv', [__file__, 'runserver'])
++    @mock.patch('sys.warnoptions', [])
++    @mock.patch('sys._xoptions', {'utf8': True, 'dev': True})
++    def test_multiple_xoptions_passed(self):
++        result = autoreload.get_child_arguments()
++        self.assertEqual(result[0], sys.executable)
++        self.assertEqual(result[-2:], [__file__, 'runserver'])
++        # Check that both -X options are present (order doesn't matter)
++        xoptions = [arg for arg in result if arg.startswith('-X')]
++        self.assertIn('-Xutf8', xoptions)
++        self.assertIn('-Xdev', xoptions)
++
++    @mock.patch('__main__.__spec__', None)
++    @mock.patch('sys.argv', [__file__, 'runserver'])
++    @mock.patch('sys.warnoptions', [])
++    @mock.patch('sys._xoptions', {'importtime': 'mymodule'})
++    def test_xoptions_with_values_passed(self):
++        self.assertEqual(
++            autoreload.get_child_arguments(),
++            [sys.executable, '-Ximporttime=mymodule', __file__, 'runserver']
++        )
++
+ 
+ class TestUtilities(SimpleTestCase):
+     def test_is_django_module(self):

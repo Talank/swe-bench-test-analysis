@@ -1,0 +1,436 @@
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index ae0f886107..81b7ee9a93 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -84,14 +84,10 @@ class Q(tree.Node):
+         path = '%s.%s' % (self.__class__.__module__, self.__class__.__name__)
+         if path.startswith('django.db.models.query_utils'):
+             path = path.replace('django.db.models.query_utils', 'django.db.models')
+-        args, kwargs = (), {}
+-        if len(self.children) == 1 and not isinstance(self.children[0], Q):
+-            child = self.children[0]
+-            kwargs = {child[0]: child[1]}
+-        else:
+-            args = tuple(self.children)
+-            if self.connector != self.default:
+-                kwargs = {'_connector': self.connector}
++        args = tuple(self.children)
++        kwargs = {}
++        if self.connector != self.default:
++            kwargs = {'_connector': self.connector}
+         if self.negated:
+             kwargs['_negated'] = True
+         return path, args, kwargs
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..b891db223c
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db.models import Q, F
++
++print("Testing backward compatibility...")
++
++# Test 1: Old-style deconstruction (kwargs) still works for reconstruction
++print("\n1. Reconstructing from old-style kwargs format:")
++# Simulate old deconstruction format
++path = 'django.db.models.Q'
++args = ()
++kwargs = {'price__gt': F('discounted_price')}
++q_old_style = Q(*args, **kwargs)
++print(f"   Reconstructed Q: {q_old_style}")
++print(f"   Children: {q_old_style.children}")
++
++# Test 2: New-style deconstruction (args) works
++print("\n2. Reconstructing from new-style args format:")
++args = (('price__gt', F('discounted_price')),)
++kwargs = {}
++q_new_style = Q(*args, **kwargs)
++print(f"   Reconstructed Q: {q_new_style}")
++print(f"   Children: {q_new_style.children}")
++
++# Test 3: Both produce equivalent Q objects
++print("\n3. Checking equivalence:")
++print(f"   Old style == New style: {q_old_style == q_new_style}")
++print(f"   Old style children: {q_old_style.children}")
++print(f"   New style children: {q_new_style.children}")
++
++# Test 4: Mixed initialization still works
++print("\n4. Mixed initialization:")
++q_mixed = Q(x=1, y=2)
++print(f"   Q(x=1, y=2) children: {q_mixed.children}")
++q_mixed2 = Q(('x', 1), ('y', 2))
++print(f"   Q(('x', 1), ('y', 2)) children: {q_mixed2.children}")
++print(f"   Are they equal? {q_mixed == q_mixed2}")
++
++print("\nBackward compatibility tests completed!")
+diff --git a/test_q_issue.py b/test_q_issue.py
+new file mode 100644
+index 0000000000..bb3b69a7d0
+--- /dev/null
++++ b/test_q_issue.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Now test the issue
++from django.contrib.auth import get_user_model
++from django.db.models import Q, Exists
++
++# Test case 1: Q with single child that's a tuple (current working case)
++print("Test 1: Q with single tuple child")
++q1 = Q(x=1)
++print(f"Q(x=1).deconstruct() = {q1.deconstruct()}")
++
++# Test case 2: Q with multiple children (current working case)
++print("\nTest 2: Q with multiple children")
++q2 = Q(x=1, y=2)
++print(f"Q(x=1, y=2).deconstruct() = {q2.deconstruct()}")
++
++# Test case 3: Q with Exists child (current failing case)
++print("\nTest 3: Q with Exists child (should fail)")
++try:
++    User = get_user_model()
++    exists_obj = Exists(User.objects.filter(username='jim'))
++    q3 = Q(exists_obj)
++    print(f"Q(Exists(...)).deconstruct() = {q3.deconstruct()}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test case 4: Combining Q objects
++print("\nTest 4: Combining Q objects")
++try:
++    q4 = Q(x=1) & Q(Exists(User.objects.filter(username='jim')))
++    print(f"Combined Q.deconstruct() = {q4.deconstruct()}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_q_migrations.py b/test_q_migrations.py
+new file mode 100644
+index 0000000000..b560fd691a
+--- /dev/null
++++ b/test_q_migrations.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Test Q objects in migrations context
++from django.db.models import Q, CheckConstraint, Exists
++from django.contrib.auth import get_user_model
++from django.db import migrations
++
++print("Testing Q objects in migration context...")
++
++# Test 1: CheckConstraint with Q
++print("\n1. CheckConstraint with simple Q:")
++constraint = CheckConstraint(check=Q(age__gte=18), name='age_gte_18')
++deconstructed = constraint.deconstruct()
++print(f"   Deconstructed: {deconstructed}")
++
++# Test 2: CheckConstraint with Q containing Exists
++print("\n2. CheckConstraint with Q containing Exists:")
++User = get_user_model()
++exists_q = Q(Exists(User.objects.filter(is_active=True)))
++try:
++    constraint = CheckConstraint(check=exists_q, name='active_user_exists')
++    deconstructed = constraint.deconstruct()
++    print(f"   Deconstructed successfully")
++except Exception as e:
++    print(f"   Error: {type(e).__name__}: {e}")
++
++# Test 3: Complex Q in CheckConstraint
++print("\n3. Complex Q in CheckConstraint:")
++complex_q = Q(age__gte=18) & Q(age__lte=65)
++constraint = CheckConstraint(check=complex_q, name='working_age')
++deconstructed = constraint.deconstruct()
++print(f"   Deconstructed: {deconstructed[2]['check']}")
++
++print("\nAll migration tests completed!")
+diff --git a/test_q_reconstruction.py b/test_q_reconstruction.py
+new file mode 100644
+index 0000000000..d4c9207387
+--- /dev/null
++++ b/test_q_reconstruction.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Now test reconstruction
++from django.contrib.auth import get_user_model
++from django.db.models import Q, Exists
++
++# Test case 1: Reconstruct Q with single tuple child
++print("Test 1: Reconstruct Q with single tuple child")
++q1 = Q(x=1)
++path, args, kwargs = q1.deconstruct()
++q1_reconstructed = Q(*args, **kwargs)
++print(f"Original: {q1}")
++print(f"Reconstructed: {q1_reconstructed}")
++print(f"Equal? {q1 == q1_reconstructed}")
++
++# Test case 2: Reconstruct Q with Exists child
++print("\nTest 2: Reconstruct Q with Exists child")
++User = get_user_model()
++exists_obj = Exists(User.objects.filter(username='jim'))
++q2 = Q(exists_obj)
++path, args, kwargs = q2.deconstruct()
++q2_reconstructed = Q(*args, **kwargs)
++print(f"Original children: {q2.children}")
++print(f"Reconstructed children: {q2_reconstructed.children}")
++print(f"Equal? {q2 == q2_reconstructed}")
++
++# Test case 3: Reconstruct combined Q objects
++print("\nTest 3: Reconstruct combined Q objects")
++q3 = Q(x=1) & Q(exists_obj)
++path, args, kwargs = q3.deconstruct()
++q3_reconstructed = Q(*args, **kwargs)
++print(f"Original children: {q3.children}")
++print(f"Reconstructed children: {q3_reconstructed.children}")
++print(f"Equal? {q3 == q3_reconstructed}")
+diff --git a/test_real_world_q.py b/test_real_world_q.py
+new file mode 100644
+index 0000000000..1d96de6b36
+--- /dev/null
++++ b/test_real_world_q.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++# Now test real-world scenarios
++from django.contrib.auth import get_user_model
++from django.db.models import Q, Exists, F, Value
++from django.db.models.functions import Length
++
++User = get_user_model()
++
++# Create some test data
++User.objects.create_user('alice', 'alice@example.com', 'password')
++User.objects.create_user('bob', 'bob@example.com', 'password')
++
++print("Testing real-world Q object scenarios...")
++
++# Scenario 1: Q with Exists in filter
++print("\n1. Q with Exists in filter:")
++q = Q(Exists(User.objects.filter(username='alice')))
++users = User.objects.filter(q)
++print(f"   Users found: {list(users.values_list('username', flat=True))}")
++
++# Scenario 2: Complex Q with Exists and other conditions
++print("\n2. Complex Q with Exists and other conditions:")
++q = Q(username='bob') | Q(Exists(User.objects.filter(email__contains='alice')))
++users = User.objects.filter(q)
++print(f"   Users found: {list(users.values_list('username', flat=True))}")
++
++# Scenario 3: Negated Q with Exists
++print("\n3. Negated Q with Exists:")
++q = ~Q(Exists(User.objects.filter(username='charlie')))
++users = User.objects.filter(q)
++print(f"   Users found: {list(users.values_list('username', flat=True))}")
++
++# Scenario 4: Q with F expressions
++print("\n4. Q with F expressions:")
++q = Q(last_login=F('date_joined'))
++print(f"   Q deconstruct: {q.deconstruct()}")
++
++# Scenario 5: Q with annotations
++print("\n5. Q with Value expression:")
++q = Q(username=Value('test'))
++print(f"   Q deconstruct: {q.deconstruct()}")
++
++# Scenario 6: Nested Q with Exists
++print("\n6. Nested Q with Exists:")
++q = Q(Q(Exists(User.objects.filter(username='alice'))) | Q(username='bob'))
++users = User.objects.filter(q)
++print(f"   Users found: {list(users.values_list('username', flat=True))}")
++
++print("\nAll tests completed successfully!")
+diff --git a/tests/queries/test_q.py b/tests/queries/test_q.py
+index 6dcf36ce02..6cbfaa38d3 100644
+--- a/tests/queries/test_q.py
++++ b/tests/queries/test_q.py
+@@ -1,5 +1,6 @@
+-from django.db.models import F, Q
+-from django.test import SimpleTestCase
++from django.db.models import Exists, F, Q
++from django.test import SimpleTestCase, TestCase
++from django.contrib.auth import get_user_model
+ 
+ 
+ class QTests(SimpleTestCase):
+@@ -39,17 +40,14 @@ class QTests(SimpleTestCase):
+         q = Q(price__gt=F('discounted_price'))
+         path, args, kwargs = q.deconstruct()
+         self.assertEqual(path, 'django.db.models.Q')
+-        self.assertEqual(args, ())
+-        self.assertEqual(kwargs, {'price__gt': F('discounted_price')})
++        self.assertEqual(args, (('price__gt', F('discounted_price')),))
++        self.assertEqual(kwargs, {})
+ 
+     def test_deconstruct_negated(self):
+         q = ~Q(price__gt=F('discounted_price'))
+         path, args, kwargs = q.deconstruct()
+-        self.assertEqual(args, ())
+-        self.assertEqual(kwargs, {
+-            'price__gt': F('discounted_price'),
+-            '_negated': True,
+-        })
++        self.assertEqual(args, (('price__gt', F('discounted_price')),))
++        self.assertEqual(kwargs, {'_negated': True})
+ 
+     def test_deconstruct_or(self):
+         q1 = Q(price__gt=F('discounted_price'))
+@@ -111,3 +109,38 @@ class QTests(SimpleTestCase):
+         q = q1 & q2
+         path, args, kwargs = q.deconstruct()
+         self.assertEqual(Q(*args, **kwargs), q)
++
++
++class QWithExistsTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.User = get_user_model()
++
++    def test_deconstruct_with_exists(self):
++        """Q objects with Exists can be deconstructed without errors."""
++        exists_obj = Exists(self.User.objects.filter(username='test'))
++        q = Q(exists_obj)
++        path, args, kwargs = q.deconstruct()
++        self.assertEqual(path, 'django.db.models.Q')
++        self.assertEqual(len(args), 1)
++        self.assertIsInstance(args[0], Exists)
++        self.assertEqual(kwargs, {})
++
++    def test_reconstruct_with_exists(self):
++        """Q objects with Exists can be reconstructed."""
++        exists_obj = Exists(self.User.objects.filter(username='test'))
++        q = Q(exists_obj)
++        path, args, kwargs = q.deconstruct()
++        q_reconstructed = Q(*args, **kwargs)
++        self.assertEqual(q, q_reconstructed)
++
++    def test_combine_with_exists(self):
++        """Q objects with Exists can be combined with other Q objects."""
++        exists_obj = Exists(self.User.objects.filter(username='test'))
++        q1 = Q(x=1)
++        q2 = Q(exists_obj)
++        q_combined = q1 & q2
++        path, args, kwargs = q_combined.deconstruct()
++        self.assertEqual(len(args), 2)
++        self.assertEqual(args[0], ('x', 1))
++        self.assertIsInstance(args[1], Exists)

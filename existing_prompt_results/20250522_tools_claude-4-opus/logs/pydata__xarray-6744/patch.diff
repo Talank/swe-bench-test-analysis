@@ -1,0 +1,84 @@
+diff --git a/xarray/core/rolling.py b/xarray/core/rolling.py
+index aef290f6..2500298e 100644
+--- a/xarray/core/rolling.py
++++ b/xarray/core/rolling.py
+@@ -270,9 +270,24 @@ class DataArrayRolling(Rolling["DataArray"]):
+     def __iter__(self) -> Iterator[tuple[RollingKey, DataArray]]:
+         if self.ndim > 1:
+             raise ValueError("__iter__ is only supported for 1d-rolling")
+-        stops = np.arange(1, len(self.window_labels) + 1)
+-        starts = stops - int(self.window[0])
+-        starts[: int(self.window[0])] = 0
++        
++        window_size = int(self.window[0])
++        
++        if self.center[0]:
++            # For centered windows, we need to adjust the start and stop positions
++            # The window should be centered around each position
++            offset = (window_size - 1) // 2
++            stops = np.arange(1, len(self.window_labels) + 1) + offset
++            starts = stops - window_size
++            # Clip to valid range
++            starts = np.maximum(starts, 0)
++            stops = np.minimum(stops, len(self.window_labels))
++        else:
++            # Original behavior for non-centered windows
++            stops = np.arange(1, len(self.window_labels) + 1)
++            starts = stops - window_size
++            starts[: window_size] = 0
++            
+         for (label, start, stop) in zip(self.window_labels, starts, stops):
+             window = self.obj.isel({self.dim[0]: slice(start, stop)})
+ 
+diff --git a/xarray/tests/test_rolling.py b/xarray/tests/test_rolling.py
+index 2d6efff7..49cc0260 100644
+--- a/xarray/tests/test_rolling.py
++++ b/xarray/tests/test_rolling.py
+@@ -49,6 +49,47 @@ class TestDataArrayRolling:
+                     expected.values[expected.values.nonzero()],
+                 )
+ 
++    def test_rolling_center_iter(self) -> None:
++        """Test that center parameter is respected when manually iterating over rolling windows."""
++        
++        # Create test data
++        da = DataArray(np.arange(1, 10), dims="x")
++        
++        # Test case 1: Compare automatic reduction with manual iteration for centered rolling
++        auto_result = da.rolling(x=3, center=True).mean()
++        manual_result = xr.concat(
++            [window.mean() for label, window in da.rolling(x=3, center=True)],
++            dim="x"
++        )
++        assert_identical(auto_result, manual_result)
++        
++        # Test case 2: Compare with non-centered rolling
++        auto_result_nc = da.rolling(x=3, center=False).mean()
++        manual_result_nc = xr.concat(
++            [window.mean() for label, window in da.rolling(x=3, center=False)],
++            dim="x"
++        )
++        assert_identical(auto_result_nc, manual_result_nc)
++        
++        # Test case 3: Verify that centered and non-centered produce different results
++        assert not auto_result.equals(auto_result_nc)
++        
++        # Test case 4: Check with even window size
++        auto_result_even = da.rolling(x=4, center=True).mean()
++        manual_result_even = xr.concat(
++            [window.mean() for label, window in da.rolling(x=4, center=True)],
++            dim="x"
++        )
++        assert_identical(auto_result_even, manual_result_even)
++        
++        # Test case 5: Check with min_periods
++        auto_result_mp = da.rolling(x=3, center=True, min_periods=2).mean()
++        manual_result_mp = xr.concat(
++            [window.mean() for label, window in da.rolling(x=3, center=True, min_periods=2)],
++            dim="x"
++        )
++        assert_identical(auto_result_mp, manual_result_mp)
++
+     @pytest.mark.parametrize("da", (1,), indirect=True)
+     def test_rolling_repr(self, da) -> None:
+         rolling_obj = da.rolling(time=7)

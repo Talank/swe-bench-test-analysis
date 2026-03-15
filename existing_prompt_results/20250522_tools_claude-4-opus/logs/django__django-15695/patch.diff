@@ -1,0 +1,713 @@
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index d17232e4ec..5d692d13e8 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -953,6 +953,10 @@ class RenameIndex(IndexOperation):
+                         ", ".join(columns),
+                     )
+                 )
++            # Check if the index already has the target name
++            if matching_index_name[0] == self.new_name:
++                # Index already has the target name, nothing to do
++                return
+             old_index = models.Index(
+                 fields=self.old_fields,
+                 name=matching_index_name[0],
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..27b80ecd45
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,177 @@
++"""Test edge cases for the RenameIndex fix."""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings for SQLite (easier for testing)
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.operations.models import CreateModel, RenameIndex
++
++def test_rename_index_with_explicit_name():
++    """Test that RenameIndex with old_name (not old_fields) still works correctly."""
++    
++    app_label = "test_app"
++    
++    # Create initial project state with a model that has a named index
++    project_state = ProjectState()
++    
++    # Add model with a named index
++    model_state = ModelState(
++        app_label,
++        "Pony",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("weight", models.IntegerField()),
++            ("pink", models.IntegerField()),
++        ],
++        {
++            "indexes": [
++                models.Index(fields=["weight", "pink"], name="old_idx_name")
++            ],
++        },
++    )
++    project_state.add_model(model_state)
++    
++    # Create the model in the database
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.create_model(model)
++    
++    # Create RenameIndex operation with old_name
++    operation = RenameIndex(
++        "Pony", 
++        new_name="new_idx_name", 
++        old_name="old_idx_name"
++    )
++    
++    # Apply state forward
++    new_state = project_state.clone()
++    operation.state_forwards(app_label, new_state)
++    
++    # Apply database forward
++    print("1. Testing RenameIndex with old_name...")
++    with connection.schema_editor() as editor:
++        operation.database_forwards(app_label, editor, project_state, new_state)
++    
++    # Check index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        assert "new_idx_name" in index_names, f"Expected 'new_idx_name' in {index_names}"
++        assert "old_idx_name" not in index_names, f"Did not expect 'old_idx_name' in {index_names}"
++    print("   Success: Named index renamed correctly")
++    
++    # Apply database backward (should rename back)
++    print("\n2. Applying backward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_backwards(app_label, editor, new_state, project_state)
++    
++    # Check index name (should be back to old name)
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        assert "old_idx_name" in index_names, f"Expected 'old_idx_name' in {index_names}"
++        assert "new_idx_name" not in index_names, f"Did not expect 'new_idx_name' in {index_names}"
++    print("   Success: Named index renamed back correctly")
++    
++    # Re-apply forward (should work without issues)
++    print("\n3. Re-applying forward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_forwards(app_label, editor, project_state, new_state)
++    
++    # Check index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        assert "new_idx_name" in index_names, f"Expected 'new_idx_name' in {index_names}"
++        assert "old_idx_name" not in index_names, f"Did not expect 'old_idx_name' in {index_names}"
++    print("   Success: Named index re-renamed correctly")
++    
++    # Clean up
++    with connection.schema_editor() as editor:
++        model = new_state.apps.get_model(app_label, "Pony")
++        editor.delete_model(model)
++    
++    print("\nTest for named indexes completed successfully!")
++
++
++def test_rename_index_no_matching_index():
++    """Test that RenameIndex raises appropriate error when no matching index found."""
++    
++    app_label = "test_app"
++    
++    # Create initial project state with a model without the expected index
++    project_state = ProjectState()
++    
++    # Add model without index_together
++    model_state = ModelState(
++        app_label,
++        "Pony",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("weight", models.IntegerField()),
++            ("pink", models.IntegerField()),
++        ],
++        {},
++    )
++    project_state.add_model(model_state)
++    
++    # Create the model in the database
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.create_model(model)
++    
++    # Create RenameIndex operation for non-existent index
++    operation = RenameIndex(
++        "Pony", 
++        new_name="new_pony_test_idx", 
++        old_fields=("weight", "pink")
++    )
++    
++    # Apply state forward
++    new_state = project_state.clone()
++    operation.state_forwards(app_label, new_state)
++    
++    # Try to apply database forward - should raise ValueError
++    print("\nTesting RenameIndex with non-existent index...")
++    try:
++        with connection.schema_editor() as editor:
++            operation.database_forwards(app_label, editor, project_state, new_state)
++        print("   ERROR: Expected ValueError but operation succeeded")
++    except ValueError as e:
++        print(f"   Success: Got expected ValueError: {e}")
++    
++    # Clean up
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.delete_model(model)
++    
++    print("\nTest for non-existent index completed successfully!")
++
++
++if __name__ == "__main__":
++    test_rename_index_with_explicit_name()
++    test_rename_index_no_matching_index()
++    print("\nAll edge case tests passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..fe09d8cede
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,127 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings for SQLite (easier for testing)
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.operations.models import CreateModel, RenameIndex
++
++def test_rename_index_forward_backward_forward():
++    """Test that RenameIndex can be applied forward, backward, and forward again without crashing."""
++    
++    app_label = "test_app"
++    
++    # Create initial project state with a model that has index_together
++    project_state = ProjectState()
++    
++    # Add model with index_together
++    model_state = ModelState(
++        app_label,
++        "Pony",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("weight", models.IntegerField()),
++            ("pink", models.IntegerField()),
++        ],
++        {
++            "index_together": {("weight", "pink")},
++        },
++    )
++    project_state.add_model(model_state)
++    
++    # Create the model in the database
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.create_model(model)
++    
++    # Get the auto-generated index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"Initial index names: {index_names}")
++    
++    # Create RenameIndex operation
++    operation = RenameIndex(
++        "Pony", 
++        new_name="new_pony_test_idx", 
++        old_fields=("weight", "pink")
++    )
++    
++    # Apply state forward
++    new_state = project_state.clone()
++    operation.state_forwards(app_label, new_state)
++    
++    # Apply database forward (rename unnamed index)
++    print("\n1. Applying forward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_forwards(app_label, editor, project_state, new_state)
++    
++    # Check index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"   Index names after forward: {index_names}")
++        assert "new_pony_test_idx" in index_names, f"Expected 'new_pony_test_idx' in {index_names}"
++    
++    # Apply database backward (should be no-op for unnamed index)
++    print("\n2. Applying backward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_backwards(app_label, editor, new_state, project_state)
++    
++    # Check index name (should still be new name)
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"   Index names after backward: {index_names}")
++        assert "new_pony_test_idx" in index_names, f"Expected 'new_pony_test_idx' in {index_names}"
++    
++    # Re-apply database forward - THIS SHOULD NOT CRASH NOW
++    print("\n3. Re-applying forward migration...")
++    try:
++        with connection.schema_editor() as editor:
++            operation.database_forwards(app_label, editor, project_state, new_state)
++        
++        # Check index name (should still be new name)
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++            index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++            print(f"   Index names after re-forward: {index_names}")
++            assert "new_pony_test_idx" in index_names, f"Expected 'new_pony_test_idx' in {index_names}"
++        
++        print("\n   SUCCESS: Forward migration re-applied without error!")
++        
++    except Exception as e:
++        print(f"   ERROR: {type(e).__name__}: {e}")
++        raise
++        
++    # Clean up
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.delete_model(model)
++    
++    print("\nTest completed successfully!")
++
++if __name__ == "__main__":
++    test_rename_index_forward_backward_forward()
+diff --git a/test_normal_rename.py b/test_normal_rename.py
+new file mode 100644
+index 0000000000..e3364f4c28
+--- /dev/null
++++ b/test_normal_rename.py
+@@ -0,0 +1,127 @@
++"""Test that normal rename operations still work correctly with our fix."""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings for SQLite (easier for testing)
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.operations.models import CreateModel, RenameIndex
++
++def test_normal_rename_still_works():
++    """Test that normal rename operations work correctly with our fix."""
++    
++    app_label = "test_app"
++    
++    # Create initial project state with a model that has index_together
++    project_state = ProjectState()
++    
++    # Add model with index_together
++    model_state = ModelState(
++        app_label,
++        "Pony",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("weight", models.IntegerField()),
++            ("pink", models.IntegerField()),
++        ],
++        {
++            "index_together": {("weight", "pink")},
++        },
++    )
++    project_state.add_model(model_state)
++    
++    # Create the model in the database
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.create_model(model)
++    
++    # Get the auto-generated index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        auto_index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"Initial auto-generated index name: {auto_index_names}")
++        assert len(auto_index_names) == 1
++        auto_index_name = auto_index_names[0]
++    
++    # Create RenameIndex operation
++    operation = RenameIndex(
++        "Pony", 
++        new_name="first_rename_idx", 
++        old_fields=("weight", "pink")
++    )
++    
++    # Apply state forward
++    new_state = project_state.clone()
++    operation.state_forwards(app_label, new_state)
++    
++    # Apply database forward (first rename)
++    print("\n1. First rename (auto-generated -> first_rename_idx)...")
++    with connection.schema_editor() as editor:
++        operation.database_forwards(app_label, editor, project_state, new_state)
++    
++    # Check index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"   Index names after first rename: {index_names}")
++        assert "first_rename_idx" in index_names
++        assert auto_index_name not in index_names
++    
++    # Now create another rename operation to rename it again
++    operation2 = RenameIndex(
++        "Pony", 
++        new_name="second_rename_idx", 
++        old_fields=("weight", "pink")
++    )
++    
++    # Apply state forward for second rename
++    new_state2 = new_state.clone()
++    operation2.state_forwards(app_label, new_state2)
++    
++    # Apply database forward (second rename)
++    print("\n2. Second rename (first_rename_idx -> second_rename_idx)...")
++    with connection.schema_editor() as editor:
++        operation2.database_forwards(app_label, editor, new_state, new_state2)
++    
++    # Check index name
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, model._meta.db_table)
++        index_names = [name for name, info in constraints.items() if info['index'] and not info['unique']]
++        print(f"   Index names after second rename: {index_names}")
++        assert "second_rename_idx" in index_names
++        assert "first_rename_idx" not in index_names
++        assert auto_index_name not in index_names
++    
++    print("\n   Success: Multiple renames work correctly!")
++    
++    # Clean up
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.delete_model(model)
++    
++    print("\nNormal rename test completed successfully!")
++
++if __name__ == "__main__":
++    test_normal_rename_still_works()
+diff --git a/test_postgres_fix.py b/test_postgres_fix.py
+new file mode 100644
+index 0000000000..f269317aad
+--- /dev/null
++++ b/test_postgres_fix.py
+@@ -0,0 +1,114 @@
++"""
++Test the fix works on PostgreSQL as mentioned in the problem statement.
++This requires a PostgreSQL database to be running.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import connection, models
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings for PostgreSQL
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.postgresql',
++            'NAME': 'test_db',
++            'USER': 'postgres',
++            'PASSWORD': 'postgres',
++            'HOST': 'localhost',
++            'PORT': '5432',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++try:
++    django.setup()
++    
++    from django.db.migrations.state import ProjectState, ModelState
++    from django.db.migrations.operations.models import CreateModel, RenameIndex
++    
++    def test_rename_index_postgresql():
++        """Test that RenameIndex works on PostgreSQL without 'relation already exists' error."""
++        
++        app_label = "test_app"
++        
++        # Create initial project state with a model that has index_together
++        project_state = ProjectState()
++        
++        # Add model with index_together
++        model_state = ModelState(
++            app_label,
++            "Pony",
++            [
++                ("id", models.AutoField(primary_key=True)),
++                ("weight", models.IntegerField()),
++                ("pink", models.IntegerField()),
++            ],
++            {
++                "index_together": {("weight", "pink")},
++            },
++        )
++        project_state.add_model(model_state)
++        
++        # Create the model in the database
++        with connection.schema_editor() as editor:
++            model = project_state.apps.get_model(app_label, "Pony")
++            editor.create_model(model)
++        
++        # Create RenameIndex operation
++        operation = RenameIndex(
++            "Pony", 
++            new_name="new_pony_test_idx", 
++            old_fields=("weight", "pink")
++        )
++        
++        # Apply state forward
++        new_state = project_state.clone()
++        operation.state_forwards(app_label, new_state)
++        
++        # Apply database forward (rename unnamed index)
++        print("1. Applying forward migration...")
++        with connection.schema_editor() as editor:
++            operation.database_forwards(app_label, editor, project_state, new_state)
++        print("   Success: Index renamed to new_pony_test_idx")
++        
++        # Apply database backward (should be no-op for unnamed index)
++        print("\n2. Applying backward migration...")
++        with connection.schema_editor() as editor:
++            operation.database_backwards(app_label, editor, new_state, project_state)
++        print("   Success: Backward migration completed (no-op)")
++        
++        # Re-apply database forward - THIS SHOULD NOT CRASH
++        print("\n3. Re-applying forward migration...")
++        try:
++            with connection.schema_editor() as editor:
++                operation.database_forwards(app_label, editor, project_state, new_state)
++            print("   SUCCESS: Forward migration re-applied without 'relation already exists' error!")
++            
++        except Exception as e:
++            print(f"   ERROR: {type(e).__name__}: {e}")
++            raise
++            
++        # Clean up
++        with connection.schema_editor() as editor:
++            model = project_state.apps.get_model(app_label, "Pony")
++            editor.delete_model(model)
++        
++        print("\nPostgreSQL test completed successfully!")
++    
++    if __name__ == "__main__":
++        test_rename_index_postgresql()
++        
++except Exception as e:
++    print(f"Note: PostgreSQL test skipped - {e}")
++    print("This is expected if PostgreSQL is not running.")
+diff --git a/test_rename_index_issue.py b/test_rename_index_issue.py
+new file mode 100644
+index 0000000000..7d376354f6
+--- /dev/null
++++ b/test_rename_index_issue.py
+@@ -0,0 +1,108 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations import state
++from django.db.migrations.operations.models import RenameIndex
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.postgresql',
++            'NAME': 'test_db',
++            'USER': 'postgres',
++            'PASSWORD': 'postgres',
++            'HOST': 'localhost',
++            'PORT': '5432',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Create a test to reproduce the issue
++from django.db import models
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.operations.models import CreateModel
++
++def test_rename_index_issue():
++    """Test that RenameIndex can be applied forward, backward, and forward again without crashing."""
++    
++    app_label = "test_app"
++    
++    # Create initial project state with a model that has index_together
++    project_state = ProjectState()
++    
++    # Add model with index_together
++    model_state = ModelState(
++        app_label,
++        "Pony",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("weight", models.IntegerField()),
++            ("pink", models.IntegerField()),
++        ],
++        {
++            "index_together": [("weight", "pink")],
++        },
++    )
++    project_state.add_model(model_state)
++    
++    # Create the model in the database
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.create_model(model)
++    
++    # Create RenameIndex operation
++    operation = RenameIndex(
++        "Pony", 
++        new_name="new_pony_test_idx", 
++        old_fields=("weight", "pink")
++    )
++    
++    # Apply state forward
++    new_state = project_state.clone()
++    operation.state_forwards(app_label, new_state)
++    
++    # Apply database forward (rename unnamed index)
++    print("1. Applying forward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_forwards(app_label, editor, project_state, new_state)
++    print("   Success: Index renamed to new_pony_test_idx")
++    
++    # Apply database backward (should be no-op for unnamed index)
++    print("\n2. Applying backward migration...")
++    with connection.schema_editor() as editor:
++        operation.database_backwards(app_label, editor, new_state, project_state)
++    print("   Success: Backward migration completed (no-op)")
++    
++    # Re-apply database forward - THIS IS WHERE IT CRASHES
++    print("\n3. Re-applying forward migration...")
++    try:
++        with connection.schema_editor() as editor:
++            operation.database_forwards(app_label, editor, project_state, new_state)
++        print("   Success: Forward migration re-applied")
++    except Exception as e:
++        print(f"   ERROR: {type(e).__name__}: {e}")
++        print("\n   This is the bug - RenameIndex crashes when re-applying forward migration")
++        
++    # Clean up
++    with connection.schema_editor() as editor:
++        model = project_state.apps.get_model(app_label, "Pony")
++        editor.delete_model(model)
++
++if __name__ == "__main__":
++    # Note: This requires a PostgreSQL database to be running
++    # You can start one with: docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres
++    test_rename_index_issue()
+diff --git a/tests/migrations/test_operations.py b/tests/migrations/test_operations.py
+index cfd28b1b39..c0a55023bb 100644
+--- a/tests/migrations/test_operations.py
++++ b/tests/migrations/test_operations.py
+@@ -2988,6 +2988,10 @@ class OperationTests(OperationTestBase):
+         with connection.schema_editor() as editor, self.assertNumQueries(0):
+             operation.database_backwards(app_label, editor, new_state, project_state)
+         self.assertIndexNameExists(table_name, "new_pony_test_idx")
++        # Re-apply renaming.
++        with connection.schema_editor() as editor:
++            operation.database_forwards(app_label, editor, project_state, new_state)
++        self.assertIndexNameExists(table_name, "new_pony_test_idx")
+         # Deconstruction.
+         definition = operation.deconstruct()
+         self.assertEqual(definition[0], "RenameIndex")

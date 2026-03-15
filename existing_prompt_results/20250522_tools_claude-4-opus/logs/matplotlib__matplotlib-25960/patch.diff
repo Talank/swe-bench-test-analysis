@@ -1,0 +1,545 @@
+diff --git a/demo_fix.py b/demo_fix.py
+new file mode 100644
+index 0000000000..e07caf724f
+--- /dev/null
++++ b/demo_fix.py
+@@ -0,0 +1,53 @@
++"""
++Demonstration of the fix for wspace and hspace in subfigures.
++
++This script shows that wspace and hspace parameters now work correctly
++when creating subfigures.
++"""
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Create three figures with different spacing
++fig1, fig2, fig3 = plt.figure(figsize=(8, 8)), plt.figure(figsize=(8, 8)), plt.figure(figsize=(8, 8))
++
++# No spacing
++subfigs1 = fig1.subfigures(2, 2, wspace=0, hspace=0)
++for i, sf in enumerate(subfigs1.flat):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subplot {i+1}')
++    sf.patch.set_edgecolor('red')
++    sf.patch.set_linewidth(2)
++fig1.suptitle('wspace=0, hspace=0')
++
++# Medium spacing  
++subfigs2 = fig2.subfigures(2, 2, wspace=0.2, hspace=0.2)
++for i, sf in enumerate(subfigs2.flat):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subplot {i+1}')
++    sf.patch.set_edgecolor('green')
++    sf.patch.set_linewidth(2)
++fig2.suptitle('wspace=0.2, hspace=0.2')
++
++# Large spacing
++subfigs3 = fig3.subfigures(2, 2, wspace=0.5, hspace=0.5)
++for i, sf in enumerate(subfigs3.flat):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subplot {i+1}')
++    sf.patch.set_edgecolor('blue')
++    sf.patch.set_linewidth(2)
++fig3.suptitle('wspace=0.5, hspace=0.5')
++
++# Save the figures
++fig1.savefig('/testbed/demo_spacing_0.png', dpi=100)
++fig2.savefig('/testbed/demo_spacing_0.2.png', dpi=100)
++fig3.savefig('/testbed/demo_spacing_0.5.png', dpi=100)
++
++print("Demo figures saved:")
++print("  - demo_spacing_0.png: No spacing between subfigures")
++print("  - demo_spacing_0.2.png: Medium spacing between subfigures")
++print("  - demo_spacing_0.5.png: Large spacing between subfigures")
++print("\nThe subfigures now correctly respect the wspace and hspace parameters!")
+diff --git a/demo_spacing_0.2.png b/demo_spacing_0.2.png
+new file mode 100644
+index 0000000000..6b9ba82649
+Binary files /dev/null and b/demo_spacing_0.2.png differ
+diff --git a/demo_spacing_0.5.png b/demo_spacing_0.5.png
+new file mode 100644
+index 0000000000..59bfb7ede4
+Binary files /dev/null and b/demo_spacing_0.5.png differ
+diff --git a/demo_spacing_0.png b/demo_spacing_0.png
+new file mode 100644
+index 0000000000..427d003909
+Binary files /dev/null and b/demo_spacing_0.png differ
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index dab2bc4a5a..5a3cdf624b 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -2274,17 +2274,55 @@ class SubFigure(FigureBase):
+             return
+         # need to figure out *where* this subplotspec is.
+         gs = self._subplotspec.get_gridspec()
+-        wr = np.asarray(gs.get_width_ratios())
+-        hr = np.asarray(gs.get_height_ratios())
+-        dx = wr[self._subplotspec.colspan].sum() / wr.sum()
+-        dy = hr[self._subplotspec.rowspan].sum() / hr.sum()
+-        x0 = wr[:self._subplotspec.colspan.start].sum() / wr.sum()
+-        y0 = 1 - hr[:self._subplotspec.rowspan.stop].sum() / hr.sum()
+-        if self.bbox_relative is None:
+-            self.bbox_relative = Bbox.from_bounds(x0, y0, dx, dy)
++        
++        # Get the top-level figure
++        parent_fig = self._parent
++        if hasattr(parent_fig, 'figure'):
++            top_fig = parent_fig.figure
+         else:
+-            self.bbox_relative.p0 = (x0, y0)
+-            self.bbox_relative.p1 = (x0 + dx, y0 + dy)
++            top_fig = parent_fig
++            
++        # Check if we should use get_grid_positions (which respects wspace/hspace)
++        # or the simple ratio-based calculation.
++        # We use get_grid_positions when:
++        # 1. Not using constrained layout (which will override with explicit bbox)
++        # 2. The GridSpec has explicit wspace/hspace values (not None)
++        #    This indicates the user wants spacing to be respected
++        use_grid_positions = (not top_fig.get_constrained_layout() and 
++                            (gs.wspace is not None or gs.hspace is not None))
++        
++        if use_grid_positions:
++            # Use get_grid_positions which respects wspace and hspace
++            nrows, ncols = gs.get_geometry()
++            rows, cols = np.unravel_index([self._subplotspec.num1, self._subplotspec.num2], (nrows, ncols))
++            
++            fig_bottoms, fig_tops, fig_lefts, fig_rights = \
++                gs.get_grid_positions(top_fig)
++
++            fig_bottom = fig_bottoms[rows].min()
++            fig_top = fig_tops[rows].max()
++            fig_left = fig_lefts[cols].min()
++            fig_right = fig_rights[cols].max()
++            
++            if self.bbox_relative is None:
++                self.bbox_relative = Bbox.from_extents(fig_left, fig_bottom, 
++                                                       fig_right, fig_top)
++            else:
++                self.bbox_relative.p0 = (fig_left, fig_bottom)
++                self.bbox_relative.p1 = (fig_right, fig_top)
++        else:
++            # Use simple ratio-based calculation (original behavior)
++            wr = np.asarray(gs.get_width_ratios())
++            hr = np.asarray(gs.get_height_ratios())
++            dx = wr[self._subplotspec.colspan].sum() / wr.sum()
++            dy = hr[self._subplotspec.rowspan].sum() / hr.sum()
++            x0 = wr[:self._subplotspec.colspan.start].sum() / wr.sum()
++            y0 = 1 - hr[:self._subplotspec.rowspan.stop].sum() / hr.sum()
++            if self.bbox_relative is None:
++                self.bbox_relative = Bbox.from_bounds(x0, y0, dx, dy)
++            else:
++                self.bbox_relative.p0 = (x0, y0)
++                self.bbox_relative.p1 = (x0 + dx, y0 + dy)
+ 
+     def get_constrained_layout(self):
+         """
+diff --git a/test_add_subfigure.py b/test_add_subfigure.py
+new file mode 100644
+index 0000000000..a1cbe5ceab
+--- /dev/null
++++ b/test_add_subfigure.py
+@@ -0,0 +1,21 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Test add_subfigure with gridspec
++fig = plt.figure()
++gs = fig.add_gridspec(1, 2)
++sfig = fig.add_subfigure(gs[0])
++
++print(f"Subfigure bbox_relative: {sfig.bbox_relative}")
++print(f"GridSpec: {gs}")
++
++# Check if the gridspec has wspace/hspace
++print(f"GridSpec wspace: {gs.wspace}")
++print(f"GridSpec hspace: {gs.hspace}")
++
++# Get grid positions
++bottoms, tops, lefts, rights = gs.get_grid_positions(fig)
++print(f"Grid positions:")
++print(f"  lefts: {lefts}")
++print(f"  rights: {rights}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..c9f4729ce7
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,56 @@
++import matplotlib.pyplot as plt
++import matplotlib
++import numpy as np
++matplotlib.use('Agg')
++
++# Test 1: Basic wspace/hspace without constrained layout
++print("Test 1: Basic subfigures with wspace/hspace")
++fig = plt.figure(figsize=(10, 5))
++subfigs = fig.subfigures(1, 3, wspace=0.3)
++for i, sf in enumerate(subfigs):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subfigure {i}')
++    print(f"  Subfigure {i}: x0={sf.bbox_relative.x0:.3f}, width={sf.bbox_relative.width:.3f}")
++fig.savefig('/testbed/test_comprehensive_1.png')
++plt.close()
++
++# Test 2: With hspace
++print("\nTest 2: Subfigures with hspace")
++fig = plt.figure(figsize=(5, 10))
++subfigs = fig.subfigures(3, 1, hspace=0.3)
++for i, sf in enumerate(subfigs):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subfigure {i}')
++    print(f"  Subfigure {i}: y0={sf.bbox_relative.y0:.3f}, height={sf.bbox_relative.height:.3f}")
++fig.savefig('/testbed/test_comprehensive_2.png')
++plt.close()
++
++# Test 3: With constrained layout
++print("\nTest 3: With constrained layout")
++fig = plt.figure(figsize=(10, 5), layout='constrained')
++subfigs = fig.subfigures(1, 2, wspace=0.3)
++for i, sf in enumerate(subfigs):
++    ax = sf.subplots()
++    ax.plot([1, 2, 3], [1, 2, 3])
++    ax.set_title(f'Subfigure {i}')
++    print(f"  Subfigure {i}: x0={sf.bbox_relative.x0:.3f}, width={sf.bbox_relative.width:.3f}")
++fig.savefig('/testbed/test_comprehensive_3.png')
++plt.close()
++
++# Test 4: Nested subfigures
++print("\nTest 4: Nested subfigures")
++fig = plt.figure(figsize=(10, 10))
++subfigs = fig.subfigures(2, 2, wspace=0.2, hspace=0.2)
++for i, sf in enumerate(subfigs.flat):
++    # Create nested subfigures
++    nested = sf.subfigures(1, 2, wspace=0.1)
++    for j, nsf in enumerate(nested):
++        ax = nsf.subplots()
++        ax.plot([1, 2, 3], [1, 2, 3])
++        ax.set_title(f'Nested {i}.{j}')
++fig.savefig('/testbed/test_comprehensive_4.png')
++plt.close()
++
++print("\nAll tests completed successfully!")
+diff --git a/test_comprehensive_1.png b/test_comprehensive_1.png
+new file mode 100644
+index 0000000000..c09fd1d5b9
+Binary files /dev/null and b/test_comprehensive_1.png differ
+diff --git a/test_comprehensive_2.png b/test_comprehensive_2.png
+new file mode 100644
+index 0000000000..ba2516fcd3
+Binary files /dev/null and b/test_comprehensive_2.png differ
+diff --git a/test_comprehensive_3.png b/test_comprehensive_3.png
+new file mode 100644
+index 0000000000..430203bbe9
+Binary files /dev/null and b/test_comprehensive_3.png differ
+diff --git a/test_comprehensive_4.png b/test_comprehensive_4.png
+new file mode 100644
+index 0000000000..bd9f57f4e0
+Binary files /dev/null and b/test_comprehensive_4.png differ
+diff --git a/test_constrained_layout.png b/test_constrained_layout.png
+new file mode 100644
+index 0000000000..40be133049
+Binary files /dev/null and b/test_constrained_layout.png differ
+diff --git a/test_constrained_layout.py b/test_constrained_layout.py
+new file mode 100644
+index 0000000000..f8ada7f2db
+--- /dev/null
++++ b/test_constrained_layout.py
+@@ -0,0 +1,33 @@
++import matplotlib.pyplot as plt
++import matplotlib
++import numpy as np
++matplotlib.use('Agg')
++
++# Test with constrained layout (like the failing test)
++np.random.seed(19680801)
++fig = plt.figure(layout='constrained')
++sub = fig.subfigures(1, 2)
++
++axs = sub[0].subplots(2, 2)
++for ax in axs.flat:
++    pc = ax.pcolormesh(np.random.randn(30, 30), vmin=-2, vmax=2)
++sub[0].colorbar(pc, ax=axs)
++sub[0].suptitle('Left Side')
++sub[0].set_facecolor('white')
++
++axs = sub[1].subplots(1, 3)
++for ax in axs.flat:
++    pc = ax.pcolormesh(np.random.randn(30, 30), vmin=-2, vmax=2)
++sub[1].colorbar(pc, ax=axs, location='bottom')
++sub[1].suptitle('Right Side')
++sub[1].set_facecolor('white')
++
++fig.suptitle('Figure suptitle', fontsize='xx-large')
++
++# Save the figure
++fig.savefig('/testbed/test_constrained_layout.png')
++
++# Check subfigure positions
++print("Subfigure positions with constrained layout:")
++for i, sf in enumerate(sub):
++    print(f"  Subfigure {i}: bbox_relative = {sf.bbox_relative}")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..64694f4d0a
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,42 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Test case from the issue
++print("Test 1: Original issue - wspace=0, hspace=0")
++fig = plt.figure()
++figs = fig.subfigures(2, 2, wspace=0, hspace=0)
++print(f"  GridSpec wspace={figs.flat[0]._subplotspec.get_gridspec().wspace}")
++print(f"  GridSpec hspace={figs.flat[0]._subplotspec.get_gridspec().hspace}")
++for i, sf in enumerate(figs.flat):
++    print(f"  Subfigure {i}: x0={sf.bbox_relative.x0:.3f}, y0={sf.bbox_relative.y0:.3f}, "
++          f"width={sf.bbox_relative.width:.3f}, height={sf.bbox_relative.height:.3f}")
++plt.close()
++
++print("\nTest 2: With spacing - wspace=0.5, hspace=0.5")
++fig = plt.figure()
++figs = fig.subfigures(2, 2, wspace=0.5, hspace=0.5)
++print(f"  GridSpec wspace={figs.flat[0]._subplotspec.get_gridspec().wspace}")
++print(f"  GridSpec hspace={figs.flat[0]._subplotspec.get_gridspec().hspace}")
++for i, sf in enumerate(figs.flat):
++    print(f"  Subfigure {i}: x0={sf.bbox_relative.x0:.3f}, y0={sf.bbox_relative.y0:.3f}, "
++          f"width={sf.bbox_relative.width:.3f}, height={sf.bbox_relative.height:.3f}")
++plt.close()
++
++print("\nTest 3: add_subfigure with GridSpec (no explicit spacing)")
++fig = plt.figure()
++gs = fig.add_gridspec(1, 2)
++sf = fig.add_subfigure(gs[0])
++print(f"  GridSpec wspace={gs.wspace}")
++print(f"  Subfigure: x0={sf.bbox_relative.x0:.3f}, width={sf.bbox_relative.width:.3f}")
++plt.close()
++
++print("\nTest 4: Constrained layout")
++fig = plt.figure(layout='constrained')
++figs = fig.subfigures(1, 2, wspace=0.5)
++print(f"  GridSpec wspace={figs[0]._subplotspec.get_gridspec().wspace}")
++for i, sf in enumerate(figs):
++    print(f"  Subfigure {i}: x0={sf.bbox_relative.x0:.3f}, width={sf.bbox_relative.width:.3f}")
++plt.close()
++
++print("\nAll tests completed!")
+diff --git a/test_gridspec_raw.py b/test_gridspec_raw.py
+new file mode 100644
+index 0000000000..58b851b956
+--- /dev/null
++++ b/test_gridspec_raw.py
+@@ -0,0 +1,30 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Test to understand the raw parameter in get_grid_positions
++fig1 = plt.figure()
++gs1 = fig1.add_gridspec(1, 2, wspace=0.2)
++print("Normal figure GridSpec positions:")
++bottoms, tops, lefts, rights = gs1.get_grid_positions(fig1, raw=False)
++print(f"  lefts: {lefts}, rights: {rights}")
++print(f"  raw=True:")
++bottoms, tops, lefts, rights = gs1.get_grid_positions(fig1, raw=True)
++print(f"  lefts: {lefts}, rights: {rights}")
++
++fig2 = plt.figure(layout='constrained')
++gs2 = fig2.add_gridspec(1, 2, wspace=0.2)
++print("\nConstrained layout figure GridSpec positions:")
++bottoms, tops, lefts, rights = gs2.get_grid_positions(fig2, raw=False)
++print(f"  lefts: {lefts}, rights: {rights}")
++print(f"  raw=True:")
++bottoms, tops, lefts, rights = gs2.get_grid_positions(fig2, raw=True)
++print(f"  lefts: {lefts}, rights: {rights}")
++
++# Check if the subfigures are using raw=True
++fig3 = plt.figure(layout='constrained')
++sub = fig3.subfigures(1, 2)
++gs3 = sub[0]._subplotspec.get_gridspec()
++print("\nSubfigure's GridSpec:")
++print(f"  GridSpec: {gs3}")
++print(f"  wspace: {gs3.wspace}")
+diff --git a/test_original_behavior.py b/test_original_behavior.py
+new file mode 100644
+index 0000000000..6e34a252f7
+--- /dev/null
++++ b/test_original_behavior.py
+@@ -0,0 +1,28 @@
++import matplotlib.pyplot as plt
++import matplotlib
++import numpy as np
++matplotlib.use('Agg')
++
++# Let's temporarily revert to see what the original behavior was
++# This will help us understand if we need to update the test
++
++# First, let's check the current behavior with our fix
++fig = plt.figure()
++subfigs = fig.subfigures(1, 2, wspace=0.2)
++print("With our fix (no constrained layout):")
++for i, sf in enumerate(subfigs):
++    print(f"  Subfigure {i}: bbox_relative = {sf.bbox_relative}")
++
++# Now with constrained layout
++fig2 = plt.figure(layout='constrained')
++subfigs2 = fig2.subfigures(1, 2, wspace=0.2)
++print("\nWith our fix (constrained layout):")
++for i, sf in enumerate(subfigs2):
++    print(f"  Subfigure {i}: bbox_relative = {sf.bbox_relative}")
++
++# The original code would have produced:
++# For non-constrained: x0=0.0/0.5, width=0.5 (ignoring wspace)
++# For constrained: managed by constrained layout engine
++print("\nOriginal behavior (calculated):")
++print("  Without constrained layout: would ignore wspace")
++print("  With constrained layout: managed by layout engine")
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 0000000000..a18984ccfe
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,19 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Original reproduction code from the issue
++figs = plt.figure().subfigures(2, 2, wspace=0, hspace=0)
++for fig in figs.flat:
++    fig.subplots().plot([1, 2])
++plt.savefig('/testbed/test_original_wspace0_hspace0.png')
++plt.close()
++
++# Test with spacing
++figs = plt.figure().subfigures(2, 2, wspace=0.5, hspace=0.5)
++for fig in figs.flat:
++    fig.subplots().plot([1, 2])
++plt.savefig('/testbed/test_original_wspace0.5_hspace0.5.png')
++plt.close()
++
++print("Original issue test completed. Check the images to see the difference.")
+diff --git a/test_original_wspace0.5_hspace0.5.png b/test_original_wspace0.5_hspace0.5.png
+new file mode 100644
+index 0000000000..094333fb68
+Binary files /dev/null and b/test_original_wspace0.5_hspace0.5.png differ
+diff --git a/test_original_wspace0_hspace0.png b/test_original_wspace0_hspace0.png
+new file mode 100644
+index 0000000000..ec859770f6
+Binary files /dev/null and b/test_original_wspace0_hspace0.png differ
+diff --git a/test_subfigure_positions.py b/test_subfigure_positions.py
+new file mode 100644
+index 0000000000..f0bafb05b9
+--- /dev/null
++++ b/test_subfigure_positions.py
+@@ -0,0 +1,37 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')
++
++# Test to verify subfigure positions
++fig = plt.figure(figsize=(10, 10))
++
++# Test with different wspace/hspace values
++test_cases = [
++    (0.0, 0.0),
++    (0.2, 0.2),
++    (0.5, 0.5),
++]
++
++for i, (wspace, hspace) in enumerate(test_cases):
++    print(f"\nTest case {i+1}: wspace={wspace}, hspace={hspace}")
++    
++    fig.clear()
++    subfigs = fig.subfigures(2, 2, wspace=wspace, hspace=hspace)
++    
++    # Print bbox_relative for each subfigure
++    for j, sf in enumerate(subfigs.flat):
++        bbox = sf.bbox_relative
++        print(f"  Subfigure {j}: bbox_relative = {bbox}")
++        print(f"    x0={bbox.x0:.3f}, y0={bbox.y0:.3f}, width={bbox.width:.3f}, height={bbox.height:.3f}")
++    
++    # Also check the gridspec positions
++    gs = subfigs.flat[0]._subplotspec.get_gridspec()
++    print(f"  GridSpec wspace={gs.wspace}, hspace={gs.hspace}")
++    
++    # Get the grid positions from the gridspec
++    bottoms, tops, lefts, rights = gs.get_grid_positions(fig)
++    print(f"  Grid positions from GridSpec:")
++    print(f"    lefts: {lefts}")
++    print(f"    rights: {rights}")
++    print(f"    bottoms: {bottoms}")
++    print(f"    tops: {tops}")
+diff --git a/test_subfigures_spacing.py b/test_subfigures_spacing.py
+new file mode 100644
+index 0000000000..852ae2fd08
+--- /dev/null
++++ b/test_subfigures_spacing.py
+@@ -0,0 +1,44 @@
++import matplotlib.pyplot as plt
++import matplotlib
++matplotlib.use('Agg')  # Use non-interactive backend for testing
++
++# Test case 1: wspace=0, hspace=0
++fig1 = plt.figure(figsize=(8, 8))
++figs1 = fig1.subfigures(2, 2, wspace=0, hspace=0)
++for i, fig in enumerate(figs1.flat):
++    ax = fig.subplots()
++    ax.plot([1, 2])
++    ax.set_title(f'Subfigure {i}')
++fig1.savefig('/testbed/test_subfigures_spacing_0.png', dpi=100)
++plt.close(fig1)
++
++# Test case 2: wspace=0.5, hspace=0.5
++fig2 = plt.figure(figsize=(8, 8))
++figs2 = fig2.subfigures(2, 2, wspace=0.5, hspace=0.5)
++for i, fig in enumerate(figs2.flat):
++    ax = fig.subplots()
++    ax.plot([1, 2])
++    ax.set_title(f'Subfigure {i}')
++fig2.savefig('/testbed/test_subfigures_spacing_0.5.png', dpi=100)
++plt.close(fig2)
++
++# Test case 3: wspace=1.0, hspace=1.0
++fig3 = plt.figure(figsize=(8, 8))
++figs3 = fig3.subfigures(2, 2, wspace=1.0, hspace=1.0)
++for i, fig in enumerate(figs3.flat):
++    ax = fig.subplots()
++    ax.plot([1, 2])
++    ax.set_title(f'Subfigure {i}')
++fig3.savefig('/testbed/test_subfigures_spacing_1.0.png', dpi=100)
++plt.close(fig3)
++
++print("Test images saved. If wspace/hspace are working, the spacing between subfigures should be different in each image.")
++
++# Let's also check the GridSpec parameters
++fig = plt.figure()
++figs = fig.subfigures(2, 2, wspace=0.5, hspace=0.5)
++# Access the GridSpec from one of the subfigures
++if hasattr(figs.flat[0], '_subplotspec'):
++    gs = figs.flat[0]._subplotspec.get_gridspec()
++    print(f"GridSpec wspace: {gs.wspace}")
++    print(f"GridSpec hspace: {gs.hspace}")
+diff --git a/test_subfigures_spacing_0.5.png b/test_subfigures_spacing_0.5.png
+new file mode 100644
+index 0000000000..c4d10d98b8
+Binary files /dev/null and b/test_subfigures_spacing_0.5.png differ
+diff --git a/test_subfigures_spacing_0.png b/test_subfigures_spacing_0.png
+new file mode 100644
+index 0000000000..e0a896dbba
+Binary files /dev/null and b/test_subfigures_spacing_0.png differ
+diff --git a/test_subfigures_spacing_1.0.png b/test_subfigures_spacing_1.0.png
+new file mode 100644
+index 0000000000..304c767caf
+Binary files /dev/null and b/test_subfigures_spacing_1.0.png differ

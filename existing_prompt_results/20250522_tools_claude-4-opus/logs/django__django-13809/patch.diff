@@ -1,0 +1,576 @@
+diff --git a/django/core/management/commands/runserver.py b/django/core/management/commands/runserver.py
+index d9fb088350..ece1305382 100644
+--- a/django/core/management/commands/runserver.py
++++ b/django/core/management/commands/runserver.py
+@@ -51,6 +51,10 @@ class Command(BaseCommand):
+             '--noreload', action='store_false', dest='use_reloader',
+             help='Tells Django to NOT use the auto-reloader.',
+         )
++        parser.add_argument(
++            '--skip-checks', action='store_true',
++            help='Skip system checks.',
++        )
+ 
+     def execute(self, *args, **options):
+         if options['no_color']:
+@@ -114,11 +118,12 @@ class Command(BaseCommand):
+         shutdown_message = options.get('shutdown_message', '')
+         quit_command = 'CTRL-BREAK' if sys.platform == 'win32' else 'CONTROL-C'
+ 
+-        self.stdout.write("Performing system checks...\n\n")
+-        self.check(display_num_errors=True)
+-        # Need to check migrations here, so can't use the
+-        # requires_migrations_check attribute.
+-        self.check_migrations()
++        if not options.get('skip_checks'):
++            self.stdout.write("Performing system checks...\n\n")
++            self.check(display_num_errors=True)
++            # Need to check migrations here, so can't use the
++            # requires_migrations_check attribute.
++            self.check_migrations()
+         now = datetime.now().strftime('%B %d, %Y - %X')
+         self.stdout.write(now)
+         self.stdout.write((
+diff --git a/test_consistency_with_migrate.py b/test_consistency_with_migrate.py
+new file mode 100644
+index 0000000000..f5101d1064
+--- /dev/null
++++ b/test_consistency_with_migrate.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python
++"""Test that runserver --skip-checks behaves consistently with migrate --skip-checks"""
++import os
++import sys
++from io import StringIO
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++from django.conf import settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ALLOWED_HOSTS=['*'],
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++import django
++django.setup()
++
++from django.core.management import call_command
++from django.core.management.commands.migrate import Command as MigrateCommand
++from django.core.management.commands.runserver import Command as RunserverCommand
++
++def test_consistency():
++    """Test that both commands handle --skip-checks consistently"""
++    
++    # Check that both commands have requires_system_checks = []
++    print(f"migrate.requires_system_checks = {MigrateCommand.requires_system_checks}")
++    print(f"runserver.requires_system_checks = {RunserverCommand.requires_system_checks}")
++    
++    assert MigrateCommand.requires_system_checks == [], "migrate should have empty requires_system_checks"
++    assert RunserverCommand.requires_system_checks == [], "runserver should have empty requires_system_checks"
++    
++    # Check that both commands accept --skip-checks
++    print("\nTesting migrate --skip-checks parser...")
++    migrate_cmd = MigrateCommand()
++    migrate_parser = migrate_cmd.create_parser('manage.py', 'migrate')
++    migrate_args = migrate_parser.parse_args(['--skip-checks'])
++    print(f"migrate --skip-checks parsed: {migrate_args.skip_checks}")
++    
++    print("\nTesting runserver --skip-checks parser...")
++    runserver_cmd = RunserverCommand()
++    runserver_parser = runserver_cmd.create_parser('manage.py', 'runserver')
++    runserver_args = runserver_parser.parse_args(['--skip-checks'])
++    print(f"runserver --skip-checks parsed: {runserver_args.skip_checks}")
++    
++    assert migrate_args.skip_checks == True, "migrate should parse --skip-checks correctly"
++    assert runserver_args.skip_checks == True, "runserver should parse --skip-checks correctly"
++    
++    print("\n✓ Both commands handle --skip-checks consistently!")
++
++if __name__ == '__main__':
++    test_consistency()
+diff --git a/test_runserver_edge_cases.py b/test_runserver_edge_cases.py
+new file mode 100644
+index 0000000000..5542ee2a46
+--- /dev/null
++++ b/test_runserver_edge_cases.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++"""Test edge cases for runserver --skip-checks"""
++import os
++import sys
++import subprocess
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++def test_help_consistency():
++    """Test that both runserver commands show --skip-checks in help"""
++    
++    # Test core runserver
++    result = subprocess.run(
++        [sys.executable, '-m', 'django', 'runserver', '--help'],
++        capture_output=True,
++        text=True,
++        env={**os.environ, 'DJANGO_SETTINGS_MODULE': 'tests.test_sqlite'}
++    )
++    
++    print("=== Core runserver help ===")
++    has_skip_checks = '--skip-checks' in result.stdout
++    print(f"Has --skip-checks: {has_skip_checks}")
++    
++    # Test with invalid option to ensure argument parsing works
++    result = subprocess.run(
++        [sys.executable, '-m', 'django', 'runserver', '--skip-checks', '--invalid-option'],
++        capture_output=True,
++        text=True,
++        env={**os.environ, 'DJANGO_SETTINGS_MODULE': 'tests.test_sqlite'}
++    )
++    
++    print("\n=== Test invalid option with --skip-checks ===")
++    print("Stderr:", result.stderr)
++    if "unrecognized arguments: --invalid-option" in result.stderr:
++        print("✓ Argument parsing works correctly")
++    else:
++        print("✗ Unexpected error message")
++    
++    # Test that --skip-checks is recognized as valid option
++    result = subprocess.run(
++        [sys.executable, '-c', '''
++import os, sys
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++from django.core.management import execute_from_command_line
++from django.core.management.commands.runserver import Command
++
++# Check if skip-checks is in the parser
++cmd = Command()
++parser = cmd.create_parser('manage.py', 'runserver')
++args = parser.parse_args(['--skip-checks'])
++print(f"skip_checks value: {args.skip_checks}")
++'''],
++        capture_output=True,
++        text=True
++    )
++    
++    print("\n=== Test argument parsing ===")
++    print("Output:", result.stdout)
++    print("Stderr:", result.stderr)
++    
++    if "skip_checks value: True" in result.stdout:
++        print("✓ --skip-checks argument is parsed correctly")
++    else:
++        print("✗ --skip-checks argument parsing failed")
++
++if __name__ == '__main__':
++    test_help_consistency()
+diff --git a/test_runserver_skip_checks.py b/test_runserver_skip_checks.py
+new file mode 100644
+index 0000000000..cde71c7bc0
+--- /dev/null
++++ b/test_runserver_skip_checks.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/env python
++"""Test script to verify runserver --skip-checks functionality"""
++import os
++import sys
++import subprocess
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++def test_runserver_help():
++    """Test that --skip-checks option appears in help"""
++    result = subprocess.run(
++        [sys.executable, '-m', 'django', 'runserver', '--help'],
++        capture_output=True,
++        text=True,
++        cwd='/testbed'
++    )
++    print("=== Runserver help output ===")
++    print(result.stdout)
++    print("=== Stderr ===")
++    print(result.stderr)
++    
++    if '--skip-checks' in result.stdout:
++        print("\n✓ --skip-checks option is present in help")
++    else:
++        print("\n✗ --skip-checks option is NOT present in help")
++    
++    return '--skip-checks' in result.stdout
++
++def test_runserver_skip_checks():
++    """Test that runserver can be run with --skip-checks"""
++    # Create a simple test script that runs runserver with --skip-checks
++    test_script = """
++import os
++import sys
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++from django.core.management import execute_from_command_line
++
++# Monkey patch to track if checks were called
++from django.core.management.commands import runserver
++original_check = runserver.Command.check
++original_check_migrations = runserver.Command.check_migrations
++
++checks_called = False
++migrations_checked = False
++
++def patched_check(self, *args, **kwargs):
++    global checks_called
++    checks_called = True
++    return original_check(self, *args, **kwargs)
++
++def patched_check_migrations(self, *args, **kwargs):
++    global migrations_checked  
++    migrations_checked = True
++    return original_check_migrations(self, *args, **kwargs)
++
++runserver.Command.check = patched_check
++runserver.Command.check_migrations = patched_check_migrations
++
++# Try to run with --skip-checks (will fail quickly due to missing settings, but that's ok)
++try:
++    execute_from_command_line(['manage.py', 'runserver', '--skip-checks', '--noreload', '0'])
++except SystemExit:
++    pass
++except Exception as e:
++    print(f"Exception: {e}")
++
++print(f"Checks called: {checks_called}")
++print(f"Migrations checked: {migrations_checked}")
++"""
++    
++    with open('/tmp/test_skip_checks.py', 'w') as f:
++        f.write(test_script)
++    
++    result = subprocess.run(
++        [sys.executable, '/tmp/test_skip_checks.py'],
++        capture_output=True,
++        text=True,
++        timeout=5
++    )
++    
++    print("\n=== Test runserver with --skip-checks ===")
++    print("Stdout:", result.stdout)
++    print("Stderr:", result.stderr)
++    
++    return result
++
++if __name__ == '__main__':
++    print("Testing runserver --skip-checks functionality\n")
++    
++    # Test 1: Check if --skip-checks appears in help
++    has_option = test_runserver_help()
++    
++    # Test 2: Try to run with --skip-checks
++    if has_option:
++        test_runserver_skip_checks()
++    else:
++        print("\nSkipping functional test since --skip-checks option is not available")
+diff --git a/test_simple_skip_checks.py b/test_simple_skip_checks.py
+new file mode 100644
+index 0000000000..f07d6626ae
+--- /dev/null
++++ b/test_simple_skip_checks.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python
++"""Simple test to verify --skip-checks option works"""
++import os
++import sys
++import subprocess
++import time
++import signal
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++def test_runserver_with_skip_checks():
++    """Test runserver with --skip-checks by checking output"""
++    
++    # Create a simple Django project settings
++    settings_content = """
++DEBUG = True
++SECRET_KEY = 'test-secret-key'
++ALLOWED_HOSTS = ['*']
++INSTALLED_APPS = []
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++"""
++    
++    with open('/tmp/test_settings.py', 'w') as f:
++        f.write(settings_content)
++    
++    # Test 1: Without --skip-checks
++    print("Test 1: Running runserver WITHOUT --skip-checks")
++    proc = subprocess.Popen(
++        [sys.executable, '-m', 'django', 'runserver', '--settings=test_settings', '--noreload', '0'],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        text=True,
++        cwd='/tmp',
++        env={**os.environ, 'PYTHONPATH': '/testbed'}
++    )
++    
++    # Give it a moment to start
++    time.sleep(1)
++    
++    # Kill the process
++    proc.send_signal(signal.SIGINT)
++    stdout, stderr = proc.communicate(timeout=5)
++    
++    print("Output:")
++    print(stdout)
++    print("Stderr:")
++    print(stderr)
++    
++    if "Performing system checks..." in stdout:
++        print("✓ System checks message found")
++    else:
++        print("✗ System checks message NOT found")
++    
++    # Test 2: With --skip-checks
++    print("\n\nTest 2: Running runserver WITH --skip-checks")
++    proc = subprocess.Popen(
++        [sys.executable, '-m', 'django', 'runserver', '--settings=test_settings', '--noreload', '--skip-checks', '0'],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        text=True,
++        cwd='/tmp',
++        env={**os.environ, 'PYTHONPATH': '/testbed'}
++    )
++    
++    # Give it a moment to start
++    time.sleep(1)
++    
++    # Kill the process
++    proc.send_signal(signal.SIGINT)
++    stdout, stderr = proc.communicate(timeout=5)
++    
++    print("Output:")
++    print(stdout)
++    print("Stderr:")
++    print(stderr)
++    
++    if "Performing system checks..." not in stdout:
++        print("✓ System checks message NOT found (as expected)")
++    else:
++        print("✗ System checks message found (should be skipped)")
++
++if __name__ == '__main__':
++    test_runserver_with_skip_checks()
+diff --git a/test_skip_checks_functionality.py b/test_skip_checks_functionality.py
+new file mode 100644
+index 0000000000..733b5c94f9
+--- /dev/null
++++ b/test_skip_checks_functionality.py
+@@ -0,0 +1,120 @@
++#!/usr/bin/env python
++"""
++Test that --skip-checks option works correctly for runserver command
++"""
++import os
++import sys
++import tempfile
++import shutil
++from io import StringIO
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure Django
++from django.conf import settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ALLOWED_HOSTS=['*'],
++    INSTALLED_APPS=[
++        'django.contrib.staticfiles',
++    ],
++    STATIC_URL='/static/',
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++import django
++django.setup()
++
++from django.core.management import call_command
++from django.core.management.commands.runserver import Command as RunserverCommand
++
++def test_skip_checks_option():
++    """Test that --skip-checks option skips system checks"""
++    
++    # Monkey patch to track if checks were called
++    original_check = RunserverCommand.check
++    original_check_migrations = RunserverCommand.check_migrations
++    original_inner_run = RunserverCommand.inner_run
++    
++    checks_called = False
++    migrations_checked = False
++    
++    def patched_check(self, *args, **kwargs):
++        nonlocal checks_called
++        checks_called = True
++        return original_check(self, *args, **kwargs)
++    
++    def patched_check_migrations(self, *args, **kwargs):
++        nonlocal migrations_checked  
++        migrations_checked = True
++        return original_check_migrations(self, *args, **kwargs)
++    
++    def patched_inner_run(self, *args, **options):
++        # Don't actually start the server
++        # Just execute the part of inner_run that does the checks
++        from django.utils import autoreload
++        autoreload.raise_last_exception()
++        
++        if not options.get('skip_checks'):
++            self.stdout.write("Performing system checks...\n\n")
++            self.check(display_num_errors=True)
++            self.check_migrations()
++    
++    RunserverCommand.check = patched_check
++    RunserverCommand.check_migrations = patched_check_migrations
++    RunserverCommand.inner_run = patched_inner_run
++    
++    try:
++        # Test 1: Without --skip-checks, checks should be called
++        checks_called = False
++        migrations_checked = False
++        
++        stdout = StringIO()
++        stderr = StringIO()
++        
++        call_command('runserver', '--noreload', stdout=stdout, stderr=stderr)
++        
++        print("Test 1: Without --skip-checks")
++        print(f"  Checks called: {checks_called}")
++        print(f"  Migrations checked: {migrations_checked}")
++        print(f"  Output: {stdout.getvalue()}")
++        
++        assert checks_called == True, "System checks should be called without --skip-checks"
++        assert migrations_checked == True, "Migration checks should be called without --skip-checks"
++        assert "Performing system checks..." in stdout.getvalue(), "Should show system checks message"
++        
++        # Test 2: With --skip-checks, checks should NOT be called
++        checks_called = False
++        migrations_checked = False
++        
++        stdout = StringIO()
++        stderr = StringIO()
++        
++        call_command('runserver', '--noreload', '--skip-checks', stdout=stdout, stderr=stderr)
++        
++        print("\nTest 2: With --skip-checks")
++        print(f"  Checks called: {checks_called}")
++        print(f"  Migrations checked: {migrations_checked}")
++        print(f"  Output: {stdout.getvalue()}")
++        
++        assert checks_called == False, "System checks should NOT be called with --skip-checks"
++        assert migrations_checked == False, "Migration checks should NOT be called with --skip-checks"
++        assert "Performing system checks..." not in stdout.getvalue(), "Should NOT show system checks message"
++        
++        print("\n✓ All tests passed!")
++        
++    finally:
++        # Restore original methods
++        RunserverCommand.check = original_check
++        RunserverCommand.check_migrations = original_check_migrations
++        RunserverCommand.inner_run = original_inner_run
++
++if __name__ == '__main__':
++    test_skip_checks_option()
+diff --git a/test_staticfiles_runserver.py b/test_staticfiles_runserver.py
+new file mode 100644
+index 0000000000..6607db9ac9
+--- /dev/null
++++ b/test_staticfiles_runserver.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python
++"""Test script to verify staticfiles runserver --skip-checks functionality"""
++import os
++import sys
++import subprocess
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++def test_staticfiles_runserver_help():
++    """Test that --skip-checks option appears in staticfiles runserver help"""
++    # First, we need to ensure staticfiles is in INSTALLED_APPS
++    test_script = """
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++# Configure Django with staticfiles
++from django.conf import settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.staticfiles',
++    ],
++    STATIC_URL='/static/',
++)
++
++import django
++django.setup()
++
++from django.core.management import execute_from_command_line
++execute_from_command_line(['manage.py', 'runserver', '--help'])
++"""
++    
++    with open('/tmp/test_staticfiles_help.py', 'w') as f:
++        f.write(test_script)
++    
++    result = subprocess.run(
++        [sys.executable, '/tmp/test_staticfiles_help.py'],
++        capture_output=True,
++        text=True
++    )
++    
++    print("=== Staticfiles Runserver help output ===")
++    print(result.stdout)
++    print("=== Stderr ===")
++    print(result.stderr)
++    
++    if '--skip-checks' in result.stdout:
++        print("\n✓ --skip-checks option is present in staticfiles runserver help")
++    else:
++        print("\n✗ --skip-checks option is NOT present in staticfiles runserver help")
++    
++    return '--skip-checks' in result.stdout
++
++if __name__ == '__main__':
++    print("Testing staticfiles runserver --skip-checks functionality\n")
++    test_staticfiles_runserver_help()

@@ -1,0 +1,269 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..464cadcbaa
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,28 @@
++from sympy import *
++from sympy.solvers.solveset import solveset
++from sympy.sets.conditionset import ConditionSet
++
++# Reproduce the issue
++n = symbols('n', real=True)
++eq = Eq(n*cos(n) - 3*sin(n), 0)
++
++print("Testing the issue:")
++print(f"Equation: {eq}")
++
++try:
++    result = eq.as_set()
++    print(f"Result: {result}")
++except NotImplementedError as e:
++    print(f"NotImplementedError raised: {e}")
++
++print("\nExpected result:")
++expected = ConditionSet(n, Eq(n*cos(n) - 3*sin(n), 0), Reals)
++print(f"ConditionSet: {expected}")
++
++# Let's also test solveset directly
++print("\nTesting solveset directly:")
++try:
++    result = solveset(n*cos(n) - 3*sin(n), n, domain=Reals)
++    print(f"Result: {result}")
++except NotImplementedError as e:
++    print(f"NotImplementedError raised: {e}")
+diff --git a/sympy/core/relational.py b/sympy/core/relational.py
+index f581bfa3c4..a7eb649699 100644
+--- a/sympy/core/relational.py
++++ b/sympy/core/relational.py
+@@ -389,10 +389,15 @@ def __nonzero__(self):
+     def _eval_as_set(self):
+         # self is univariate and periodicity(self, x) in (0, None)
+         from sympy.solvers.inequalities import solve_univariate_inequality
++        from sympy.sets.conditionset import ConditionSet
+         syms = self.free_symbols
+         assert len(syms) == 1
+         x = syms.pop()
+-        return solve_univariate_inequality(self, x, relational=False)
++        try:
++            return solve_univariate_inequality(self, x, relational=False)
++        except NotImplementedError:
++            # If solve_univariate_inequality can't solve it, return a ConditionSet
++            return ConditionSet(x, self, S.Reals)
+ 
+     @property
+     def binary_symbols(self):
+diff --git a/sympy/core/tests/test_relational.py b/sympy/core/tests/test_relational.py
+index 63a8705c62..398d3b77de 100644
+--- a/sympy/core/tests/test_relational.py
++++ b/sympy/core/tests/test_relational.py
+@@ -427,6 +427,21 @@ def test_univariate_relational_as_set():
+     assert (x**2 >= 4).as_set() == Interval(-oo, -2) + Interval(2, oo)
+ 
+ 
++def test_univariate_relational_as_set_transcendental():
++    from sympy.sets.conditionset import ConditionSet
++    # Test that transcendental equations return ConditionSet instead of raising NotImplementedError
++    n = Symbol('n', real=True)
++    eq = Eq(n*cos(n) - 3*sin(n), 0)
++    result = eq.as_set()
++    assert isinstance(result, ConditionSet)
++    assert result == ConditionSet(n, eq, S.Reals)
++    
++    # Test other transcendental equations
++    assert isinstance(Eq(sin(x) + x, 0).as_set(), ConditionSet)
++    assert isinstance(Eq(log(x) + x, 0).as_set(), ConditionSet)
++    assert isinstance(Eq(x*cos(x), 1).as_set(), ConditionSet)
++
++
+ @XFAIL
+ def test_multivariate_relational_as_set():
+     assert (x*y >= 0).as_set() == Interval(0, oo)*Interval(0, oo) + \
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..9f9336dfc1
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,59 @@
++from sympy import *
++from sympy.sets.conditionset import ConditionSet
++
++# Test edge cases
++x = symbols('x', real=True)
++
++print("Testing edge cases:")
++print("=" * 50)
++
++# Test with complex expressions
++test_cases = [
++    # Mixed transcendental
++    (Eq(sin(x)*exp(x) - x**2, 0), "sin(x)*exp(x) - x^2 = 0"),
++    # Nested functions
++    (Eq(sin(cos(x)) - x, 0), "sin(cos(x)) - x = 0"),
++    # Logarithmic
++    (Eq(log(x**2 + 1) - x, 0), "log(x^2 + 1) - x = 0"),
++    # Rational functions that can be solved
++    (Eq((x-1)/(x+1), 0), "(x-1)/(x+1) = 0"),
++    # Simple polynomial
++    (Eq(x**3 - 8, 0), "x^3 - 8 = 0"),
++]
++
++for eq, desc in test_cases:
++    print(f"\nTest: {desc}")
++    print(f"Equation: {eq}")
++    try:
++        result = eq.as_set()
++        print(f"Result: {result}")
++        print(f"Type: {type(result).__name__}")
++        if isinstance(result, ConditionSet):
++            print("✓ Returns ConditionSet for unsolvable equation")
++        else:
++            print("✓ Returns solution set")
++    except Exception as e:
++        print(f"✗ Error: {type(e).__name__}: {e}")
++
++# Test with non-real domains (should still work since we're using real symbols)
++print("\n" + "=" * 50)
++print("Testing with different symbol assumptions:")
++print("=" * 50)
++
++y = symbols('y', positive=True)
++z = symbols('z', negative=True)
++
++test_cases2 = [
++    (Eq(y*cos(y) - 1, 0), y, "y*cos(y) - 1 = 0 (y > 0)"),
++    (Eq(z**2 - 4, 0), z, "z^2 - 4 = 0 (z < 0)"),
++]
++
++for eq, var, desc in test_cases2:
++    print(f"\nTest: {desc}")
++    print(f"Equation: {eq}")
++    try:
++        result = eq.as_set()
++        print(f"Result: {result}")
++        print(f"Type: {type(result).__name__}")
++    except Exception as e:
++        print(f"✗ Error: {type(e).__name__}: {e}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..ac0aaf3acf
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,66 @@
++from sympy import *
++from sympy.sets.conditionset import ConditionSet
++
++# Test various cases
++x = symbols('x', real=True)
++n = symbols('n', real=True)
++
++test_cases = [
++    # Original issue
++    (Eq(n*cos(n) - 3*sin(n), 0), n, "Transcendental equation"),
++    
++    # Other transcendental equations
++    (Eq(sin(x) + x, 0), x, "sin(x) + x = 0"),
++    (Eq(exp(x) - x**2, 0), x, "exp(x) - x^2 = 0"),
++    (Eq(log(x) + x, 0), x, "log(x) + x = 0"),
++    
++    # Simple solvable equations (should still work)
++    (Eq(x**2 - 4, 0), x, "x^2 - 4 = 0"),
++    (Eq(x - 1, 0), x, "x - 1 = 0"),
++]
++
++print("Testing as_set() method on various equations:")
++print("=" * 60)
++
++for eq, var, desc in test_cases:
++    print(f"\nTest: {desc}")
++    print(f"Equation: {eq}")
++    try:
++        result = eq.as_set()
++        print(f"Result: {result}")
++        print(f"Type: {type(result).__name__}")
++        
++        # Check if unsolvable equations return ConditionSet
++        if isinstance(result, ConditionSet):
++            print("✓ Returns ConditionSet for unsolvable equation")
++        elif result == FiniteSet(-2, 2) or result == FiniteSet(1):
++            print("✓ Returns correct solution for solvable equation")
++        else:
++            print(f"✓ Returns: {result}")
++    except Exception as e:
++        print(f"✗ Error: {type(e).__name__}: {e}")
++
++# Test inequalities as well
++print("\n" + "=" * 60)
++print("Testing inequalities:")
++print("=" * 60)
++
++inequality_cases = [
++    (x**2 > 4, x, "x^2 > 4"),
++    (sin(x) > 0.5, x, "sin(x) > 0.5"),
++    (x*cos(x) > 1, x, "x*cos(x) > 1"),
++]
++
++for ineq, var, desc in inequality_cases:
++    print(f"\nTest: {desc}")
++    print(f"Inequality: {ineq}")
++    try:
++        result = ineq.as_set()
++        print(f"Result: {result}")
++        print(f"Type: {type(result).__name__}")
++        if isinstance(result, ConditionSet):
++            print("✓ Returns ConditionSet for unsolvable inequality")
++        else:
++            print("✓ Returns solution set")
++    except Exception as e:
++        print(f"✗ Error: {type(e).__name__}: {e}")
+diff --git a/test_solveset_behavior.py b/test_solveset_behavior.py
+new file mode 100644
+index 0000000000..f84e220fae
+--- /dev/null
++++ b/test_solveset_behavior.py
+@@ -0,0 +1,45 @@
++from sympy import *
++from sympy.solvers.solveset import solveset
++from sympy.sets.conditionset import ConditionSet
++
++# Test that solveset still returns ConditionSet for unsolvable equations
++x = symbols('x', real=True)
++n = symbols('n', real=True)
++
++print("Testing solveset behavior:")
++print("=" * 50)
++
++test_cases = [
++    (n*cos(n) - 3*sin(n), n, "n*cos(n) - 3*sin(n) = 0"),
++    (sin(x) + x, x, "sin(x) + x = 0"),
++    (exp(x) - x**2, x, "exp(x) - x^2 = 0"),
++    (x**2 - 4, x, "x^2 - 4 = 0"),  # Should return FiniteSet
++]
++
++for expr, var, desc in test_cases:
++    print(f"\nTest: {desc}")
++    result = solveset(expr, var, domain=S.Reals)
++    print(f"Result: {result}")
++    print(f"Type: {type(result).__name__}")
++    
++    if isinstance(result, ConditionSet):
++        print("✓ Returns ConditionSet for unsolvable equation")
++    elif isinstance(result, FiniteSet):
++        print("✓ Returns FiniteSet for solvable equation")
++    else:
++        print(f"✓ Returns: {result}")
++
++# Also test that Eq.as_set() and solveset give consistent results
++print("\n" + "=" * 50)
++print("Comparing Eq.as_set() with solveset:")
++print("=" * 50)
++
++for expr, var, desc in test_cases:
++    eq = Eq(expr, 0)
++    as_set_result = eq.as_set()
++    solveset_result = solveset(expr, var, domain=S.Reals)
++    
++    print(f"\nTest: {desc}")
++    print(f"Eq.as_set(): {as_set_result}")
++    print(f"solveset():  {solveset_result}")
++    print(f"Equal: {as_set_result == solveset_result}")

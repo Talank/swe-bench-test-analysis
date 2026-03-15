@@ -1,0 +1,488 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 686e75c979..8002348ddf 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -502,6 +502,9 @@ class SQLCompiler:
+             combinator = self.query.combinator
+             features = self.connection.features
+             if combinator:
++                # If the main query is empty, raise EmptyResultSet regardless of combined queries
++                if self.query.is_empty():
++                    raise EmptyResultSet
+                 if not getattr(features, 'supports_select_{}'.format(combinator)):
+                     raise NotSupportedError('{} is not supported on this database backend.'.format(combinator))
+                 result, params = self.get_combinator_sql(combinator, self.query.combinator_all)
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..79bf62b020
+--- /dev/null
++++ b/test_app/__init__.py
+@@ -0,0 +1 @@
++# Empty init file for test app
+\ No newline at end of file
+diff --git a/test_combinators_none.py b/test_combinators_none.py
+new file mode 100644
+index 0000000000..2e2fc191b7
+--- /dev/null
++++ b/test_combinators_none.py
+@@ -0,0 +1,98 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++from django.db import models
++
++# Define models
++class Publication(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'  # Use an existing app
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Publication)
++
++# Create test data
++for i in range(10):
++    Publication.objects.create(name=f"Publication {i}")
++
++print("Testing combinator operations with none()...")
++print("=" * 60)
++
++# Test union
++print("\n1. UNION:")
++qs_union = Publication.objects.filter(id__lt=3).union(Publication.objects.filter(id__gt=7))
++qs_union_none = qs_union.none()
++print(f"   Union query count: {qs_union.count()}")
++print(f"   Union query none() count: {qs_union_none.count()}")
++print(f"   Union query none() is empty: {list(qs_union_none) == []}")
++
++# Test intersection
++print("\n2. INTERSECTION:")
++qs_intersect = Publication.objects.filter(id__lt=6).intersection(Publication.objects.filter(id__gt=3))
++qs_intersect_none = qs_intersect.none()
++print(f"   Intersection query count: {qs_intersect.count()}")
++print(f"   Intersection query none() count: {qs_intersect_none.count()}")
++print(f"   Intersection query none() is empty: {list(qs_intersect_none) == []}")
++
++# Test difference
++print("\n3. DIFFERENCE:")
++qs_diff = Publication.objects.filter(id__lt=6).difference(Publication.objects.filter(id__gt=3))
++qs_diff_none = qs_diff.none()
++print(f"   Difference query count: {qs_diff.count()}")
++print(f"   Difference query none() count: {qs_diff_none.count()}")
++print(f"   Difference query none() is empty: {list(qs_diff_none) == []}")
++
++# Test chained combinators
++print("\n4. CHAINED COMBINATORS:")
++qs_chain = Publication.objects.filter(id=1).union(
++    Publication.objects.filter(id=2)
++).union(
++    Publication.objects.filter(id=3)
++)
++qs_chain_none = qs_chain.none()
++print(f"   Chained union query count: {qs_chain.count()}")
++print(f"   Chained union query none() count: {qs_chain_none.count()}")
++print(f"   Chained union query none() is empty: {list(qs_chain_none) == []}")
++
++# Test none() on empty queryset with combinator
++print("\n5. NONE ON EMPTY QUERYSET WITH COMBINATOR:")
++qs_empty_union = Publication.objects.none().union(Publication.objects.filter(id=1))
++qs_empty_union_none = qs_empty_union.none()
++print(f"   Empty union query count: {qs_empty_union.count()}")
++print(f"   Empty union query none() count: {qs_empty_union_none.count()}")
++print(f"   Empty union query none() is empty: {list(qs_empty_union_none) == []}")
++
++print("\n" + "=" * 60)
++print("All tests passed!" if all([
++    qs_union_none.count() == 0,
++    qs_intersect_none.count() == 0,
++    qs_diff_none.count() == 0,
++    qs_chain_none.count() == 0,
++    qs_empty_union_none.count() == 0,
++]) else "Some tests failed!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..b288e8e79b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,99 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++from django.db import models
++
++# Define models
++class Publication(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'  # Use an existing app
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Publication)
++
++# Create test data
++for i in range(10):
++    Publication.objects.create(name=f"Publication {i}")
++
++print("Testing edge cases for none() on combined queries...")
++print("=" * 60)
++
++# Edge case 1: Multiple none() calls
++print("\n1. Multiple none() calls:")
++qs = Publication.objects.filter(id__lt=5).union(Publication.objects.filter(id__gt=5))
++qs_none = qs.none().none().none()
++print(f"   Count after multiple none(): {qs_none.count()}")
++print(f"   Results: {list(qs_none)}")
++
++# Edge case 2: none() on already empty union
++print("\n2. none() on already empty union:")
++empty_union = Publication.objects.none().union(Publication.objects.none())
++empty_union_none = empty_union.none()
++print(f"   Count: {empty_union_none.count()}")
++print(f"   Results: {list(empty_union_none)}")
++
++# Edge case 3: Complex chained operations
++print("\n3. Complex chained operations:")
++complex_qs = (
++    Publication.objects.filter(id=1)
++    .union(Publication.objects.filter(id=2))
++    .union(Publication.objects.filter(id=3))
++)
++# Get the count before none()
++original_count = complex_qs.count()
++print(f"   Original count: {original_count}")
++# Apply none()
++complex_none = complex_qs.none()
++print(f"   Count after none(): {complex_none.count()}")
++print(f"   Results: {list(complex_none)}")
++
++# Edge case 4: Mixing empty and non-empty queries
++print("\n4. Mixing empty and non-empty queries in union:")
++mixed_union = Publication.objects.none().union(
++    Publication.objects.filter(id__lt=3),
++    Publication.objects.none(),
++    Publication.objects.filter(id__gt=7)
++)
++print(f"   Mixed union count: {mixed_union.count()}")
++mixed_union_none = mixed_union.none()
++print(f"   Mixed union none() count: {mixed_union_none.count()}")
++print(f"   Results: {list(mixed_union_none)}")
++
++# Edge case 5: Using all=True with union
++print("\n5. Union with all=True and none():")
++union_all = Publication.objects.filter(id__lt=3).union(
++    Publication.objects.filter(id__lt=3), all=True
++)
++print(f"   Union all count: {union_all.count()}")
++union_all_none = union_all.none()
++print(f"   Union all none() count: {union_all_none.count()}")
++print(f"   Results: {list(union_all_none)}")
++
++print("\n" + "=" * 60)
++print("All edge case tests completed successfully!")
+diff --git a/test_form_issue.py b/test_form_issue.py
+new file mode 100644
+index 0000000000..db6f613c9a
+--- /dev/null
++++ b/test_form_issue.py
+@@ -0,0 +1,134 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++from django.db import models
++from django import forms
++from django.contrib import admin
++
++# Define models
++class Publication(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'contenttypes'  # Use an existing app
++
++class Article(models.Model):
++    title = models.CharField(max_length=100)
++    publications = models.ManyToManyField(to=Publication, blank=True)
++    
++    def __str__(self):
++        return self.title
++    
++    class Meta:
++        app_label = 'contenttypes'  # Use an existing app
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Publication)
++    schema_editor.create_model(Article)
++
++# Create test data
++pubs = []
++for i in range(10):
++    pub = Publication.objects.create(name=f"Publication {i}")
++    pubs.append(pub)
++
++article = Article.objects.create(title="Test Article")
++
++print("Testing form behavior with union queryset...")
++print("=" * 60)
++
++# Test with union queryset
++class ArticleFormUnion(forms.ModelForm):
++    publications = forms.ModelMultipleChoiceField(
++        Publication.objects.filter(id__lt=2).union(
++            Publication.objects.filter(id__gt=5)
++        ),
++        required=False,
++    )
++    
++    class Meta:
++        model = Article
++        fields = ["title", "publications"]
++
++# Test with OR queryset
++class ArticleFormOR(forms.ModelForm):
++    publications = forms.ModelMultipleChoiceField(
++        Publication.objects.filter(id__lt=2) | Publication.objects.filter(id__gt=5),
++        required=False,
++    )
++    
++    class Meta:
++        model = Article
++        fields = ["title", "publications"]
++
++# Test form with empty data (no publications selected)
++print("\n1. Testing with empty form data (no publications selected):")
++print("-" * 60)
++
++# Test union form
++form_union = ArticleFormUnion(data={'title': 'Updated Article', 'publications': []}, instance=article)
++if form_union.is_valid():
++    saved_article = form_union.save()
++    print(f"Union form - Publications after save: {list(saved_article.publications.all())}")
++    print(f"Union form - Publication count: {saved_article.publications.count()}")
++else:
++    print(f"Union form errors: {form_union.errors}")
++
++# Clear publications
++article.publications.clear()
++
++# Test OR form
++form_or = ArticleFormOR(data={'title': 'Updated Article', 'publications': []}, instance=article)
++if form_or.is_valid():
++    saved_article = form_or.save()
++    print(f"OR form - Publications after save: {list(saved_article.publications.all())}")
++    print(f"OR form - Publication count: {saved_article.publications.count()}")
++else:
++    print(f"OR form errors: {form_or.errors}")
++
++print("\n2. Testing with selected publications:")
++print("-" * 60)
++
++# Clear publications
++article.publications.clear()
++
++# Test union form with selections
++selected_pubs = [pubs[0].id, pubs[8].id]
++form_union = ArticleFormUnion(data={'title': 'Updated Article', 'publications': selected_pubs}, instance=article)
++if form_union.is_valid():
++    saved_article = form_union.save()
++    print(f"Union form - Publications after save: {list(saved_article.publications.all())}")
++    print(f"Union form - Publication count: {saved_article.publications.count()}")
++else:
++    print(f"Union form errors: {form_union.errors}")
++
++print("\n" + "=" * 60)
++print("Test completed!")
+diff --git a/test_union_none.py b/test_union_none.py
+new file mode 100644
+index 0000000000..eb6e06d483
+--- /dev/null
++++ b/test_union_none.py
+@@ -0,0 +1,79 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++from django.db import models
++
++# Define models
++class Publication(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'  # Use an existing app
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Publication)
++
++# Create test data
++for i in range(10):
++    Publication.objects.create(name=f"Publication {i}")
++
++# Test the issue
++print("Testing QuerySet operations...")
++print("-" * 50)
++
++# Test 1: OR query with none()
++qs1 = Publication.objects.filter(id__lt=2) | Publication.objects.filter(id__gt=5)
++qs1_none = qs1.none()
++print(f"OR query count: {qs1.count()}")
++print(f"OR query none() count: {qs1_none.count()}")
++print(f"OR query none() results: {list(qs1_none)}")
++
++print("-" * 50)
++
++# Test 2: Union query with none()
++qs2 = Publication.objects.filter(id__lt=2).union(Publication.objects.filter(id__gt=5))
++qs2_none = qs2.none()
++print(f"Union query count: {qs2.count()}")
++print(f"Union query none() count: {qs2_none.count()}")
++print(f"Union query none() results: {list(qs2_none)}")
++
++print("-" * 50)
++
++# Test 3: Check if the query is empty
++print("\nChecking is_empty():")
++print(f"OR query none() is_empty: {qs1_none.query.is_empty()}")
++print(f"Union query none() is_empty: {qs2_none.query.is_empty()}")
++
++# Test 4: Check combined_queries
++print("\nChecking combined_queries:")
++print(f"OR query none() combined_queries: {qs1_none.query.combined_queries}")
++print(f"Union query none() combined_queries: {qs2_none.query.combined_queries}")
++
++# Test 5: Check where clause
++print("\nChecking where clause:")
++print(f"OR query none() where children: {qs1_none.query.where.children}")
++print(f"Union query none() where children: {qs2_none.query.where.children}")
+diff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py
+index 9c6fd474ca..a172783c08 100644
+--- a/tests/queries/test_qs_combinators.py
++++ b/tests/queries/test_qs_combinators.py
+@@ -314,3 +314,27 @@ class QuerySetSetOperationTests(TestCase):
+                         msg % (operation, combinator),
+                     ):
+                         getattr(getattr(qs, combinator)(qs), operation)()
++
++    def test_none_on_combined_qs(self):
++        qs1 = Number.objects.filter(num__lt=2)
++        qs2 = Number.objects.filter(num__gt=5)
++        
++        # Test union with none()
++        union_qs = qs1.union(qs2)
++        union_none = union_qs.none()
++        self.assertEqual(union_none.count(), 0)
++        self.assertEqual(list(union_none), [])
++        
++        # Test intersection with none()
++        if connection.features.supports_select_intersection:
++            intersection_qs = Number.objects.filter(num__lte=5).intersection(Number.objects.filter(num__gte=5))
++            intersection_none = intersection_qs.none()
++            self.assertEqual(intersection_none.count(), 0)
++            self.assertEqual(list(intersection_none), [])
++        
++        # Test difference with none()
++        if connection.features.supports_select_difference:
++            difference_qs = Number.objects.filter(num__lte=5).difference(Number.objects.filter(num__lte=4))
++            difference_none = difference_qs.none()
++            self.assertEqual(difference_none.count(), 0)
++            self.assertEqual(list(difference_none), [])

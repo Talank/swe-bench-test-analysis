@@ -1,0 +1,1231 @@
+diff --git a/debug_access.py b/debug_access.py
+new file mode 100644
+index 0000000000..b034a5d0d6
+--- /dev/null
++++ b/debug_access.py
+@@ -0,0 +1,108 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Monkey patch the descriptor to debug
++from django.db.models.fields.related_descriptors import ForwardOneToOneDescriptor
++original_get = ForwardOneToOneDescriptor.__get__
++
++def debug_get(self, instance, cls=None):
++    if instance is not None and hasattr(instance, 'user_id'):
++        print(f"\n=== ForwardOneToOneDescriptor.__get__ called ===")
++        print(f"Instance: {instance}")
++        print(f"Field name: {self.field.name}")
++        print(f"Cache name: {self.field.get_cache_name()}")
++        print(f"fields_cache: {instance._state.fields_cache}")
++        
++        if self.field.get_cache_name() in instance._state.fields_cache:
++            cached = instance._state.fields_cache[self.field.get_cache_name()]
++            print(f"Cached object found: {cached}")
++            print(f"Cached object.__dict__: {cached.__dict__}")
++            print(f"Cached object.get_deferred_fields(): {cached.get_deferred_fields()}")
++    
++    result = original_get(self, instance, cls)
++    
++    if instance is not None and hasattr(instance, 'user_id'):
++        print(f"Returned object: {result}")
++        print(f"Returned object.__dict__: {result.__dict__}")
++        print(f"Returned object.get_deferred_fields(): {result.get_deferred_fields()}")
++    
++    return result
++
++ForwardOneToOneDescriptor.__get__ = debug_get
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    user = queryset.first()
++    
++    print("\n=== Accessing user.profile.user ===")
++    accessed_user = user.profile.user
++    print(f"\nFinal result: {accessed_user}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_cache_set.py b/debug_cache_set.py
+new file mode 100644
+index 0000000000..433a17cb7e
+--- /dev/null
++++ b/debug_cache_set.py
+@@ -0,0 +1,99 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Monkey patch to track cache setting
++from django.db.models.fields.mixins import FieldCacheMixin
++original_set_cached_value = FieldCacheMixin.set_cached_value
++
++def debug_set_cached_value(self, instance, value):
++    if hasattr(instance, 'user_id') and hasattr(value, 'email'):
++        import traceback
++        print(f"\n=== set_cached_value called ===")
++        print(f"Instance: {instance} (id={id(instance)})")
++        print(f"Field: {self.name if hasattr(self, 'name') else 'unknown'}")
++        print(f"Value: {value} (id={id(value)})")
++        print(f"Value.__dict__: {value.__dict__}")
++        print(f"Value.get_deferred_fields(): {value.get_deferred_fields()}")
++        print("Traceback:")
++        for line in traceback.format_stack()[-6:-1]:
++            print(line.strip())
++    
++    original_set_cached_value(self, instance, value)
++
++FieldCacheMixin.set_cached_value = debug_set_cached_value
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    print("=== Executing queryset ===")
++    user = queryset.first()
++    
++    print("\n=== Done ===")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_descriptors.py b/debug_descriptors.py
+new file mode 100644
+index 0000000000..41c14927d2
+--- /dev/null
++++ b/debug_descriptors.py
+@@ -0,0 +1,87 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    user = queryset.first()
++    
++    # Check the profile's fields cache before accessing user
++    print(f"Profile._state.fields_cache before accessing user: {user.profile._state.fields_cache}")
++    
++    # Access the user field directly without going through the descriptor
++    print(f"\nChecking if 'user' is in profile's fields_cache...")
++    if 'user' in user.profile._state.fields_cache:
++        cached_user = user.profile._state.fields_cache['user']
++        print(f"Cached user found: {cached_user}")
++        print(f"Cached user is outer user? {cached_user is user}")
++        print(f"Cached user.__dict__: {cached_user.__dict__}")
++        print(f"Cached user.get_deferred_fields(): {cached_user.get_deferred_fields()}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_foreignkey.py b/debug_foreignkey.py
+new file mode 100644
+index 0000000000..a34a953636
+--- /dev/null
++++ b/debug_foreignkey.py
+@@ -0,0 +1,89 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.ForeignKey(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile_set",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    user = queryset.first()
++    
++    profiles = user.profile_set.all()
++    print(f"profiles._result_cache: {profiles._result_cache}")
++    profile = profiles._result_cache[0]
++    
++    print(f"\nProfile instance: {profile}")
++    print(f"Profile._state.fields_cache: {profile._state.fields_cache}")
++    
++    if 'user' in profile._state.fields_cache:
++        cached_user = profile._state.fields_cache['user']
++        print(f"\nCached user: {cached_user}")
++        print(f"Cached user is outer user? {cached_user is user}")
++        print(f"Cached user.__dict__: {cached_user.__dict__}")
++        print(f"Cached user.get_deferred_fields(): {cached_user.get_deferred_fields()}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 0000000000..2b9b5a77ed
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,107 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    user = queryset.first()
++    
++    print(f"Outer user instance: {user}")
++    print(f"Outer user.__dict__: {user.__dict__}")
++    print(f"Outer user.get_deferred_fields(): {user.get_deferred_fields()}")
++    print(f"Outer user._state.__dict__: {user._state.__dict__}")
++    
++    print(f"\nProfile instance: {user.profile}")
++    print(f"Profile.__dict__: {user.profile.__dict__}")
++    
++    print(f"\nInner user instance: {user.profile.user}")
++    print(f"Inner user.__dict__: {user.profile.user.__dict__}")
++    print(f"Inner user.get_deferred_fields(): {user.profile.user.get_deferred_fields()}")
++    print(f"Inner user._state.__dict__: {user.profile.user._state.__dict__}")
++    
++    # Check if they are the same instance
++    print(f"\nAre they the same instance? {user is user.profile.user}")
++    print(f"Are they the same id? {id(user) == id(user.profile.user)}")
++    
++    # Check the class
++    print(f"\nOuter user class: {user.__class__}")
++    print(f"Inner user class: {user.profile.user.__class__}")
++    
++    # Try to access kind
++    print(f"\nTrying to access user.profile.user.kind...")
++    from django.db import connection
++    from django.test.utils import CaptureQueriesContext
++    
++    with CaptureQueriesContext(connection) as queries:
++        kind = user.profile.user.kind
++    
++    print(f"Value: {kind}")
++    print(f"Number of queries: {len(queries)}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_order.py b/debug_order.py
+new file mode 100644
+index 0000000000..4710ac0caf
+--- /dev/null
++++ b/debug_order.py
+@@ -0,0 +1,132 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Monkey patch to track operations
++from django.db.models.fields.mixins import FieldCacheMixin
++original_set_cached_value = FieldCacheMixin.set_cached_value
++
++def debug_set_cached_value(self, instance, value):
++    if hasattr(instance, 'user_id') and hasattr(value, 'email'):
++        print(f"\n[set_cached_value] Profile.user = User (deferred: {value.get_deferred_fields()})")
++    original_set_cached_value(self, instance, value)
++
++FieldCacheMixin.set_cached_value = debug_set_cached_value
++
++# Patch prefetch_one_level
++original_prefetch_one_level = django.db.models.query.prefetch_one_level
++
++def debug_prefetch_one_level(instances, prefetcher, lookup, level):
++    if instances and hasattr(instances[0], 'user_id'):
++        print(f"\n[prefetch_one_level] Prefetching User for Profile")
++    
++    result = original_prefetch_one_level(instances, prefetcher, lookup, level)
++    
++    if instances and hasattr(instances[0], 'user_id'):
++        print(f"[prefetch_one_level] Done prefetching User for Profile")
++        for instance in instances:
++            if 'user' in instance._state.fields_cache:
++                user = instance._state.fields_cache['user']
++                print(f"  Profile.user cached: User (deferred: {user.get_deferred_fields()})")
++    
++    return result
++
++django.db.models.query.prefetch_one_level = debug_prefetch_one_level
++
++# Patch get_prefetch_queryset
++from django.db.models.fields.related_descriptors import ReverseOneToOneDescriptor, ForwardManyToOneDescriptor
++orig_reverse_get_prefetch = ReverseOneToOneDescriptor.get_prefetch_queryset
++orig_forward_get_prefetch = ForwardManyToOneDescriptor.get_prefetch_queryset
++
++def debug_reverse_get_prefetch(self, instances, queryset=None):
++    print(f"\n[ReverseOneToOneDescriptor.get_prefetch_queryset] Called")
++    result = orig_reverse_get_prefetch(self, instances, queryset)
++    return result
++
++def debug_forward_get_prefetch(self, instances, queryset=None):
++    print(f"\n[ForwardManyToOneDescriptor.get_prefetch_queryset] Called")
++    result = orig_forward_get_prefetch(self, instances, queryset)
++    print(f"[ForwardManyToOneDescriptor.get_prefetch_queryset] Returning queryset with {result[0].count()} objects")
++    return result
++
++ReverseOneToOneDescriptor.get_prefetch_queryset = debug_reverse_get_prefetch
++ForwardManyToOneDescriptor.get_prefetch_queryset = debug_forward_get_prefetch
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    print("=== Executing queryset ===")
++    user = queryset.first()
++    
++    print("\n=== Final state ===")
++    print(f"Profile.user in cache: {'user' in user.profile._state.fields_cache}")
++    if 'user' in user.profile._state.fields_cache:
++        cached_user = user.profile._state.fields_cache['user']
++        print(f"Cached User deferred fields: {cached_user.get_deferred_fields()}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/debug_prefetch.py b/debug_prefetch.py
+new file mode 100644
+index 0000000000..2b8f6c96d7
+--- /dev/null
++++ b/debug_prefetch.py
+@@ -0,0 +1,101 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Monkey patch to debug
++original_prefetch_one_level = django.db.models.query.prefetch_one_level
++
++def debug_prefetch_one_level(instances, prefetcher, lookup, level):
++    result = original_prefetch_one_level(instances, prefetcher, lookup, level)
++    
++    # Check if we're prefetching User objects for Profile instances
++    if instances and hasattr(instances[0], 'user_id'):
++        print(f"\n=== Prefetching User for Profile instances ===")
++        print(f"Number of instances: {len(instances)}")
++        for i, instance in enumerate(instances):
++            print(f"\nProfile instance {i}: {instance}")
++            print(f"  Profile._state.fields_cache: {instance._state.fields_cache}")
++            if 'user' in instance._state.fields_cache:
++                user = instance._state.fields_cache['user']
++                print(f"  Cached user: {user}")
++                print(f"  Cached user.__dict__: {user.__dict__}")
++                print(f"  Cached user.get_deferred_fields(): {user.get_deferred_fields()}")
++    
++    return result
++
++django.db.models.query.prefetch_one_level = debug_prefetch_one_level
++
++# Test the issue
++from django.db.models import Prefetch
++
++def debug_issue():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Execute the main queryset
++    user = queryset.first()
++    
++    print("\n=== After all prefetches ===")
++    print(f"user.profile._state.fields_cache: {user.profile._state.fields_cache}")
++
++if __name__ == "__main__":
++    debug_issue()
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index d5aa968400..c9d584521d 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -145,6 +145,20 @@ class ForwardManyToOneDescriptor:
+         if not remote_field.multiple:
+             for rel_obj in queryset:
+                 instance = instances_dict[rel_obj_attr(rel_obj)]
++                # Don't overwrite the cached value if it's already been set by a
++                # nested prefetch and the instances have different deferred fields.
++                # This can happen when prefetching circular relationships where the
++                # same model is loaded with different sets of deferred fields.
++                if remote_field.is_cached(rel_obj):
++                    cached_instance = remote_field.get_cached_value(rel_obj)
++                    if (
++                        type(cached_instance) == type(instance) and
++                        cached_instance._meta.concrete_model == instance._meta.concrete_model and
++                        cached_instance.pk == instance.pk and
++                        cached_instance.get_deferred_fields() != instance.get_deferred_fields()
++                    ):
++                        # Skip setting the cached value to preserve the prefetched instance
++                        continue
+                 remote_field.set_cached_value(rel_obj, instance)
+         return queryset, rel_obj_attr, instance_attr, True, self.field.get_cache_name(), False
+ 
+@@ -377,6 +391,20 @@ class ReverseOneToOneDescriptor:
+         # we must manage the reverse relation cache manually.
+         for rel_obj in queryset:
+             instance = instances_dict[rel_obj_attr(rel_obj)]
++            # Don't overwrite the cached value if it's already been set by a
++            # nested prefetch and the instances have different deferred fields.
++            # This can happen when prefetching circular relationships where the
++            # same model is loaded with different sets of deferred fields.
++            if self.related.field.is_cached(rel_obj):
++                cached_instance = self.related.field.get_cached_value(rel_obj)
++                if (
++                    type(cached_instance) == type(instance) and
++                    cached_instance._meta.concrete_model == instance._meta.concrete_model and
++                    cached_instance.pk == instance.pk and
++                    cached_instance.get_deferred_fields() != instance.get_deferred_fields()
++                ):
++                    # Skip setting the cached value to preserve the prefetched instance
++                    continue
+             self.related.field.set_cached_value(rel_obj, instance)
+         return queryset, rel_obj_attr, instance_attr, True, self.related.get_cache_name(), False
+ 
+@@ -647,6 +675,17 @@ def create_reverse_many_to_one_manager(superclass, rel):
+             # the reverse relation manually.
+             for rel_obj in queryset:
+                 instance = instances_dict[rel_obj_attr(rel_obj)]
++                # Check if there's already a cached value with different deferred fields
++                if self.field.is_cached(rel_obj):
++                    cached_instance = self.field.get_cached_value(rel_obj)
++                    if (
++                        type(cached_instance) == type(instance) and
++                        cached_instance._meta.concrete_model == instance._meta.concrete_model and
++                        cached_instance.pk == instance.pk and
++                        cached_instance.get_deferred_fields() != instance.get_deferred_fields()
++                    ):
++                        # Don't overwrite the cached value to preserve the prefetched instance
++                        continue
+                 setattr(rel_obj, self.field.name, instance)
+             cache_name = self.field.remote_field.get_cache_name()
+             return queryset, rel_obj_attr, instance_attr, False, cache_name, False
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..beb3088aaf
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,102 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Test the issue
++from django.db.models import Prefetch
++
++def test_only_related_queryset():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Track queries
++    from django.db import connection
++    from django.test.utils import CaptureQueriesContext
++    
++    # Execute the main queryset
++    with CaptureQueriesContext(connection) as queries:
++        user = queryset.first()
++    
++    print(f"Queries when fetching user: {len(queries)}")
++    for i, query in enumerate(queries):
++        print(f"Query {i+1}: {query['sql']}")
++    
++    # Check deferred fields
++    print(f"\nuser.get_deferred_fields(): {user.get_deferred_fields()}")
++    print(f"user.profile.user.get_deferred_fields(): {user.profile.user.get_deferred_fields()}")
++    
++    # Try to access the kind field
++    with CaptureQueriesContext(connection) as queries:
++        kind = user.profile.user.kind
++    
++    print(f"\nQueries when accessing user.profile.user.kind: {len(queries)}")
++    for i, query in enumerate(queries):
++        print(f"Query {i+1}: {query['sql']}")
++    
++    print(f"\nuser.profile.user.kind = {kind}")
++    print(f"Expected: ADMIN")
++    print(f"Number of queries expected: 0")
++    print(f"Number of queries actual: {len(queries)}")
++
++if __name__ == "__main__":
++    test_only_related_queryset()
+diff --git a/test_circular_prefetch_deferred.py b/test_circular_prefetch_deferred.py
+new file mode 100644
+index 0000000000..dc1d5c6a5b
+--- /dev/null
++++ b/test_circular_prefetch_deferred.py
+@@ -0,0 +1,137 @@
++"""
++Test for circular prefetch with deferred fields.
++"""
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.test import TestCase
++from django.db.models import Prefetch
++
++
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_circular_prefetch'
++
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.OneToOneField(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_circular_prefetch'
++
++
++class ProfileFK(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='profiles_fk')
++    
++    class Meta:
++        app_label = 'test_circular_prefetch'
++
++
++class CircularPrefetchDeferredTests(TestCase):
++    def test_circular_prefetch_with_deferred_fields_onetoone(self):
++        """
++        Test that circular prefetches with different deferred fields work correctly
++        for OneToOneField relationships.
++        """
++        user = User.objects.create(
++            email="test@example.com",
++            kind="ADMIN",
++        )
++        Profile.objects.create(user=user, full_name="Test Tester")
++        
++        queryset = User.objects.only("email").prefetch_related(
++            Prefetch(
++                "profile",
++                queryset=Profile.objects.prefetch_related(
++                    Prefetch("user", queryset=User.objects.only("kind"))
++                ),
++            )
++        )
++        
++        with self.assertNumQueries(3):
++            user = queryset.first()
++        
++        # The outer user should have 'kind' deferred
++        self.assertEqual(user.get_deferred_fields(), {'kind'})
++        
++        # The inner user should have 'email' deferred
++        self.assertEqual(user.profile.user.get_deferred_fields(), {'email'})
++        
++        # Accessing the kind field should not trigger a query
++        with self.assertNumQueries(0):
++            self.assertEqual(user.profile.user.kind, "ADMIN")
++    
++    def test_circular_prefetch_with_deferred_fields_foreignkey(self):
++        """
++        Test that circular prefetches with different deferred fields work correctly
++        for ForeignKey relationships.
++        """
++        user = User.objects.create(
++            email="test@example.com",
++            kind="ADMIN",
++        )
++        ProfileFK.objects.create(user=user, full_name="Test Tester")
++        
++        queryset = User.objects.only("email").prefetch_related(
++            Prefetch(
++                "profiles_fk",
++                queryset=ProfileFK.objects.prefetch_related(
++                    Prefetch("user", queryset=User.objects.only("kind"))
++                ),
++            )
++        )
++        
++        with self.assertNumQueries(3):
++            user = queryset.first()
++        
++        # The outer user should have 'kind' deferred
++        self.assertEqual(user.get_deferred_fields(), {'kind'})
++        
++        profile = user.profiles_fk.all()[0]
++        
++        # The inner user should have 'email' deferred
++        self.assertEqual(profile.user.get_deferred_fields(), {'email'})
++        
++        # Accessing the kind field should not trigger a query
++        with self.assertNumQueries(0):
++            self.assertEqual(profile.user.kind, "ADMIN")
++
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(User)
++        schema_editor.create_model(Profile) 
++        schema_editor.create_model(ProfileFK)
++    
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__"])
+diff --git a/test_foreignkey.py b/test_foreignkey.py
+new file mode 100644
+index 0000000000..63199afe6f
+--- /dev/null
++++ b/test_foreignkey.py
+@@ -0,0 +1,94 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define models
++class User(models.Model):
++    email = models.EmailField()
++    kind = models.CharField(
++        max_length=10, choices=[("ADMIN", "Admin"), ("REGULAR", "Regular")]
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Profile(models.Model):
++    full_name = models.CharField(max_length=255)
++    user = models.ForeignKey(User, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(Profile)
++
++# Test the issue
++from django.db.models import Prefetch
++
++def test_foreignkey():
++    # Create test data
++    user = User.objects.create(
++        email="test@example.com",
++        kind="ADMIN",
++    )
++    Profile.objects.create(user=user, full_name="Test Tester")
++    
++    # Build the queryset
++    queryset = User.objects.only("email").prefetch_related(
++        Prefetch(
++            "profile_set",
++            queryset=Profile.objects.prefetch_related(
++                Prefetch("user", queryset=User.objects.only("kind"))
++            ),
++        )
++    )
++    
++    # Track queries
++    from django.db import connection
++    from django.test.utils import CaptureQueriesContext
++    
++    # Execute the main queryset
++    with CaptureQueriesContext(connection) as queries:
++        user = queryset.first()
++    
++    print(f"Queries when fetching user: {len(queries)}")
++    
++    # Try to access the kind field
++    with CaptureQueriesContext(connection) as queries:
++        profile = user.profile_set.all()[0]
++        kind = profile.user.kind
++    
++    print(f"\nQueries when accessing profile.user.kind: {len(queries)}")
++    print(f"profile.user.kind = {kind}")
++    print(f"Expected: ADMIN")
++    print(f"Number of queries expected: 0")
++    print(f"Number of queries actual: {len(queries)}")
++
++if __name__ == "__main__":
++    test_foreignkey()
+diff --git a/tests/prefetch_related/test_circular_deferred.py b/tests/prefetch_related/test_circular_deferred.py
+new file mode 100644
+index 0000000000..295674fb1a
+--- /dev/null
++++ b/tests/prefetch_related/test_circular_deferred.py
+@@ -0,0 +1,45 @@
++from django.db import models
++from django.db.models import Prefetch
++from django.test import TestCase
++
++from .models import House, Room, Person
++
++
++class CircularPrefetchDeferredTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.house = House.objects.create(name="Test House", address="123 Test St")
++        cls.room = Room.objects.create(name="Test Room", house=cls.house)
++        cls.person = Person.objects.create(name="Test Person")
++        cls.house.owner = cls.person
++        cls.house.save()
++
++    def test_circular_prefetch_with_deferred_fields_foreign_key(self):
++        """
++        Test that circular prefetches with different deferred fields work correctly
++        for ForeignKey relationships when going back to the parent.
++        """
++        # Get houses with only name, prefetch their rooms, and those rooms' houses with only address
++        queryset = House.objects.only("name").prefetch_related(
++            Prefetch(
++                "rooms",
++                queryset=Room.objects.prefetch_related(
++                    Prefetch("house", queryset=House.objects.only("address"))
++                ),
++            )
++        )
++        
++        with self.assertNumQueries(3):
++            house = queryset.first()
++        
++        # The outer house should have 'address', 'owner_id', and 'main_room_id' deferred
++        self.assertEqual(house.get_deferred_fields(), {'address', 'owner_id', 'main_room_id'})
++        
++        room = list(house.rooms.all())[0]
++        
++        # The inner house should have 'name', 'owner_id', and 'main_room_id' deferred
++        self.assertEqual(room.house.get_deferred_fields(), {'name', 'owner_id', 'main_room_id'})
++        
++        # Accessing the address field should not trigger a query since it was prefetched
++        with self.assertNumQueries(0):
++            self.assertEqual(room.house.address, "123 Test St")

@@ -1,0 +1,224 @@
+diff --git a/lib/matplotlib/cbook/__init__.py b/lib/matplotlib/cbook/__init__.py
+index 34c6ddb861..68e086470a 100644
+--- a/lib/matplotlib/cbook/__init__.py
++++ b/lib/matplotlib/cbook/__init__.py
+@@ -1746,7 +1746,11 @@ def _safe_first_finite(obj, *, skip_nonfinite=True):
+         raise RuntimeError("matplotlib does not "
+                            "support generators as input")
+     else:
+-        return next(val for val in obj if safe_isfinite(val))
++        try:
++            return next(val for val in obj if safe_isfinite(val))
++        except StopIteration:
++            # If no finite values found, return the first element anyway
++            return next(iter(obj))
+ 
+ 
+ def sanitize_sequence(data):
+diff --git a/test_bar_all_nan.py b/test_bar_all_nan.py
+new file mode 100644
+index 0000000000..a0dcb0f414
+--- /dev/null
++++ b/test_bar_all_nan.py
+@@ -0,0 +1,40 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import pytest
++
++
++def test_bar_all_nan():
++    """Test that bar() works with all-NaN data."""
++    # Test single NaN bar
++    fig, ax = plt.subplots()
++    bars = ax.bar([np.nan], [np.nan])
++    assert len(bars) == 1
++    assert np.isnan(bars[0].get_x())
++    assert np.isnan(bars[0].get_height())
++    
++    # Test multiple NaN bars
++    fig, ax = plt.subplots()
++    bars = ax.bar([np.nan, np.nan], [np.nan, np.nan])
++    assert len(bars) == 2
++    for bar in bars:
++        assert np.isnan(bar.get_x())
++        assert np.isnan(bar.get_height())
++    
++    # Test NaN x with finite height
++    fig, ax = plt.subplots()
++    bars = ax.bar([np.nan], [1.0])
++    assert len(bars) == 1
++    assert np.isnan(bars[0].get_x())
++    assert bars[0].get_height() == 1.0
++    
++    # Test finite x with NaN height
++    fig, ax = plt.subplots()
++    bars = ax.bar([1.0], [np.nan])
++    assert len(bars) == 1
++    assert bars[0].get_x() == 1.0 - 0.4  # default width is 0.8, so x - width/2
++    assert np.isnan(bars[0].get_height())
++
++
++if __name__ == "__main__":
++    test_bar_all_nan()
++    print("All tests passed!")
+diff --git a/test_comprehensive_nan_bar.py b/test_comprehensive_nan_bar.py
+new file mode 100644
+index 0000000000..6574d35abf
+--- /dev/null
++++ b/test_comprehensive_nan_bar.py
+@@ -0,0 +1,63 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import matplotlib.cbook as cbook
++
++# Test _safe_first_finite directly
++print("Testing _safe_first_finite:")
++
++# Test with all NaN values
++all_nan = [np.nan, np.nan, np.nan]
++result = cbook._safe_first_finite(all_nan)
++print(f"All NaN: {result}, is NaN: {np.isnan(result)}")
++
++# Test with mixed values (NaN first)
++mixed_nan_first = [np.nan, 1, 2, 3]
++result = cbook._safe_first_finite(mixed_nan_first)
++print(f"Mixed (NaN first): {result}")
++
++# Test with mixed values (finite first)
++mixed_finite_first = [1, np.nan, 2, 3]
++result = cbook._safe_first_finite(mixed_finite_first)
++print(f"Mixed (finite first): {result}")
++
++# Test with None values
++with_none = [None, np.nan, 1, 2]
++result = cbook._safe_first_finite(with_none)
++print(f"With None: {result}")
++
++# Test with all None
++all_none = [None, None, None]
++try:
++    result = cbook._safe_first_finite(all_none)
++    print(f"All None: {result}")
++except StopIteration:
++    print("All None: StopIteration raised")
++
++print("\nTesting ax.bar with various NaN configurations:")
++
++# Test case 1: All NaN
++f, ax = plt.subplots()
++bars = ax.bar([np.nan, np.nan], [np.nan, np.nan])
++print(f"All NaN bars created: {len(bars)} bars")
++
++# Test case 2: Mixed x values (NaN first)
++f, ax = plt.subplots()
++bars = ax.bar([np.nan, 1, 2], [1, 2, 3])
++print(f"Mixed x (NaN first) bars created: {len(bars)} bars")
++
++# Test case 3: Mixed heights (NaN first)
++f, ax = plt.subplots()
++bars = ax.bar([0, 1, 2], [np.nan, 2, 3])
++print(f"Mixed heights (NaN first) bars created: {len(bars)} bars")
++
++# Test case 4: Single NaN
++f, ax = plt.subplots()
++bars = ax.bar([np.nan], [1])
++print(f"Single NaN x bar created: {len(bars)} bars")
++
++# Test case 5: Empty arrays
++f, ax = plt.subplots()
++bars = ax.bar([], [])
++print(f"Empty arrays bars created: {len(bars)} bars")
++
++print("\nAll tests passed!")
+diff --git a/test_empty_iterable.py b/test_empty_iterable.py
+new file mode 100644
+index 0000000000..77e1da7567
+--- /dev/null
++++ b/test_empty_iterable.py
+@@ -0,0 +1,16 @@
++import matplotlib.cbook as cbook
++
++# Test with empty list
++try:
++    result = cbook._safe_first_finite([])
++    print(f"Empty list result: {result}")
++except StopIteration:
++    print("Empty list: StopIteration raised (expected)")
++
++# Test with empty numpy array
++import numpy as np
++try:
++    result = cbook._safe_first_finite(np.array([]))
++    print(f"Empty numpy array result: {result}")
++except StopIteration:
++    print("Empty numpy array: StopIteration raised (expected)")
+diff --git a/test_nan_bar.py b/test_nan_bar.py
+new file mode 100644
+index 0000000000..b3f284bb0e
+--- /dev/null
++++ b/test_nan_bar.py
+@@ -0,0 +1,29 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++# Test case from the issue
++f, ax = plt.subplots()
++try:
++    result = ax.bar([np.nan], [np.nan])
++    print("Success! Created bar collection:", result)
++    print("First bar x position:", result[0].get_x())
++    print("First bar height:", result[0].get_height())
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Additional test cases mentioned in the issue
++print("\nTesting ax.bar([np.nan], [0]):")
++try:
++    f2, ax2 = plt.subplots()
++    result2 = ax2.bar([np.nan], [0])
++    print("Success! Created bar collection")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting ax.bar([0], [np.nan]):")
++try:
++    f3, ax3 = plt.subplots()
++    result3 = ax3.bar([0], [np.nan])
++    print("Success! Created bar collection")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_seaborn_scenario.py b/test_seaborn_scenario.py
+new file mode 100644
+index 0000000000..296d063023
+--- /dev/null
++++ b/test_seaborn_scenario.py
+@@ -0,0 +1,29 @@
++"""
++Test the specific scenario mentioned in the issue where seaborn draws
++and then removes a "phantom" bar to trip the color cycle.
++"""
++import numpy as np
++import matplotlib.pyplot as plt
++
++# Simulate what seaborn does
++fig, ax = plt.subplots()
++
++# Draw a phantom bar with NaN values (this is what was failing)
++phantom_bars = ax.bar([np.nan], [np.nan])
++print(f"Created phantom bar collection: {phantom_bars}")
++print(f"Number of bars: {len(phantom_bars)}")
++
++# Get the first bar's properties (this was raising StopIteration)
++first_bar = phantom_bars[0]
++print(f"First bar x position: {first_bar.get_x()}")
++print(f"First bar height: {first_bar.get_height()}")
++
++# Remove the phantom bar (as seaborn would do)
++first_bar.remove()
++print("Successfully removed phantom bar")
++
++# Now draw actual bars
++real_bars = ax.bar([1, 2, 3], [4, 5, 6])
++print(f"Created real bars: {len(real_bars)} bars")
++
++print("\nSeaborn scenario test passed!")

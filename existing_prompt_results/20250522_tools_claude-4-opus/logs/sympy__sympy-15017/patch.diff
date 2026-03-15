@@ -1,0 +1,366 @@
+diff --git a/CHANGES_SUMMARY.md b/CHANGES_SUMMARY.md
+new file mode 100644
+index 0000000000..4198fa6486
+--- /dev/null
++++ b/CHANGES_SUMMARY.md
+@@ -0,0 +1,37 @@
++# Summary of Changes for Rank-0 Array Length Fix
++
++## Problem
++`sympy.tensor.array.NDimArray.__len__` was returning 0 for rank-0 arrays (scalars) instead of 1, which is inconsistent with:
++1. The number of elements returned by the iterator (`len(list(array))` returns 1)
++2. NumPy's behavior where rank-0 arrays have size 1
++
++## Solution
++Modified the calculation of `_loop_size` in array implementations to correctly handle empty shapes (rank-0 arrays).
++
++## Files Changed
++
++### 1. `/testbed/sympy/tensor/array/dense_ndim_array.py`
++- Line 152: Changed `self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0`
++  to `self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)`
++- Line 177: Same change for MutableDenseNDimArray
++
++### 2. `/testbed/sympy/tensor/array/sparse_ndim_array.py`
++- Line 133: Changed `loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0`
++  to `loop_size = functools.reduce(lambda x,y: x*y, shape, 1)`
++- Line 170: Changed `self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0`
++  to `self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)`
++
++### 3. `/testbed/sympy/tensor/array/ndim_array.py`
++- Lines 69-71: Added check for rank-0 arrays in `_parse_index` to ensure integer indices raise ValueError for rank-0 arrays
++
++### 4. `/testbed/sympy/tensor/array/tests/test_immutable_ndim_array.py`
++- Line 76: Updated test expectation from `assert len(rank_zero_array) == 0` to `assert len(rank_zero_array) == 1`
++
++## Technical Details
++The issue was that `functools.reduce` with an empty sequence and no initial value raises an exception, so the original code used a conditional `if shape else 0`. However, for an empty shape (rank-0 array), the product should be 1 (the multiplicative identity), not 0. By providing 1 as the initial value to `functools.reduce`, it correctly handles both empty and non-empty shapes.
++
++## Verification
++- All existing tests pass
++- Rank-0 arrays now have `len() == 1`
++- Iteration over rank-0 arrays yields exactly one element
++- The behavior now matches NumPy's convention
+diff --git a/sympy/tensor/array/dense_ndim_array.py b/sympy/tensor/array/dense_ndim_array.py
+index 9be94a8631..485a8b1df2 100644
+--- a/sympy/tensor/array/dense_ndim_array.py
++++ b/sympy/tensor/array/dense_ndim_array.py
+@@ -149,7 +149,7 @@ def _new(cls, iterable, shape, **kwargs):
+         self._shape = shape
+         self._array = list(flat_list)
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+         return self
+ 
+     def __setitem__(self, index, value):
+@@ -174,7 +174,7 @@ def _new(cls, iterable, shape, **kwargs):
+         self._shape = shape
+         self._array = list(flat_list)
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+         return self
+ 
+     def __setitem__(self, index, value):
+diff --git a/sympy/tensor/array/ndim_array.py b/sympy/tensor/array/ndim_array.py
+index 099b291167..1b68b5e657 100644
+--- a/sympy/tensor/array/ndim_array.py
++++ b/sympy/tensor/array/ndim_array.py
+@@ -66,6 +66,8 @@ def __new__(cls, iterable, shape=None, **kwargs):
+     def _parse_index(self, index):
+ 
+         if isinstance(index, (SYMPY_INTS, Integer)):
++            if self._rank == 0:
++                raise ValueError("index out of range")
+             if index >= self._loop_size:
+                 raise ValueError("index out of range")
+             return index
+diff --git a/sympy/tensor/array/sparse_ndim_array.py b/sympy/tensor/array/sparse_ndim_array.py
+index 72b5d51299..79b5d38506 100644
+--- a/sympy/tensor/array/sparse_ndim_array.py
++++ b/sympy/tensor/array/sparse_ndim_array.py
+@@ -130,7 +130,7 @@ def __new__(cls, iterable=None, shape=None, **kwargs):
+ 
+         shape, flat_list = cls._handle_ndarray_creation_inputs(iterable, shape, **kwargs)
+         shape = Tuple(*map(_sympify, shape))
+-        loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+ 
+         # Sparse array:
+         if isinstance(flat_list, (dict, Dict)):
+@@ -167,7 +167,7 @@ def __new__(cls, iterable=None, shape=None, **kwargs):
+         self = object.__new__(cls)
+         self._shape = shape
+         self._rank = len(shape)
+-        self._loop_size = functools.reduce(lambda x,y: x*y, shape) if shape else 0
++        self._loop_size = functools.reduce(lambda x,y: x*y, shape, 1)
+ 
+         # Sparse array:
+         if isinstance(flat_list, (dict, Dict)):
+diff --git a/sympy/tensor/array/tests/test_immutable_ndim_array.py b/sympy/tensor/array/tests/test_immutable_ndim_array.py
+index 5a576c44f0..44b317a4c7 100644
+--- a/sympy/tensor/array/tests/test_immutable_ndim_array.py
++++ b/sympy/tensor/array/tests/test_immutable_ndim_array.py
+@@ -73,7 +73,7 @@ def test_ndim_array_initiation():
+ 
+     from sympy.abc import x
+     rank_zero_array = ImmutableDenseNDimArray(x)
+-    assert len(rank_zero_array) == 0
++    assert len(rank_zero_array) == 1
+     assert rank_zero_array.shape == ()
+     assert rank_zero_array.rank() == 0
+     assert rank_zero_array[()] == x
+diff --git a/test_comprehensive_rank0.py b/test_comprehensive_rank0.py
+new file mode 100644
+index 0000000000..b458e02727
+--- /dev/null
++++ b/test_comprehensive_rank0.py
+@@ -0,0 +1,90 @@
++#!/usr/bin/env python
++"""Comprehensive test for rank-0 array length fix"""
++
++import sympy
++from sympy import Array
++from sympy.tensor.array import (MutableDenseNDimArray, ImmutableDenseNDimArray,
++                                MutableSparseNDimArray, ImmutableSparseNDimArray)
++
++print("Testing rank-0 array length fix comprehensively")
++print("=" * 60)
++
++# Test 1: Basic length check for all array types
++print("\n1. Testing len() for rank-0 arrays:")
++for ArrayType in [Array, MutableDenseNDimArray, ImmutableDenseNDimArray,
++                  MutableSparseNDimArray, ImmutableSparseNDimArray]:
++    arr = ArrayType(42)
++    print(f"   {ArrayType.__name__}(42): len = {len(arr)}, shape = {arr.shape}")
++    assert len(arr) == 1, f"Expected len=1 for {ArrayType.__name__}"
++    assert arr.shape == (), f"Expected shape=() for {ArrayType.__name__}"
++    assert arr.rank() == 0, f"Expected rank=0 for {ArrayType.__name__}"
++
++# Test 2: Iteration over rank-0 arrays
++print("\n2. Testing iteration over rank-0 arrays:")
++arr = Array(5)
++elements = list(arr)
++print(f"   Array(5) elements: {elements}")
++assert len(elements) == 1, "Expected 1 element when iterating"
++assert elements[0] == 5, "Expected element value to be 5"
++
++# Test 3: Accessing rank-0 arrays
++print("\n3. Testing access patterns for rank-0 arrays:")
++arr = Array(7)
++print(f"   arr[()] = {arr[()]}")  # Should work
++assert arr[()] == 7, "Expected arr[()] to return 7"
++
++try:
++    val = arr[0]
++    print(f"   ERROR: arr[0] should raise ValueError but returned {val}")
++    assert False, "arr[0] should raise ValueError"
++except ValueError:
++    print("   arr[0] correctly raises ValueError")
++
++# Test 4: Comparison with higher rank arrays
++print("\n4. Comparing with higher rank arrays:")
++rank1 = Array([1, 2, 3])
++rank2 = Array([[1, 2], [3, 4]])
++rank0 = Array(5)
++
++print(f"   Rank-0: len={len(rank0)}, shape={rank0.shape}")
++print(f"   Rank-1: len={len(rank1)}, shape={rank1.shape}")
++print(f"   Rank-2: len={len(rank2)}, shape={rank2.shape}")
++
++assert len(rank0) == 1
++assert len(rank1) == 3
++assert len(rank2) == 4
++
++# Test 5: Operations on rank-0 arrays
++print("\n5. Testing operations on rank-0 arrays:")
++a = Array(3)
++b = Array(4)
++
++# These operations should work
++print(f"   Array(3) + Array(4) = {a + b}")
++print(f"   Array(3) - Array(4) = {a - b}")
++print(f"   Array(3) * 2 = {a * 2}")
++print(f"   2 * Array(3) = {2 * a}")
++print(f"   -Array(3) = {-a}")
++
++assert (a + b)[()] == 7
++assert (a - b)[()] == -1
++assert (a * 2)[()] == 6
++assert (2 * a)[()] == 6
++assert (-a)[()] == -3
++
++# Test 6: Edge cases
++print("\n6. Testing edge cases:")
++# Empty shape should create rank-0 array
++arr = ImmutableDenseNDimArray([10], shape=())
++print(f"   ImmutableDenseNDimArray([10], shape=()): len={len(arr)}, value={arr[()]}")
++assert len(arr) == 1
++assert arr[()] == 10
++
++# From another rank-0 array
++arr2 = Array(arr)
++print(f"   Array(rank0_array): len={len(arr2)}, value={arr2[()]}")
++assert len(arr2) == 1
++assert arr2[()] == 10
++
++print("\n" + "=" * 60)
++print("All tests passed! ✓")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..3cc252247d
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python
++"""Test the exact examples from the problem statement"""
++
++import sympy
++
++print("Testing examples from problem statement:")
++print("=" * 50)
++
++# Example 1 from problem statement
++a = sympy.Array(3)
++print(f">>> a = sympy.Array(3)")
++print(f">>> len(a)")
++print(f"{len(a)}")
++print(f">>> len(list(a))")
++print(f"{len(list(a))}")
++
++# Verify the fix
++assert len(a) == 1, "len(a) should be 1 for rank-0 array"
++assert len(list(a)) == 1, "len(list(a)) should be 1 for rank-0 array"
++assert len(a) == len(list(a)), "len(a) should equal len(list(a))"
++
++print("\n✓ Fixed! len() now returns 1 for rank-0 arrays, matching len(list(a))")
++print("\nThis matches the numpy behavior where rank-0 arrays have size 1")
+diff --git a/test_rank0_access.py b/test_rank0_access.py
+new file mode 100644
+index 0000000000..03c404c67d
+--- /dev/null
++++ b/test_rank0_access.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python
++"""Test accessing rank-0 arrays"""
++
++import sympy
++from sympy.abc import x
++
++# Create a rank-0 array
++rank_zero_array = sympy.Array(x)
++print(f"rank_zero_array = {rank_zero_array}")
++print(f"rank_zero_array.shape = {rank_zero_array.shape}")
++print(f"rank_zero_array[()] = {rank_zero_array[()]}")
++
++# Try to access with index 0
++try:
++    result = rank_zero_array[0]
++    print(f"rank_zero_array[0] = {result}")
++except ValueError as e:
++    print(f"ValueError raised: {e}")
++except Exception as e:
++    print(f"Other exception raised: {type(e).__name__}: {e}")
++
++# Let's also check iteration
++print("\nIterating over rank-0 array:")
++for i, elem in enumerate(rank_zero_array):
++    print(f"  Element {i}: {elem}")
+diff --git a/test_rank0_len.py b/test_rank0_len.py
+new file mode 100644
+index 0000000000..a20147c39c
+--- /dev/null
++++ b/test_rank0_len.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test script to reproduce the rank-0 array length issue"""
++
++import sympy
++
++print("Testing rank-0 array length issue:")
++print("=" * 50)
++
++# Test with sympy Array
++a = sympy.Array(3)
++print(f"sympy.Array(3) = {a}")
++print(f"len(a) = {len(a)}")
++print(f"len(list(a)) = {len(list(a))}")
++print(f"a.shape = {a.shape}")
++print(f"a.rank() = {a.rank()}")
++
++print("\n" + "=" * 50)
++print("Expected behavior:")
++print("For a rank-0 array (scalar), len() should return 1")
++print("because it contains exactly one element")
++
++print("\n" + "=" * 50)
++print("Testing with different array types:")
++
++# Test with MutableDenseNDimArray
++from sympy.tensor.array import MutableDenseNDimArray, ImmutableDenseNDimArray
++from sympy.tensor.array import MutableSparseNDimArray, ImmutableSparseNDimArray
++
++for ArrayType in [MutableDenseNDimArray, ImmutableDenseNDimArray, 
++                  MutableSparseNDimArray, ImmutableSparseNDimArray]:
++    print(f"\n{ArrayType.__name__}:")
++    arr = ArrayType(5)
++    print(f"  Array value: {arr}")
++    print(f"  len(): {len(arr)}")
++    print(f"  shape: {arr.shape}")
++    print(f"  rank(): {arr.rank()}")
++
++print("\n" + "=" * 50)
++print("Testing with higher rank arrays (should work correctly):")
++b = sympy.Array([1, 2, 3])
++print(f"sympy.Array([1, 2, 3]) = {b}")
++print(f"len(b) = {len(b)}")
++print(f"b.shape = {b.shape}")
+diff --git a/test_rank0_len_addition.py b/test_rank0_len_addition.py
+new file mode 100644
+index 0000000000..3fa10554fc
+--- /dev/null
++++ b/test_rank0_len_addition.py
+@@ -0,0 +1,42 @@
++"""
++Test to add to the test suite for rank-0 array length behavior
++"""
++
++def test_rank0_array_length():
++    """Test that rank-0 arrays have length 1"""
++    from sympy import Array
++    from sympy.tensor.array import (MutableDenseNDimArray, ImmutableDenseNDimArray,
++                                    MutableSparseNDimArray, ImmutableSparseNDimArray)
++    
++    # Test all array types
++    for ArrayType in [Array, MutableDenseNDimArray, ImmutableDenseNDimArray,
++                      MutableSparseNDimArray, ImmutableSparseNDimArray]:
++        # Create rank-0 array
++        arr = ArrayType(42)
++        
++        # Check length is 1
++        assert len(arr) == 1, f"{ArrayType.__name__} rank-0 array should have length 1"
++        
++        # Check shape is empty tuple
++        assert arr.shape == (), f"{ArrayType.__name__} rank-0 array should have shape ()"
++        
++        # Check rank is 0
++        assert arr.rank() == 0, f"{ArrayType.__name__} rank-0 array should have rank 0"
++        
++        # Check iteration yields one element
++        elements = list(arr)
++        assert len(elements) == 1, f"{ArrayType.__name__} rank-0 array should yield 1 element"
++        assert elements[0] == 42, f"{ArrayType.__name__} rank-0 array element should be 42"
++        
++        # Check accessing with empty tuple works
++        assert arr[()] == 42, f"{ArrayType.__name__} rank-0 array should be accessible with ()"
++        
++        # Check accessing with integer index raises ValueError
++        from sympy.utilities.pytest import raises
++        raises(ValueError, lambda: arr[0])
++
++# Print the test function that should be added
++print("Add this test function to test_immutable_ndim_array.py or test_mutable_ndim_array.py:")
++print()
++print(test_rank0_array_length.__doc__)
++print(test_rank0_array_length)

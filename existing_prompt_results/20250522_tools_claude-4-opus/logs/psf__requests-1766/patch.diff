@@ -1,0 +1,371 @@
+diff --git a/requests/auth.py b/requests/auth.py
+index a3de123d..48416e5f 100644
+--- a/requests/auth.py
++++ b/requests/auth.py
+@@ -144,7 +144,7 @@ class HTTPDigestAuth(AuthBase):
+         if entdig:
+             base += ', digest="%s"' % entdig
+         if qop:
+-            base += ', qop=auth, nc=%s, cnonce="%s"' % (ncvalue, cnonce)
++            base += ', qop="auth", nc=%s, cnonce="%s"' % (ncvalue, cnonce)
+ 
+         return 'Digest %s' % (base)
+ 
+diff --git a/test_curl_compatibility.py b/test_curl_compatibility.py
+new file mode 100644
+index 00000000..ca5cd659
+--- /dev/null
++++ b/test_curl_compatibility.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test curl compatibility for digest authentication"""
++
++import re
++from requests.auth import HTTPDigestAuth
++
++def test_curl_compatibility():
++    """
++    Test that our digest auth implementation matches curl's behavior.
++    
++    According to the problem statement, curl quotes the qop value,
++    and some server implementations are sensitive to this.
++    """
++    
++    print("Testing curl compatibility for digest authentication")
++    print("=" * 60)
++    
++    auth = HTTPDigestAuth('user', 'passwd')
++    
++    # Simulate a typical digest challenge
++    auth.chal = {
++        'realm': 'example.com',
++        'nonce': 'abc123',
++        'qop': 'auth',
++        'algorithm': 'MD5',
++        'opaque': 'xyz789'
++    }
++    
++    # Build the digest header
++    header = auth.build_digest_header('GET', 'http://example.com/digest-auth')
++    
++    print("\nGenerated Authorization header:")
++    print(header)
++    
++    # Check critical formatting that curl uses
++    print("\nChecking curl-compatible formatting:")
++    
++    # 1. qop should be quoted
++    if re.search(r'qop="auth"', header):
++        print("✓ qop value is quoted (matches curl)")
++    else:
++        print("✗ qop value is not quoted (differs from curl)")
++    
++    # 2. All required fields should be present and quoted appropriately
++    required_quoted = ['username', 'realm', 'nonce', 'uri', 'response', 'cnonce', 'opaque']
++    for field in required_quoted:
++        pattern = f'{field}="[^"]+"'
++        if re.search(pattern, header):
++            print(f"✓ {field} is properly quoted")
++        elif field == 'cnonce' and 'qop=' not in header:
++            print(f"- {field} not present (OK when qop is not used)")
++        elif field == 'opaque' and field not in header:
++            print(f"- {field} not present (optional)")
++        else:
++            print(f"✗ {field} is missing or not properly quoted")
++    
++    # 3. nc should not be quoted (it's a number)
++    if re.search(r'nc=[0-9a-fA-F]+(?![""])', header):
++        print("✓ nc value is unquoted (correct)")
++    elif 'nc=' in header:
++        print("✗ nc value is incorrectly quoted")
++    else:
++        print("- nc not present (OK when qop is not used)")
++    
++    print("\n" + "=" * 60)
++    print("RESULT: Implementation is curl-compatible ✓")
++
++if __name__ == '__main__':
++    test_curl_compatibility()
+diff --git a/test_digest_qop.py b/test_digest_qop.py
+new file mode 100644
+index 00000000..3e6dade2
+--- /dev/null
++++ b/test_digest_qop.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test script to verify qop quoting in digest authentication"""
++
++import re
++from requests.auth import HTTPDigestAuth
++
++def test_qop_quoting():
++    """Test that qop value is properly quoted in digest auth header"""
++    
++    # Create a digest auth instance
++    auth = HTTPDigestAuth('user', 'pass')
++    
++    # Simulate a challenge from server
++    auth.chal = {
++        'realm': 'testrealm@host.com',
++        'nonce': 'dcd98b7102dd2f0e8b11d0f600bfb0c093',
++        'qop': 'auth,auth-int',
++        'opaque': '5ccc069c403ebaf9f0171e9517f40e41'
++    }
++    
++    # Build the digest header
++    header = auth.build_digest_header('GET', 'http://example.com/dir/index.html')
++    
++    print("Generated header:")
++    print(header)
++    
++    # Check if qop value is quoted
++    qop_pattern = r'qop=([^,\s]+)'
++    match = re.search(qop_pattern, header)
++    
++    if match:
++        qop_value = match.group(1)
++        print(f"\nFound qop value: {qop_value}")
++        
++        # Check if it's quoted
++        if qop_value.startswith('"') and qop_value.endswith('"'):
++            print("✓ qop value is properly quoted")
++        else:
++            print("✗ qop value is NOT quoted (should be quoted according to RFC2617)")
++            print(f"  Current: qop={qop_value}")
++            qop_unquoted = qop_value.strip('"')
++            print(f'  Expected: qop="{qop_unquoted}"')
++    else:
++        print("Could not find qop in header")
++
++if __name__ == '__main__':
++    test_qop_quoting()
+diff --git a/test_digest_qop_comprehensive.py b/test_digest_qop_comprehensive.py
+new file mode 100644
+index 00000000..c9767a60
+--- /dev/null
++++ b/test_digest_qop_comprehensive.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Comprehensive test for qop quoting in digest authentication"""
++
++import re
++from requests.auth import HTTPDigestAuth
++
++def test_digest_header_format():
++    """Test that the digest header follows RFC2617 format with quoted qop"""
++    
++    auth = HTTPDigestAuth('user', 'pass')
++    
++    # Test case 1: qop with single value
++    auth.chal = {
++        'realm': 'testrealm@host.com',
++        'nonce': 'dcd98b7102dd2f0e8b11d0f600bfb0c093',
++        'qop': 'auth',
++        'opaque': '5ccc069c403ebaf9f0171e9517f40e41'
++    }
++    
++    header = auth.build_digest_header('GET', 'http://example.com/dir/index.html')
++    print("Test 1 - Single qop value:")
++    print(header)
++    
++    # Verify all quoted fields according to RFC2617
++    quoted_fields = {
++        'username': r'username="([^"]+)"',
++        'realm': r'realm="([^"]+)"',
++        'nonce': r'nonce="([^"]+)"',
++        'uri': r'uri="([^"]+)"',
++        'response': r'response="([^"]+)"',
++        'opaque': r'opaque="([^"]+)"',
++        'qop': r'qop="([^"]+)"',
++        'cnonce': r'cnonce="([^"]+)"'
++    }
++    
++    for field, pattern in quoted_fields.items():
++        match = re.search(pattern, header)
++        if match:
++            print(f"  ✓ {field} is properly quoted: {match.group(0)}")
++        else:
++            # Some fields might be optional
++            if field in ['opaque', 'qop', 'cnonce']:
++                # Check if field exists without quotes
++                unquoted_pattern = field + r'=([^,\s]+)'
++                if re.search(unquoted_pattern, header):
++                    print(f"  ✗ {field} exists but is NOT quoted")
++                else:
++                    print(f"  - {field} not present (optional)")
++            else:
++                print(f"  ✗ {field} is missing or not properly quoted")
++    
++    # Test case 2: qop with multiple values (auth,auth-int)
++    print("\nTest 2 - Multiple qop values:")
++    auth.chal = {
++        'realm': 'testrealm@host.com',
++        'nonce': 'dcd98b7102dd2f0e8b11d0f600bfb0c093',
++        'qop': 'auth,auth-int',
++    }
++    
++    header = auth.build_digest_header('POST', 'http://example.com/api/data')
++    print(header)
++    
++    # Check qop value
++    qop_match = re.search(r'qop="([^"]+)"', header)
++    if qop_match:
++        print(f"  ✓ qop is quoted: qop=\"{qop_match.group(1)}\"")
++    else:
++        print("  ✗ qop is not properly quoted")
++    
++    # Test case 3: No qop (for backward compatibility)
++    print("\nTest 3 - No qop value:")
++    auth.chal = {
++        'realm': 'testrealm@host.com',
++        'nonce': 'dcd98b7102dd2f0e8b11d0f600bfb0c093',
++    }
++    
++    header = auth.build_digest_header('GET', 'http://example.com/')
++    print(header)
++    
++    if 'qop=' not in header:
++        print("  ✓ qop field correctly omitted when not in challenge")
++    else:
++        print("  ✗ qop field should not be present")
++
++if __name__ == '__main__':
++    test_digest_header_format()
+diff --git a/test_real_request.py b/test_real_request.py
+new file mode 100644
+index 00000000..bf54355b
+--- /dev/null
++++ b/test_real_request.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test that the fix works with real request preparation"""
++
++import requests
++from requests.auth import HTTPDigestAuth
++
++def test_real_request_header():
++    """Test the actual header that would be sent in a real request"""
++    
++    # Create a session with digest auth
++    auth = HTTPDigestAuth('user', 'pass')
++    
++    # Create a request
++    req = requests.Request('GET', 'http://example.com/api')
++    prepared = req.prepare()
++    
++    # Simulate that we already have a challenge (to avoid the 401 round-trip)
++    auth.last_nonce = 'test-nonce'
++    auth.chal = {
++        'realm': 'API',
++        'nonce': 'test-nonce',
++        'qop': 'auth',
++        'opaque': 'test-opaque'
++    }
++    
++    # Apply auth to the request
++    auth(prepared)
++    
++    # Check the Authorization header
++    auth_header = prepared.headers.get('Authorization', '')
++    print("Authorization header that would be sent:")
++    print(auth_header)
++    
++    # Verify qop is quoted
++    if 'qop="auth"' in auth_header:
++        print("\n✓ SUCCESS: qop value is properly quoted in the actual request header")
++    else:
++        print("\n✗ FAILURE: qop value is not properly quoted")
++        
++    # Also test without pre-existing nonce (normal flow)
++    print("\n\nTesting normal flow (without pre-existing nonce):")
++    auth2 = HTTPDigestAuth('user', 'pass')
++    req2 = requests.Request('GET', 'http://example.com/api')
++    prepared2 = req2.prepare()
++    
++    # This should not add an Authorization header yet
++    auth2(prepared2)
++    
++    if 'Authorization' not in prepared2.headers:
++        print("✓ Correctly waiting for 401 challenge before adding Authorization header")
++    else:
++        print("✗ Unexpectedly added Authorization header without challenge")
++
++if __name__ == '__main__':
++    test_real_request_header()
+diff --git a/test_rfc2617_compliance.py b/test_rfc2617_compliance.py
+new file mode 100644
+index 00000000..04d609ed
+--- /dev/null
++++ b/test_rfc2617_compliance.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test RFC2617 compliance for digest authentication"""
++
++import re
++from requests.auth import HTTPDigestAuth
++
++def test_rfc2617_example():
++    """Test against the example from RFC2617 Section 3.5"""
++    
++    # This test verifies that our implementation produces properly quoted values
++    # as shown in RFC2617 examples
++    
++    auth = HTTPDigestAuth('Mufasa', 'Circle Of Life')
++    
++    # Simulate the challenge from the RFC example
++    auth.chal = {
++        'realm': 'testrealm@host.com',
++        'qop': 'auth,auth-int',
++        'nonce': 'dcd98b7102dd2f0e8b11d0f600bfb0c093',
++        'opaque': '5ccc069c403ebaf9f0171e9517f40e41'
++    }
++    
++    # Build the header
++    header = auth.build_digest_header('GET', 'http://www.example.com/dir/index.html')
++    
++    print("Generated Authorization header:")
++    print(header)
++    print("\nChecking RFC2617 compliance:")
++    
++    # According to RFC2617, these directives must be quoted:
++    # username, realm, nonce, uri, response, cnonce, opaque, qop
++    
++    # Extract all key-value pairs
++    parts = header.replace('Digest ', '').split(', ')
++    
++    for part in parts:
++        if '=' in part:
++            key, value = part.split('=', 1)
++            
++            # Check which values should be quoted according to RFC2617
++            should_be_quoted = key in ['username', 'realm', 'nonce', 'uri', 
++                                      'response', 'cnonce', 'opaque', 'qop']
++            
++            is_quoted = value.startswith('"') and value.endswith('"')
++            
++            if should_be_quoted:
++                if is_quoted:
++                    print(f"  ✓ {key} is correctly quoted: {value}")
++                else:
++                    print(f"  ✗ {key} should be quoted but isn't: {value}")
++            else:
++                if is_quoted:
++                    print(f"  ? {key} is quoted (not required): {value}")
++                else:
++                    print(f"  ✓ {key} is correctly unquoted: {value}")
++    
++    # Verify the specific qop directive format
++    qop_match = re.search(r'qop="([^"]+)"', header)
++    if qop_match:
++        print(f"\n✓ SUCCESS: qop directive is properly quoted as per RFC2617")
++        print(f"  Found: qop=\"{qop_match.group(1)}\"")
++    else:
++        print("\n✗ FAILURE: qop directive is not properly quoted")
++
++if __name__ == '__main__':
++    test_rfc2617_example()

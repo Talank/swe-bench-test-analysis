@@ -1,0 +1,269 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..1a741b35
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Reproduce the issue with binary payload in requests 2.9"""
++
++import requests
++import traceback
++
++print("Testing binary payload with requests...")
++
++# Test case from the problem statement
++try:
++    print("\nTest 1: PUT request with binary data (UTF-8 encoded)")
++    response = requests.put("http://httpbin.org/put", data=u"ööö".encode("utf-8"))
++    print(f"Success! Status code: {response.status_code}")
++except Exception as e:
++    print(f"Failed with error: {type(e).__name__}: {e}")
++    traceback.print_exc()
++
++# Additional test cases
++try:
++    print("\nTest 2: POST request with binary data")
++    response = requests.post("http://httpbin.org/post", data=u"ööö".encode("utf-8"))
++    print(f"Success! Status code: {response.status_code}")
++except Exception as e:
++    print(f"Failed with error: {type(e).__name__}: {e}")
++    traceback.print_exc()
++
++try:
++    print("\nTest 3: PUT request with plain bytes")
++    response = requests.put("http://httpbin.org/put", data=b"\xc3\xb6\xc3\xb6\xc3\xb6")
++    print(f"Success! Status code: {response.status_code}")
++except Exception as e:
++    print(f"Failed with error: {type(e).__name__}: {e}")
++    traceback.print_exc()
++
++try:
++    print("\nTest 4: PUT request with string data (should work)")
++    response = requests.put("http://httpbin.org/put", data="hello")
++    print(f"Success! Status code: {response.status_code}")
++except Exception as e:
++    print(f"Failed with error: {type(e).__name__}: {e}")
++    traceback.print_exc()
+diff --git a/requests/models.py b/requests/models.py
+index 9c624d3c..1ca15082 100644
+--- a/requests/models.py
++++ b/requests/models.py
+@@ -81,7 +81,16 @@ class RequestEncodingMixin(object):
+         """
+ 
+         if isinstance(data, (str, bytes)):
+-            return to_native_string(data)
++            # For bytes, only convert to native string if it's ASCII-compatible
++            # Otherwise return as-is (for binary data in request body)
++            if isinstance(data, bytes):
++                try:
++                    return to_native_string(data)
++                except UnicodeDecodeError:
++                    # Binary data that can't be decoded as ASCII should be passed through
++                    return data
++            else:
++                return to_native_string(data)
+         elif hasattr(data, 'read'):
+             return data
+         elif hasattr(data, '__iter__'):
+diff --git a/test_binary_data.py b/test_binary_data.py
+new file mode 100644
+index 00000000..3f3c84b7
+--- /dev/null
++++ b/test_binary_data.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test binary data handling in requests"""
++
++import requests
++import pytest
++
++
++class TestBinaryData:
++    """Test cases for binary data in request bodies"""
++    
++    def test_put_binary_data_utf8(self):
++        """Test PUT request with UTF-8 encoded binary data"""
++        # This is the exact test case from the problem statement
++        response = requests.put("http://httpbin.org/put", data=u"ööö".encode("utf-8"))
++        assert response.status_code == 200
++        
++    def test_post_binary_data_utf8(self):
++        """Test POST request with UTF-8 encoded binary data"""
++        response = requests.post("http://httpbin.org/post", data=u"ööö".encode("utf-8"))
++        assert response.status_code == 200
++        
++    def test_put_raw_bytes(self):
++        """Test PUT request with raw bytes"""
++        response = requests.put("http://httpbin.org/put", data=b"\xc3\xb6\xc3\xb6\xc3\xb6")
++        assert response.status_code == 200
++        
++    def test_patch_binary_data(self):
++        """Test PATCH request with binary data"""
++        response = requests.patch("http://httpbin.org/patch", data=b"\xff\xfe\xfd")
++        assert response.status_code == 200
++        
++    def test_string_data_still_works(self):
++        """Test that string data still works"""
++        response = requests.put("http://httpbin.org/put", data="hello world")
++        assert response.status_code == 200
++        
++    def test_params_bytes_are_encoded(self):
++        """Test that bytes in params are still encoded correctly (issue #2844)"""
++        request = requests.Request('GET', 'http://example.com',
++                                   params=b'test=foo').prepare()
++        assert request.url == 'http://example.com/?test=foo'
++        
++    def test_params_ascii_bytes_work(self):
++        """Test that ASCII bytes in params work"""
++        request = requests.Request('GET', 'http://example.com',
++                                   params=b'hello=world&foo=bar').prepare()
++        assert request.url == 'http://example.com/?hello=world&foo=bar'
++
++
++if __name__ == '__main__':
++    pytest.main([__file__, '-v'])
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 00000000..3974fcfa
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Comprehensive test for the fix"""
++
++import requests
++import pytest
++
++
++def test_issue_reproduction():
++    """Test the exact issue from the problem statement"""
++    # This is what was failing before the fix
++    response = requests.put("http://httpbin.org/put", data=u"ööö".encode("utf-8"))
++    assert response.status_code == 200
++    
++
++def test_various_http_methods():
++    """Test binary data with various HTTP methods"""
++    binary_data = b"\xc3\xb6\xc3\xb6\xc3\xb6"  # UTF-8 encoded "ööö"
++    
++    methods_and_urls = [
++        (requests.get, "http://httpbin.org/get"),
++        (requests.post, "http://httpbin.org/post"),
++        (requests.put, "http://httpbin.org/put"),
++        (requests.patch, "http://httpbin.org/patch"),
++        (requests.delete, "http://httpbin.org/delete"),
++    ]
++    
++    for method, url in methods_and_urls:
++        if method == requests.get:
++            # GET doesn't usually have a body, but let's test it anyway
++            response = method(url, params={'data': 'test'})
++        else:
++            response = method(url, data=binary_data)
++        assert response.status_code == 200
++
++
++def test_request_prepare():
++    """Test Request.prepare() with binary data"""
++    req = requests.Request('PUT', 'http://httpbin.org/put', data=b"\xff\xfe\xfd")
++    prepared = req.prepare()
++    assert prepared.body == b"\xff\xfe\xfd"
++    
++    
++def test_session_prepare():
++    """Test Session.prepare_request() with binary data"""
++    session = requests.Session()
++    req = requests.Request('PUT', 'http://httpbin.org/put', data=b"\xff\xfe\xfd")
++    prepared = session.prepare_request(req)
++    assert prepared.body == b"\xff\xfe\xfd"
++
++
++def test_original_issue_2844_still_works():
++    """Ensure the original issue #2844 is still fixed"""
++    # Test with ASCII bytes in params
++    request = requests.Request('GET', 'http://example.com',
++                               params=b'test=foo&bar=baz').prepare()
++    assert request.url == 'http://example.com/?test=foo&bar=baz'
++    
++    # Test with string params (should still work)
++    request = requests.Request('GET', 'http://example.com',
++                               params='test=foo&bar=baz').prepare()
++    assert request.url == 'http://example.com/?test=foo&bar=baz'
++
++
++if __name__ == '__main__':
++    pytest.main([__file__, '-v'])
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..27213ea5
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test edge cases for binary data handling"""
++
++import requests
++import pytest
++
++
++def test_empty_bytes():
++    """Test empty bytes data"""
++    response = requests.put("http://httpbin.org/put", data=b"")
++    assert response.status_code == 200
++
++
++def test_null_byte():
++    """Test data with null bytes"""
++    response = requests.put("http://httpbin.org/put", data=b"hello\x00world")
++    assert response.status_code == 200
++
++
++def test_all_byte_values():
++    """Test data with all possible byte values"""
++    data = bytes(range(256))
++    response = requests.put("http://httpbin.org/put", data=data)
++    assert response.status_code == 200
++
++
++def test_mixed_unicode():
++    """Test various unicode encodings"""
++    # Chinese characters
++    response = requests.put("http://httpbin.org/put", data="你好世界".encode("utf-8"))
++    assert response.status_code == 200
++    
++    # Emoji
++    response = requests.put("http://httpbin.org/put", data="😀😁😂".encode("utf-8"))
++    assert response.status_code == 200
++    
++    # Mixed scripts
++    response = requests.put("http://httpbin.org/put", data="Hello Здравствуйте مرحبا".encode("utf-8"))
++    assert response.status_code == 200
++
++
++def test_different_encodings():
++    """Test data encoded with different character encodings"""
++    # UTF-16
++    response = requests.put("http://httpbin.org/put", data="hello".encode("utf-16"))
++    assert response.status_code == 200
++    
++    # Latin-1
++    response = requests.put("http://httpbin.org/put", data="café".encode("latin-1"))
++    assert response.status_code == 200
++
++
++def test_params_with_non_ascii_fail_gracefully():
++    """Test that non-ASCII bytes in params fail gracefully"""
++    # This should raise an error because URL params can't contain non-ASCII bytes
++    with pytest.raises((UnicodeDecodeError, TypeError)):
++        request = requests.Request('GET', 'http://example.com',
++                                   params=b'\xff\xfe').prepare()
++
++
++if __name__ == '__main__':
++    pytest.main([__file__, '-v'])

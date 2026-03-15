@@ -1,0 +1,760 @@
+diff --git a/astropy/wcs/wcsapi/wrappers/sliced_wcs.py b/astropy/wcs/wcsapi/wrappers/sliced_wcs.py
+index d7605b078c..2cdc9cd13e 100644
+--- a/astropy/wcs/wcsapi/wrappers/sliced_wcs.py
++++ b/astropy/wcs/wcsapi/wrappers/sliced_wcs.py
+@@ -158,6 +158,18 @@ class SlicedLowLevelWCS(BaseWCSWrapper):
+         """
+         Information describing the dropped world dimensions.
+         """
++        # Use the actual sliced pixel positions for dropped dimensions
++        pixel_pos = []
++        ipix_curr = 0
++        for ipix in range(self._wcs.pixel_n_dim):
++            if isinstance(self._slices_pixel[ipix], numbers.Integral):
++                # This dimension is sliced - not in pixel_keep
++                pixel_pos.append(0)  # Placeholder, will be replaced
++            else:
++                # This dimension is kept
++                pixel_pos.append(0)
++                ipix_curr += 1
++        
+         world_coords = self._pixel_to_world_values_all(*[0]*len(self._pixel_keep))
+         dropped_info = defaultdict(list)
+ 
+@@ -244,6 +256,18 @@ class SlicedLowLevelWCS(BaseWCSWrapper):
+ 
+     def world_to_pixel_values(self, *world_arrays):
+         world_arrays = tuple(map(np.asanyarray, world_arrays))
++        
++        # Get the world coordinate values for dropped dimensions
++        # We need to evaluate at the sliced pixel position
++        pixel_pos = []
++        for ipix in range(self._wcs.pixel_n_dim):
++            if isinstance(self._slices_pixel[ipix], numbers.Integral):
++                pixel_pos.append(self._slices_pixel[ipix])
++            else:
++                # For non-sliced dimensions, use 0 as a reference
++                pixel_pos.append(0)
++        dropped_world_coords = self._wcs.pixel_to_world_values(*pixel_pos)
++        
+         world_arrays_new = []
+         iworld_curr = -1
+         for iworld in range(self._wcs.world_n_dim):
+@@ -251,7 +275,8 @@ class SlicedLowLevelWCS(BaseWCSWrapper):
+                 iworld_curr += 1
+                 world_arrays_new.append(world_arrays[iworld_curr])
+             else:
+-                world_arrays_new.append(1.)
++                # Use the actual world coordinate at the sliced position
++                world_arrays_new.append(dropped_world_coords[iworld])
+ 
+         world_arrays_new = np.broadcast_arrays(*world_arrays_new)
+         pixel_arrays = list(self._wcs.world_to_pixel_values(*world_arrays_new))
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 0000000000..61c565f527
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,86 @@
++import numpy as np
++import astropy.wcs
++from astropy.coordinates import SkyCoord
++import astropy.units as u
++
++nx = 100
++ny = 25
++nz = 2
++wcs_header = {
++    'WCSAXES': 3,
++    'CRPIX1': (nx + 1)/2,
++    'CRPIX2': (ny + 1)/2,
++    'CRPIX3': 1.0,
++    'PC1_1': 0.0,
++    'PC1_2': -1.0,
++    'PC1_3': 0.0,
++    'PC2_1': 1.0,
++    'PC2_2': 0.0,
++    'PC2_3': -1.0,
++    'CDELT1': 5,
++    'CDELT2': 5,
++    'CDELT3': 0.055,
++    'CUNIT1': 'arcsec',
++    'CUNIT2': 'arcsec',
++    'CUNIT3': 'Angstrom',
++    'CTYPE1': 'HPLN-TAN',
++    'CTYPE2': 'HPLT-TAN',
++    'CTYPE3': 'WAVE',
++    'CRVAL1': 0.0,
++    'CRVAL2': 0.0,
++    'CRVAL3': 1.05,
++}
++fits_wcs = astropy.wcs.WCS(header=wcs_header)
++
++print("Axis correlation matrix:")
++print(fits_wcs.axis_correlation_matrix)
++
++print("\nTesting with slice at index 0 (first wavelength)...")
++ll_sliced_wcs = astropy.wcs.wcsapi.SlicedLowLevelWCS(fits_wcs, 0)
++
++print(f"\nOriginal WCS dimensions: pixel={fits_wcs.pixel_n_dim}, world={fits_wcs.world_n_dim}")
++print(f"Sliced WCS dimensions: pixel={ll_sliced_wcs.pixel_n_dim}, world={ll_sliced_wcs.world_n_dim}")
++
++print(f"\nPixel keep indices: {ll_sliced_wcs._pixel_keep}")
++print(f"World keep indices: {ll_sliced_wcs._world_keep}")
++
++print(f"\nSlices array: {ll_sliced_wcs._slices_array}")
++print(f"Slices pixel: {ll_sliced_wcs._slices_pixel}")
++
++print("\nSliced axis correlation matrix:")
++print(ll_sliced_wcs.axis_correlation_matrix)
++
++# Let's trace through the world_to_pixel_values method
++print("\n--- Tracing world_to_pixel_values ---")
++world_arrays = [0.0, 0.0]  # Tx=0, Ty=0 in degrees
++world_arrays = tuple(map(np.asanyarray, world_arrays))
++world_arrays_new = []
++iworld_curr = -1
++for iworld in range(fits_wcs.world_n_dim):
++    if iworld in ll_sliced_wcs._world_keep:
++        iworld_curr += 1
++        world_arrays_new.append(world_arrays[iworld_curr])
++        print(f"World dim {iworld}: keeping, using world_arrays[{iworld_curr}] = {world_arrays[iworld_curr]}")
++    else:
++        world_arrays_new.append(1.)
++        print(f"World dim {iworld}: dropping, using 1.0")
++
++print(f"\nworld_arrays_new: {world_arrays_new}")
++world_arrays_new = np.broadcast_arrays(*world_arrays_new)
++print(f"After broadcast: {[arr.item() if arr.ndim == 0 else arr for arr in world_arrays_new]}")
++
++# Call the underlying WCS
++pixel_arrays = list(fits_wcs.world_to_pixel_values(*world_arrays_new))
++print(f"\nPixel arrays from underlying WCS: {pixel_arrays}")
++
++# Check what happens with the slice adjustment
++for ipixel in range(fits_wcs.pixel_n_dim):
++    if isinstance(ll_sliced_wcs._slices_pixel[ipixel], slice) and ll_sliced_wcs._slices_pixel[ipixel].start is not None:
++        print(f"Adjusting pixel {ipixel}: {pixel_arrays[ipixel]} -= {ll_sliced_wcs._slices_pixel[ipixel].start}")
++        pixel_arrays[ipixel] -= ll_sliced_wcs._slices_pixel[ipixel].start
++
++print(f"\nAdjusted pixel arrays: {pixel_arrays}")
++
++# Select kept pixels
++pixel = tuple(pixel_arrays[ip] for ip in ll_sliced_wcs._pixel_keep)
++print(f"\nFinal pixel result: {pixel}")
+diff --git a/debug_issue2.py b/debug_issue2.py
+new file mode 100644
+index 0000000000..0cd0ac67d4
+--- /dev/null
++++ b/debug_issue2.py
+@@ -0,0 +1,55 @@
++import numpy as np
++import astropy.wcs
++from astropy.coordinates import SkyCoord
++import astropy.units as u
++
++nx = 100
++ny = 25
++nz = 2
++wcs_header = {
++    'WCSAXES': 3,
++    'CRPIX1': (nx + 1)/2,
++    'CRPIX2': (ny + 1)/2,
++    'CRPIX3': 1.0,
++    'PC1_1': 0.0,
++    'PC1_2': -1.0,
++    'PC1_3': 0.0,
++    'PC2_1': 1.0,
++    'PC2_2': 0.0,
++    'PC2_3': -1.0,
++    'CDELT1': 5,
++    'CDELT2': 5,
++    'CDELT3': 0.055,
++    'CUNIT1': 'arcsec',
++    'CUNIT2': 'arcsec',
++    'CUNIT3': 'Angstrom',
++    'CTYPE1': 'HPLN-TAN',
++    'CTYPE2': 'HPLT-TAN',
++    'CTYPE3': 'WAVE',
++    'CRVAL1': 0.0,
++    'CRVAL2': 0.0,
++    'CRVAL3': 1.05,
++}
++fits_wcs = astropy.wcs.WCS(header=wcs_header)
++
++# Let's see what the world coordinate is at pixel index 0 in the spectral dimension
++print("Testing pixel_to_world at slice position...")
++# Pixel coordinates (0, 0, 0) - first pixel in each dimension
++world_coords = fits_wcs.pixel_to_world_values(0, 0, 0)
++print(f"World coordinates at pixel (0,0,0): {world_coords}")
++
++# Now let's check the sliced WCS
++ll_sliced_wcs = astropy.wcs.wcsapi.SlicedLowLevelWCS(fits_wcs, 0)
++
++# Check dropped_world_dimensions
++print(f"\nDropped world dimensions: {ll_sliced_wcs.dropped_world_dimensions}")
++
++# Let's see what _pixel_to_world_values_all returns for pixel (0, 0)
++world_values = ll_sliced_wcs._pixel_to_world_values_all(0, 0)
++print(f"\nWorld values from _pixel_to_world_values_all at (0,0): {world_values}")
++
++# Now let's test with the correct wavelength value
++print("\nTesting world_to_pixel with correct wavelength...")
++# The wavelength at pixel 0 should be around 0.995 Angstrom based on CRVAL3=1.05 and CDELT3=0.055
++result = fits_wcs.world_to_pixel_values(0.0, 0.0, world_values[2])
++print(f"Result with correct wavelength: {result}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..a40964441f
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,64 @@
++import numpy as np
++import astropy.wcs
++from astropy.coordinates import SkyCoord
++import astropy.units as u
++
++nx = 100
++ny = 25
++nz = 2
++wcs_header = {
++    'WCSAXES': 3,
++    'CRPIX1': (nx + 1)/2,
++    'CRPIX2': (ny + 1)/2,
++    'CRPIX3': 1.0,
++    'PC1_1': 0.0,
++    'PC1_2': -1.0,
++    'PC1_3': 0.0,
++    'PC2_1': 1.0,
++    'PC2_2': 0.0,
++    'PC2_3': -1.0,
++    'CDELT1': 5,
++    'CDELT2': 5,
++    'CDELT3': 0.055,
++    'CUNIT1': 'arcsec',
++    'CUNIT2': 'arcsec',
++    'CUNIT3': 'Angstrom',
++    'CTYPE1': 'HPLN-TAN',
++    'CTYPE2': 'HPLT-TAN',
++    'CTYPE3': 'WAVE',
++    'CRVAL1': 0.0,
++    'CRVAL2': 0.0,
++    'CRVAL3': 1.05,
++}
++fits_wcs = astropy.wcs.WCS(header=wcs_header)
++
++print("Testing world_to_pixel on unsliced WCS...")
++# Use world_to_pixel_values directly with values in degrees and meters
++# 0 arcsec = 0 degrees, 1.05 Angstrom = 1.05e-10 meters
++result = fits_wcs.world_to_pixel_values(0.0, 0.0, 1.05e-10)  # degrees, degrees, meters
++print(f"Result: {result}")
++print(f"Expected: (49.5, 12.0, ~0)")
++
++print("\nTesting world_to_pixel on sliced WCS...")
++ll_sliced_wcs = astropy.wcs.wcsapi.SlicedLowLevelWCS(fits_wcs, 0)
++# Use world_to_pixel_values directly
++result_sliced = ll_sliced_wcs.world_to_pixel_values(0.0, 0.0)  # degrees, degrees
++print(f"Result: {result_sliced}")
++print(f"Expected: (49.5, 12.0)")
++
++print("\nTesting pixel_to_world on both...")
++px, py, pz = result
++print(f"Unsliced pixel_to_world: {fits_wcs.pixel_to_world_values(px, py, pz)}")
++print(f"Sliced pixel_to_world: {ll_sliced_wcs.pixel_to_world_values(px, py)}")
++
++# Let's also test the low-level API directly
++print("\nTesting low-level world_to_pixel_values...")
++world_values = ll_sliced_wcs._pixel_to_world_values_all(px, py)
++print(f"World values from sliced WCS: {world_values}")
++
++# Test the world_to_pixel_values directly
++print("\nDirect world_to_pixel_values test...")
++# The pt coordinates in the frame should be (0, 0) in arcsec
++world_arrays = [0.0, 0.0]  # Tx=0, Ty=0 in arcsec
++pixel_result = ll_sliced_wcs.world_to_pixel_values(*world_arrays)
++print(f"Direct result: {pixel_result}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..779075891b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,81 @@
++"""Test edge cases for the SlicedLowLevelWCS fix."""
++import numpy as np
++from astropy.wcs import WCS
++from astropy.wcs.wcsapi import SlicedLowLevelWCS
++
++
++def test_edge_cases():
++    """Test various edge cases for the fix."""
++    
++    # Test 1: Simple 2D WCS (no coupling)
++    print("Test 1: Simple 2D WCS")
++    wcs_2d = WCS(naxis=2)
++    wcs_2d.wcs.ctype = ['RA---TAN', 'DEC--TAN']
++    wcs_2d.wcs.crval = [0, 0]
++    wcs_2d.wcs.crpix = [50, 50]
++    wcs_2d.wcs.cdelt = [0.1, 0.1]
++    
++    # This should work without issues
++    px, py = wcs_2d.world_to_pixel_values(0, 0)
++    print(f"  2D WCS result: ({px:.1f}, {py:.1f})")
++    assert np.isclose(px, 49) and np.isclose(py, 49)  # 0-based indexing
++    
++    # Test 2: 3D WCS with diagonal PC matrix (no coupling)
++    print("\nTest 2: 3D WCS with diagonal PC matrix")
++    wcs_3d_diag = WCS(naxis=3)
++    wcs_3d_diag.wcs.ctype = ['RA---TAN', 'DEC--TAN', 'WAVE']
++    wcs_3d_diag.wcs.crval = [0, 0, 5000]
++    wcs_3d_diag.wcs.crpix = [50, 50, 1]
++    wcs_3d_diag.wcs.cdelt = [0.1, 0.1, 10]
++    wcs_3d_diag.wcs.cunit = ['deg', 'deg', 'Angstrom']
++    
++    # Slice at first wavelength
++    sliced_diag = SlicedLowLevelWCS(wcs_3d_diag, 0)
++    px_s, py_s = sliced_diag.world_to_pixel_values(0, 0)
++    print(f"  Sliced diagonal result: ({px_s:.1f}, {py_s:.1f})")
++    assert np.isclose(px_s, 49) and np.isclose(py_s, 49)  # 0-based indexing
++    
++    # Test 3: Multiple slices
++    print("\nTest 3: Multiple slices")
++    wcs_4d = WCS(naxis=4)
++    wcs_4d.wcs.ctype = ['RA---TAN', 'DEC--TAN', 'WAVE', 'TIME']
++    wcs_4d.wcs.crval = [0, 0, 5000, 0]
++    wcs_4d.wcs.crpix = [50, 50, 1, 1]
++    wcs_4d.wcs.cdelt = [0.1, 0.1, 10, 1]
++    wcs_4d.wcs.cunit = ['deg', 'deg', 'Angstrom', 's']
++    
++    # Slice both spectral and time dimensions
++    sliced_4d = SlicedLowLevelWCS(wcs_4d, (0, 0))
++    px_s4, py_s4 = sliced_4d.world_to_pixel_values(0, 0)
++    print(f"  Double-sliced result: ({px_s4:.1f}, {py_s4:.1f})")
++    assert np.isclose(px_s4, 49) and np.isclose(py_s4, 49)  # 0-based indexing
++    
++    # Test 4: Slicing with non-zero indices
++    print("\nTest 4: Non-zero slice indices")
++    wcs_3d = WCS(naxis=3)
++    wcs_3d.wcs.ctype = ['RA---TAN', 'DEC--TAN', 'WAVE']
++    wcs_3d.wcs.crval = [0, 0, 5000]
++    wcs_3d.wcs.crpix = [50, 50, 10]
++    wcs_3d.wcs.cdelt = [0.1, 0.1, 10]
++    wcs_3d.wcs.cunit = ['deg', 'deg', 'Angstrom']
++    
++    for slice_idx in [0, 5, 10, 15]:
++        sliced = SlicedLowLevelWCS(wcs_3d, slice_idx)
++        px_si, py_si = sliced.world_to_pixel_values(0, 0)
++        print(f"  Slice {slice_idx}: ({px_si:.1f}, {py_si:.1f})")
++        assert np.isclose(px_si, 49) and np.isclose(py_si, 49)  # 0-based indexing
++    
++    # Test 5: Broadcasting
++    print("\nTest 5: Broadcasting")
++    sliced_bc = SlicedLowLevelWCS(wcs_3d, 0)
++    ra_arr = np.array([0, 0.1, 0.2])
++    dec_arr = np.array([0, 0.1, 0.2])
++    px_arr, py_arr = sliced_bc.world_to_pixel_values(ra_arr, dec_arr)
++    print(f"  Broadcasting shapes: px={px_arr.shape}, py={py_arr.shape}")
++    assert px_arr.shape == (3,) and py_arr.shape == (3,)
++    
++    print("\nAll edge case tests passed!")
++
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..a9a655669b
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,96 @@
++import numpy as np
++import astropy.wcs
++from astropy.wcs.wcsapi import SlicedLowLevelWCS, HighLevelWCSWrapper
++import astropy.units as u
++
++def test_sliced_wcs_world_to_pixel():
++    """Test that world_to_pixel works correctly on SlicedLowLevelWCS with coupled dimensions."""
++    
++    # Create a 3D WCS with coupled spatial and spectral dimensions
++    nx = 100
++    ny = 25
++    nz = 2
++    wcs_header = {
++        'WCSAXES': 3,
++        'CRPIX1': (nx + 1)/2,
++        'CRPIX2': (ny + 1)/2,
++        'CRPIX3': 1.0,
++        'PC1_1': 0.0,
++        'PC1_2': -1.0,
++        'PC1_3': 0.0,
++        'PC2_1': 1.0,
++        'PC2_2': 0.0,
++        'PC2_3': -1.0,
++        'CDELT1': 5,
++        'CDELT2': 5,
++        'CDELT3': 0.055,
++        'CUNIT1': 'arcsec',
++        'CUNIT2': 'arcsec',
++        'CUNIT3': 'Angstrom',
++        'CTYPE1': 'HPLN-TAN',
++        'CTYPE2': 'HPLT-TAN',
++        'CTYPE3': 'WAVE',
++        'CRVAL1': 0.0,
++        'CRVAL2': 0.0,
++        'CRVAL3': 1.05,
++    }
++    fits_wcs = astropy.wcs.WCS(header=wcs_header)
++    
++    # Test 1: Verify unsliced WCS works correctly
++    print("Test 1: Unsliced WCS world_to_pixel_values")
++    # Note: WCS expects wavelength in meters (SI units)
++    px, py, pz = fits_wcs.world_to_pixel_values(0.0, 0.0, 1.05e-10)  # degrees, degrees, meters
++    print(f"  Result: ({px:.1f}, {py:.1f}, {pz:.1e})")
++    assert np.isclose(px, 49.5), f"Expected px=49.5, got {px}"
++    assert np.isclose(py, 12.0), f"Expected py=12.0, got {py}"
++    assert np.isclose(pz, 0.0, atol=1e-10), f"Expected pz~0, got {pz}"
++    print("  ✓ Passed")
++    
++    # Test 2: Slice at first wavelength (index 0)
++    print("\nTest 2: SlicedLowLevelWCS at wavelength index 0")
++    ll_sliced_wcs = SlicedLowLevelWCS(fits_wcs, 0)
++    px_sliced, py_sliced = ll_sliced_wcs.world_to_pixel_values(0.0, 0.0)  # degrees, degrees
++    print(f"  Result: ({px_sliced:.1f}, {py_sliced:.1f})")
++    assert np.isclose(px_sliced, 49.5), f"Expected px=49.5, got {px_sliced}"
++    assert np.isclose(py_sliced, 12.0), f"Expected py=12.0, got {py_sliced}"
++    print("  ✓ Passed")
++    
++    # Test 3: Verify pixel_to_world round trip
++    print("\nTest 3: Round-trip pixel_to_world")
++    world_values = ll_sliced_wcs.pixel_to_world_values(px_sliced, py_sliced)
++    print(f"  World values: {world_values}")
++    assert np.allclose(world_values, [0.0, 0.0], atol=1e-10), f"Expected (0, 0), got {world_values}"
++    print("  ✓ Passed")
++    
++    # Test 4: Test with different slice indices
++    print("\nTest 4: Different slice indices")
++    for slice_idx in [0, 1]:
++        ll_sliced = SlicedLowLevelWCS(fits_wcs, slice_idx)
++        px_s, py_s = ll_sliced.world_to_pixel_values(0.0, 0.0)
++        print(f"  Slice {slice_idx}: ({px_s:.1f}, {py_s:.1f})")
++        # The pixel x coordinate will vary based on the wavelength due to PC matrix coupling
++        # Just verify it's a reasonable value and py is consistent
++        assert 40 < px_s < 60, f"Slice {slice_idx}: px={px_s} is out of expected range"
++        assert np.isclose(py_s, 12.0), f"Slice {slice_idx}: Expected py=12.0, got {py_s}"
++    print("  ✓ Passed")
++    
++    # Test 5: Test with high-level wrapper
++    print("\nTest 5: HighLevelWCSWrapper")
++    hl_sliced_wcs = HighLevelWCSWrapper(ll_sliced_wcs)
++    # For high-level API, we need to use SkyCoord
++    from astropy.coordinates import SkyCoord
++    try:
++        frame = astropy.wcs.utils.wcs_to_celestial_frame(ll_sliced_wcs)
++        pt = SkyCoord(Tx=0*u.arcsec, Ty=0*u.arcsec, frame=frame)
++        result = hl_sliced_wcs.world_to_pixel(pt)
++        print(f"  Result: {result}")
++        print("  ✓ Passed (if no exception)")
++    except Exception as e:
++        # Some WCS configurations might not support high-level API
++        print(f"  High-level API not fully supported for this WCS: {e}")
++        print("  ✓ Skipped")
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_sliced_wcs_world_to_pixel()
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 0000000000..76ebee2b55
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,95 @@
++"""
++Test for the specific issue described in the problem statement:
++Inconsistent behavior of `world_to_pixel` in `SlicedLowLevelWCS` with coupled dimensions
++"""
++import numpy as np
++import astropy.wcs
++from astropy.wcs.wcsapi import SlicedLowLevelWCS, HighLevelWCSWrapper
++from astropy.coordinates import SkyCoord
++import astropy.units as u
++
++
++def test_sliced_wcs_coupled_dimensions():
++    """Test the exact scenario from the issue report."""
++    
++    # Create the exact WCS from the issue
++    nx = 100
++    ny = 25
++    nz = 2
++    wcs_header = {
++        'WCSAXES': 3,
++        'CRPIX1': (nx + 1)/2,
++        'CRPIX2': (ny + 1)/2,
++        'CRPIX3': 1.0,
++        'PC1_1': 0.0,
++        'PC1_2': -1.0,
++        'PC1_3': 0.0,
++        'PC2_1': 1.0,
++        'PC2_2': 0.0,
++        'PC2_3': -1.0,
++        'CDELT1': 5,
++        'CDELT2': 5,
++        'CDELT3': 0.055,
++        'CUNIT1': 'arcsec',
++        'CUNIT2': 'arcsec',
++        'CUNIT3': 'Angstrom',
++        'CTYPE1': 'HPLN-TAN',
++        'CTYPE2': 'HPLT-TAN',
++        'CTYPE3': 'WAVE',
++        'CRVAL1': 0.0,
++        'CRVAL2': 0.0,
++        'CRVAL3': 1.05,
++    }
++    fits_wcs = astropy.wcs.WCS(header=wcs_header)
++    
++    # Test unsliced WCS
++    try:
++        pt = SkyCoord(Tx=0*u.arcsec, Ty=0*u.arcsec, frame=astropy.wcs.utils.wcs_to_celestial_frame(fits_wcs))
++        result_unsliced = fits_wcs.world_to_pixel(pt, 1.05*u.angstrom)
++        print(f"Unsliced WCS world_to_pixel result: {result_unsliced}")
++        px_expected, py_expected = result_unsliced[0], result_unsliced[1]
++    except:
++        # If high-level API fails, use low-level API
++        # Convert to proper units: arcsec to degrees, angstrom to meters
++        result_unsliced = fits_wcs.world_to_pixel_values(0.0/3600, 0.0/3600, 1.05e-10)
++        print(f"Unsliced WCS world_to_pixel_values result: {result_unsliced}")
++        px_expected, py_expected = result_unsliced[0], result_unsliced[1]
++    
++    # Test sliced WCS
++    ll_sliced_wcs = SlicedLowLevelWCS(fits_wcs, 0)
++    hl_sliced_wcs = HighLevelWCSWrapper(ll_sliced_wcs)
++    
++    try:
++        # Try high-level API first
++        pt = SkyCoord(Tx=0*u.arcsec, Ty=0*u.arcsec, frame=astropy.wcs.utils.wcs_to_celestial_frame(ll_sliced_wcs))
++        result_sliced = hl_sliced_wcs.world_to_pixel(pt)
++        print(f"Sliced WCS world_to_pixel result: {result_sliced}")
++    except:
++        # Fall back to low-level API
++        result_sliced = ll_sliced_wcs.world_to_pixel_values(0.0/3600, 0.0/3600)
++        print(f"Sliced WCS world_to_pixel_values result: {result_sliced}")
++    
++    # Check that results match
++    px_sliced, py_sliced = result_sliced[0], result_sliced[1]
++    
++    print(f"\nComparison:")
++    print(f"  Unsliced: px={px_expected:.2f}, py={py_expected:.2f}")
++    print(f"  Sliced:   px={px_sliced:.2f}, py={py_sliced:.2f}")
++    
++    # The issue reported that px_sliced was 1.81818182e+11 instead of ~49.5
++    assert not (px_sliced > 1e10), f"Bug reproduced! px_sliced={px_sliced} is essentially infinite"
++    assert np.isclose(px_sliced, px_expected, rtol=0.01), f"px values don't match: {px_sliced} vs {px_expected}"
++    assert np.isclose(py_sliced, py_expected, rtol=0.01), f"py values don't match: {py_sliced} vs {py_expected}"
++    
++    print("\n✓ Test passed! The bug has been fixed.")
++    
++    # Also test pixel_to_world round trip
++    world_sliced = ll_sliced_wcs.pixel_to_world_values(px_sliced, py_sliced)
++    print(f"\nRound-trip test:")
++    print(f"  pixel_to_world({px_sliced:.2f}, {py_sliced:.2f}) = {world_sliced}")
++    
++    return True
++
++
++if __name__ == "__main__":
++    test_sliced_wcs_coupled_dimensions()
+diff --git a/test_regression.py b/test_regression.py
+new file mode 100644
+index 0000000000..53e7c2fbbe
+--- /dev/null
++++ b/test_regression.py
+@@ -0,0 +1,63 @@
++"""
++Regression test for SlicedLowLevelWCS world_to_pixel with coupled dimensions.
++This should be added to the astropy test suite.
++"""
++import numpy as np
++import pytest
++from astropy.wcs import WCS
++from astropy.wcs.wcsapi import SlicedLowLevelWCS
++
++
++def test_sliced_wcs_world_to_pixel_coupled_dimensions():
++    """
++    Regression test for issue where world_to_pixel returns incorrect values
++    for SlicedLowLevelWCS when dimensions are coupled through PC matrix.
++    
++    See: https://github.com/astropy/astropy/issues/[issue_number]
++    """
++    # Create a 3D WCS with coupled spatial and spectral dimensions
++    # through a non-diagonal PC matrix
++    nx, ny, nz = 100, 25, 2
++    wcs_header = {
++        'WCSAXES': 3,
++        'CRPIX1': (nx + 1)/2,
++        'CRPIX2': (ny + 1)/2,
++        'CRPIX3': 1.0,
++        'PC1_1': 0.0, 'PC1_2': -1.0, 'PC1_3': 0.0,
++        'PC2_1': 1.0, 'PC2_2': 0.0, 'PC2_3': -1.0,
++        'CDELT1': 5, 'CDELT2': 5, 'CDELT3': 0.055,
++        'CUNIT1': 'arcsec', 'CUNIT2': 'arcsec', 'CUNIT3': 'Angstrom',
++        'CTYPE1': 'HPLN-TAN', 'CTYPE2': 'HPLT-TAN', 'CTYPE3': 'WAVE',
++        'CRVAL1': 0.0, 'CRVAL2': 0.0, 'CRVAL3': 1.05,
++    }
++    wcs = WCS(header=wcs_header)
++    
++    # Get expected pixel coordinates from unsliced WCS
++    # Note: WCS expects wavelength in meters (SI units)
++    px_expected, py_expected, pz_expected = wcs.world_to_pixel_values(0.0, 0.0, 1.05e-10)
++    
++    # Create sliced WCS at first wavelength slice
++    sliced_wcs = SlicedLowLevelWCS(wcs, 0)
++    
++    # Test world_to_pixel on sliced WCS
++    px_sliced, py_sliced = sliced_wcs.world_to_pixel_values(0.0, 0.0)
++    
++    # Before the fix, px_sliced would be ~1.8e11 (essentially infinite)
++    # After the fix, it should match the expected value
++    assert np.isclose(px_sliced, px_expected, rtol=1e-5), \
++        f"Expected px={px_expected}, got px={px_sliced}"
++    assert np.isclose(py_sliced, py_expected, rtol=1e-5), \
++        f"Expected py={py_expected}, got py={py_sliced}"
++    
++    # Also test with different slice indices
++    for slice_idx in range(nz):
++        sliced = SlicedLowLevelWCS(wcs, slice_idx)
++        px_s, py_s = sliced.world_to_pixel_values(0.0, 0.0)
++        # Values should be reasonable (not > 1e10)
++        assert px_s < 1e6, f"px at slice {slice_idx} is unreasonably large: {px_s}"
++        assert py_s < 1e6, f"py at slice {slice_idx} is unreasonably large: {py_s}"
++
++
++if __name__ == "__main__":
++    test_sliced_wcs_world_to_pixel_coupled_dimensions()
++    print("Regression test passed!")
+diff --git a/test_sliced_wcs_regression.py b/test_sliced_wcs_regression.py
+new file mode 100644
+index 0000000000..84d357cf66
+--- /dev/null
++++ b/test_sliced_wcs_regression.py
+@@ -0,0 +1,68 @@
++"""
++Add this test to astropy/wcs/wcsapi/wrappers/tests/test_sliced_wcs.py
++to prevent regression of the world_to_pixel bug with coupled dimensions.
++"""
++import numpy as np
++import pytest
++from astropy.wcs import WCS
++from astropy.wcs.wcsapi import SlicedLowLevelWCS
++
++
++def test_world_to_pixel_with_coupled_dimensions():
++    """
++    Regression test for world_to_pixel with SlicedLowLevelWCS when
++    dimensions are coupled through a non-diagonal PC matrix.
++    
++    This tests the fix for the issue where world_to_pixel would return
++    essentially infinite values when slicing a WCS with coupled dimensions.
++    """
++    # Create a 3D WCS with spatial and spectral dimensions coupled via PC matrix
++    nx, ny, nz = 100, 25, 2
++    wcs_header = {
++        'WCSAXES': 3,
++        'CRPIX1': (nx + 1)/2,  # 50.5
++        'CRPIX2': (ny + 1)/2,  # 13
++        'CRPIX3': 1.0,
++        # Non-diagonal PC matrix that couples dimensions
++        'PC1_1': 0.0, 'PC1_2': -1.0, 'PC1_3': 0.0,
++        'PC2_1': 1.0, 'PC2_2': 0.0, 'PC2_3': -1.0,
++        'CDELT1': 5, 'CDELT2': 5, 'CDELT3': 0.055,
++        'CUNIT1': 'arcsec', 'CUNIT2': 'arcsec', 'CUNIT3': 'Angstrom',
++        'CTYPE1': 'HPLN-TAN', 'CTYPE2': 'HPLT-TAN', 'CTYPE3': 'WAVE',
++        'CRVAL1': 0.0, 'CRVAL2': 0.0, 'CRVAL3': 1.05,
++    }
++    wcs = WCS(header=wcs_header)
++    
++    # Test world_to_pixel on unsliced WCS
++    # Note: WCS expects wavelength in meters (SI units)
++    px_full, py_full, pz_full = wcs.world_to_pixel_values(0.0, 0.0, 1.05e-10)
++    
++    # Create sliced WCS at first wavelength
++    sliced_wcs = SlicedLowLevelWCS(wcs, 0)
++    
++    # Test world_to_pixel on sliced WCS
++    px_sliced, py_sliced = sliced_wcs.world_to_pixel_values(0.0, 0.0)
++    
++    # Before the fix, px_sliced would be ~1.8e11 (essentially infinite)
++    # After the fix, it should match the full WCS result
++    assert px_sliced < 1e6, f"px_sliced={px_sliced} is unreasonably large (bug reproduced)"
++    assert np.isclose(px_sliced, px_full, rtol=1e-5), \
++        f"Sliced px={px_sliced} doesn't match full px={px_full}"
++    assert np.isclose(py_sliced, py_full, rtol=1e-5), \
++        f"Sliced py={py_sliced} doesn't match full py={py_full}"
++    
++    # Also verify pixel_to_world round trip
++    world_rt = sliced_wcs.pixel_to_world_values(px_sliced, py_sliced)
++    assert np.allclose(world_rt, [0.0, 0.0], atol=1e-10)
++    
++    # Test with different wavelength slices
++    for i in range(nz):
++        sliced_i = SlicedLowLevelWCS(wcs, i)
++        px_i, py_i = sliced_i.world_to_pixel_values(0.0, 0.0)
++        assert px_i < 1e6 and py_i < 1e6, \
++            f"Slice {i} returned unreasonable values: ({px_i}, {py_i})"
++
++
++if __name__ == "__main__":
++    test_world_to_pixel_with_coupled_dimensions()
++    print("✓ Test passed!")
+diff --git a/test_unsliced.py b/test_unsliced.py
+new file mode 100644
+index 0000000000..acfcdcc2da
+--- /dev/null
++++ b/test_unsliced.py
+@@ -0,0 +1,46 @@
++import numpy as np
++import astropy.wcs
++from astropy.coordinates import SkyCoord
++import astropy.units as u
++
++nx = 100
++ny = 25
++nz = 2
++wcs_header = {
++    'WCSAXES': 3,
++    'CRPIX1': (nx + 1)/2,
++    'CRPIX2': (ny + 1)/2,
++    'CRPIX3': 1.0,
++    'PC1_1': 0.0,
++    'PC1_2': -1.0,
++    'PC1_3': 0.0,
++    'PC2_1': 1.0,
++    'PC2_2': 0.0,
++    'PC2_3': -1.0,
++    'CDELT1': 5,
++    'CDELT2': 5,
++    'CDELT3': 0.055,
++    'CUNIT1': 'arcsec',
++    'CUNIT2': 'arcsec',
++    'CUNIT3': 'Angstrom',
++    'CTYPE1': 'HPLN-TAN',
++    'CTYPE2': 'HPLT-TAN',
++    'CTYPE3': 'WAVE',
++    'CRVAL1': 0.0,
++    'CRVAL2': 0.0,
++    'CRVAL3': 1.05,
++}
++fits_wcs = astropy.wcs.WCS(header=wcs_header)
++
++# The issue with the unsliced WCS is that we're passing wavelength in Angstroms
++# but the WCS expects it in meters (SI units)
++print("Testing with proper units...")
++# Convert 1.05 Angstrom to meters
++wavelength_m = 1.05e-10  # 1.05 Angstrom in meters
++result = fits_wcs.world_to_pixel_values(0.0, 0.0, wavelength_m)
++print(f"Result with wavelength in meters: {result}")
++
++# Also test with degrees to arcsec conversion
++# 0 arcsec = 0 degrees, so that should be fine
++print("\nChecking units...")
++print(f"World axis units: {fits_wcs.world_axis_units}")

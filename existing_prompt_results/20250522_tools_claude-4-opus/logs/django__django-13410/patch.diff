@@ -1,0 +1,515 @@
+diff --git a/django/core/files/locks.py b/django/core/files/locks.py
+index c46b00b905..4938347ea7 100644
+--- a/django/core/files/locks.py
++++ b/django/core/files/locks.py
+@@ -107,9 +107,15 @@ else:
+             return True
+     else:
+         def lock(f, flags):
+-            ret = fcntl.flock(_fd(f), flags)
+-            return ret == 0
++            try:
++                fcntl.flock(_fd(f), flags)
++                return True
++            except OSError:
++                return False
+ 
+         def unlock(f):
+-            ret = fcntl.flock(_fd(f), fcntl.LOCK_UN)
+-            return ret == 0
++            try:
++                fcntl.flock(_fd(f), fcntl.LOCK_UN)
++                return True
++            except OSError:
++                return False
+diff --git a/test_fcntl_return.py b/test_fcntl_return.py
+new file mode 100644
+index 0000000000..9ae224d085
+--- /dev/null
++++ b/test_fcntl_return.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python
++"""Test what fcntl.flock actually returns."""
++import fcntl
++import tempfile
++
++with tempfile.NamedTemporaryFile() as f:
++    # Test what flock returns on success
++    result = fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++    print(f"fcntl.flock return value on success: {result}")
++    print(f"Type: {type(result)}")
++    print(f"Is None: {result is None}")
++    
++    # Unlock
++    unlock_result = fcntl.flock(f.fileno(), fcntl.LOCK_UN)
++    print(f"fcntl.flock return value on unlock: {unlock_result}")
+diff --git a/test_locks_backward_compat.py b/test_locks_backward_compat.py
+new file mode 100644
+index 0000000000..915acd0bae
+--- /dev/null
++++ b/test_locks_backward_compat.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python
++"""Test backward compatibility of the locks fix."""
++import os
++import sys
++import tempfile
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from django.core.files import locks
++
++
++def test_backward_compatibility():
++    """Test that the fix maintains backward compatibility."""
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        temp_filename = f.name
++        f.write(b"test content")
++    
++    try:
++        # Test that return values are proper booleans
++        with open(temp_filename, 'rb') as f:
++            # Lock should return True
++            lock_result = locks.lock(f, locks.LOCK_EX | locks.LOCK_NB)
++            print(f"Lock result type: {type(lock_result)}")
++            print(f"Lock result value: {lock_result}")
++            assert isinstance(lock_result, bool)
++            assert lock_result is True
++            
++            # Code that checks with 'if lock_result:' should work
++            if lock_result:
++                print("Lock acquired (if check passed)")
++            else:
++                raise AssertionError("Lock should have been acquired")
++            
++            # Code that checks with 'if lock_result == True:' should work
++            if lock_result == True:
++                print("Lock acquired (== True check passed)")
++            else:
++                raise AssertionError("Lock should have been acquired")
++            
++            # Code that checks with 'if lock_result is True:' should work
++            if lock_result is True:
++                print("Lock acquired (is True check passed)")
++            else:
++                raise AssertionError("Lock should have been acquired")
++            
++            # Unlock
++            unlock_result = locks.unlock(f)
++            assert isinstance(unlock_result, bool)
++            assert unlock_result is True
++        
++        # Test failed lock returns False
++        with open(temp_filename, 'rb') as f1:
++            locks.lock(f1, locks.LOCK_EX | locks.LOCK_NB)
++            
++            with open(temp_filename, 'rb') as f2:
++                lock_result = locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB)
++                print(f"Failed lock result type: {type(lock_result)}")
++                print(f"Failed lock result value: {lock_result}")
++                assert isinstance(lock_result, bool)
++                assert lock_result is False
++                
++                # Code that checks with 'if not lock_result:' should work
++                if not lock_result:
++                    print("Lock not acquired (if not check passed)")
++                else:
++                    raise AssertionError("Lock should not have been acquired")
++            
++            locks.unlock(f1)
++        
++        print("All backward compatibility tests passed!")
++        
++    finally:
++        os.unlink(temp_filename)
++
++
++if __name__ == "__main__":
++    if os.name != 'nt':
++        try:
++            import fcntl
++            print("Testing backward compatibility on POSIX system")
++            test_backward_compatibility()
++        except ImportError:
++            print("fcntl not available")
++    else:
++        print("Windows system, skipping POSIX tests")
+diff --git a/test_locks_bug.py b/test_locks_bug.py
+new file mode 100644
+index 0000000000..e778fedf56
+--- /dev/null
++++ b/test_locks_bug.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++"""Test script to reproduce the locks.py bug."""
++import os
++import tempfile
++import sys
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from django.core.files import locks
++
++def test_lock_behavior():
++    """Test that lock() returns True on success and False on failure."""
++    # Create a temporary file
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        temp_filename = f.name
++        f.write(b"test content")
++    
++    try:
++        # Test exclusive lock
++        with open(temp_filename, 'rb') as f1:
++            # First lock should succeed
++            result1 = locks.lock(f1, locks.LOCK_EX | locks.LOCK_NB)
++            print(f"First exclusive lock (should be True): {result1}")
++            
++            # Try to acquire the same lock from another file handle (should fail)
++            with open(temp_filename, 'rb') as f2:
++                result2 = locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB)
++                print(f"Second exclusive lock (should be False): {result2}")
++            
++            # Unlock the first file
++            unlock_result = locks.unlock(f1)
++            print(f"Unlock result (should be True): {unlock_result}")
++        
++        # Test shared lock
++        with open(temp_filename, 'rb') as f1:
++            # First shared lock should succeed
++            result3 = locks.lock(f1, locks.LOCK_SH | locks.LOCK_NB)
++            print(f"First shared lock (should be True): {result3}")
++            
++            # Second shared lock should also succeed
++            with open(temp_filename, 'rb') as f2:
++                result4 = locks.lock(f2, locks.LOCK_SH | locks.LOCK_NB)
++                print(f"Second shared lock (should be True): {result4}")
++                
++                # Unlock both
++                unlock_result1 = locks.unlock(f1)
++                unlock_result2 = locks.unlock(f2)
++                print(f"Unlock results (both should be True): {unlock_result1}, {unlock_result2}")
++    
++    finally:
++        # Clean up
++        os.unlink(temp_filename)
++
++if __name__ == "__main__":
++    # Check if we're on a POSIX system with fcntl support
++    if os.name != 'nt':
++        try:
++            import fcntl
++            print("Running on POSIX system with fcntl support")
++            test_lock_behavior()
++        except ImportError:
++            print("fcntl not available, skipping test")
++    else:
++        print("Running on Windows, skipping POSIX-specific test")
+diff --git a/test_locks_comprehensive.py b/test_locks_comprehensive.py
+new file mode 100644
+index 0000000000..81d567ee89
+--- /dev/null
++++ b/test_locks_comprehensive.py
+@@ -0,0 +1,117 @@
++#!/usr/bin/env python
++"""Comprehensive test for the locks module fix."""
++import os
++import sys
++import tempfile
++import threading
++import time
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from django.core.files import locks
++
++
++def test_concurrent_locks():
++    """Test concurrent lock behavior."""
++    results = {'lock1': None, 'lock2': None}
++    
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        temp_filename = f.name
++        f.write(b"test content")
++    
++    def acquire_lock(name, filename, flags, hold_time=0.1):
++        """Helper function to acquire a lock in a thread."""
++        with open(filename, 'rb') as f:
++            result = locks.lock(f, flags)
++            results[name] = result
++            if result and hold_time:
++                time.sleep(hold_time)
++            if result:
++                locks.unlock(f)
++    
++    try:
++        # Test 1: Concurrent exclusive locks (should conflict)
++        results = {'lock1': None, 'lock2': None}
++        t1 = threading.Thread(target=acquire_lock, args=('lock1', temp_filename, locks.LOCK_EX | locks.LOCK_NB, 0.2))
++        t2 = threading.Thread(target=acquire_lock, args=('lock2', temp_filename, locks.LOCK_EX | locks.LOCK_NB, 0))
++        
++        t1.start()
++        time.sleep(0.05)  # Ensure first thread gets the lock
++        t2.start()
++        
++        t1.join()
++        t2.join()
++        
++        print(f"Concurrent exclusive locks - Lock 1: {results['lock1']}, Lock 2: {results['lock2']}")
++        assert results['lock1'] == True, "First exclusive lock should succeed"
++        assert results['lock2'] == False, "Second exclusive lock should fail"
++        
++        # Test 2: Concurrent shared locks (should both succeed)
++        results = {'lock1': None, 'lock2': None}
++        t1 = threading.Thread(target=acquire_lock, args=('lock1', temp_filename, locks.LOCK_SH | locks.LOCK_NB, 0.2))
++        t2 = threading.Thread(target=acquire_lock, args=('lock2', temp_filename, locks.LOCK_SH | locks.LOCK_NB, 0))
++        
++        t1.start()
++        time.sleep(0.05)  # Ensure first thread gets the lock
++        t2.start()
++        
++        t1.join()
++        t2.join()
++        
++        print(f"Concurrent shared locks - Lock 1: {results['lock1']}, Lock 2: {results['lock2']}")
++        assert results['lock1'] == True, "First shared lock should succeed"
++        assert results['lock2'] == True, "Second shared lock should succeed"
++        
++        print("All concurrent tests passed!")
++        
++    finally:
++        os.unlink(temp_filename)
++
++
++def test_lock_types():
++    """Test different lock type combinations."""
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        temp_filename = f.name
++        f.write(b"test content")
++    
++    try:
++        # Test blocking vs non-blocking
++        with open(temp_filename, 'rb') as f1:
++            # Get exclusive blocking lock
++            result1 = locks.lock(f1, locks.LOCK_EX)
++            print(f"Exclusive blocking lock: {result1}")
++            assert result1 == True
++            
++            # Try non-blocking exclusive from another handle
++            with open(temp_filename, 'rb') as f2:
++                result2 = locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB)
++                print(f"Non-blocking exclusive lock (should fail): {result2}")
++                assert result2 == False
++            
++            # Unlock
++            unlock_result = locks.unlock(f1)
++            print(f"Unlock: {unlock_result}")
++            assert unlock_result == True
++        
++        print("Lock type tests passed!")
++        
++    finally:
++        os.unlink(temp_filename)
++
++
++if __name__ == "__main__":
++    if os.name != 'nt':
++        try:
++            import fcntl
++            print("Running comprehensive lock tests on POSIX system")
++            print("=" * 50)
++            test_concurrent_locks()
++            print("=" * 50)
++            test_lock_types()
++            print("=" * 50)
++            print("All tests passed!")
++        except ImportError:
++            print("fcntl not available")
++    else:
++        print("Windows system, skipping POSIX tests")
+diff --git a/test_locks_edge_cases.py b/test_locks_edge_cases.py
+new file mode 100644
+index 0000000000..fe96961f46
+--- /dev/null
++++ b/test_locks_edge_cases.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python
++"""Test edge cases for file locking."""
++import os
++import sys
++import tempfile
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from django.core.files import locks
++
++def test_edge_cases():
++    """Test various edge cases."""
++    # Create a temporary file
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        temp_filename = f.name
++        f.write(b"test content")
++    
++    try:
++        # Test with file descriptor instead of file object
++        with open(temp_filename, 'rb') as f:
++            fd = f.fileno()
++            result = locks.lock(fd, locks.LOCK_EX | locks.LOCK_NB)
++            print(f"Lock with file descriptor: {result}")
++            
++            unlock_result = locks.unlock(fd)
++            print(f"Unlock with file descriptor: {unlock_result}")
++        
++        # Test with closed file (should raise exception)
++        with open(temp_filename, 'rb') as f:
++            pass  # File is now closed
++        
++        try:
++            result = locks.lock(f, locks.LOCK_EX | locks.LOCK_NB)
++            print(f"Lock on closed file: {result}")
++        except Exception as e:
++            print(f"Lock on closed file raised: {type(e).__name__}: {e}")
++        
++        # Test unlock without lock
++        with open(temp_filename, 'rb') as f:
++            result = locks.unlock(f)
++            print(f"Unlock without lock: {result}")
++            
++    finally:
++        # Clean up
++        os.unlink(temp_filename)
++
++if __name__ == "__main__":
++    if os.name != 'nt':
++        try:
++            import fcntl
++            print("Testing edge cases on POSIX system")
++            test_edge_cases()
++        except ImportError:
++            print("fcntl not available")
++    else:
++        print("Windows system, skipping POSIX tests")
+diff --git a/test_locks_proper.py b/test_locks_proper.py
+new file mode 100644
+index 0000000000..19b8f0baee
+--- /dev/null
++++ b/test_locks_proper.py
+@@ -0,0 +1,115 @@
++#!/usr/bin/env python
++"""
++Test file locking functionality.
++"""
++import os
++import sys
++import tempfile
++import unittest
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from django.core.files import locks
++
++
++class TestFileLocks(unittest.TestCase):
++    """Test file locking functionality on POSIX systems."""
++    
++    def setUp(self):
++        """Create a temporary file for testing."""
++        self.temp_file = tempfile.NamedTemporaryFile(delete=False)
++        self.temp_file.write(b"test content")
++        self.temp_file.close()
++        self.temp_filename = self.temp_file.name
++    
++    def tearDown(self):
++        """Clean up the temporary file."""
++        try:
++            os.unlink(self.temp_filename)
++        except OSError:
++            pass
++    
++    @unittest.skipIf(os.name == 'nt', "POSIX-specific test")
++    def test_exclusive_lock_success(self):
++        """Test that exclusive lock returns True on success."""
++        with open(self.temp_filename, 'rb') as f:
++            result = locks.lock(f, locks.LOCK_EX | locks.LOCK_NB)
++            self.assertTrue(result, "lock() should return True on success")
++            
++            # Unlock should also return True
++            unlock_result = locks.unlock(f)
++            self.assertTrue(unlock_result, "unlock() should return True on success")
++    
++    @unittest.skipIf(os.name == 'nt', "POSIX-specific test")
++    def test_exclusive_lock_conflict(self):
++        """Test that exclusive lock returns False when lock is already held."""
++        with open(self.temp_filename, 'rb') as f1:
++            # First lock should succeed
++            result1 = locks.lock(f1, locks.LOCK_EX | locks.LOCK_NB)
++            self.assertTrue(result1, "First lock should succeed")
++            
++            # Second lock should fail
++            with open(self.temp_filename, 'rb') as f2:
++                result2 = locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB)
++                self.assertFalse(result2, "Second exclusive lock should fail")
++            
++            # Cleanup
++            locks.unlock(f1)
++    
++    @unittest.skipIf(os.name == 'nt', "POSIX-specific test")
++    def test_shared_lock_success(self):
++        """Test that multiple shared locks can coexist."""
++        with open(self.temp_filename, 'rb') as f1:
++            # First shared lock should succeed
++            result1 = locks.lock(f1, locks.LOCK_SH | locks.LOCK_NB)
++            self.assertTrue(result1, "First shared lock should succeed")
++            
++            # Second shared lock should also succeed
++            with open(self.temp_filename, 'rb') as f2:
++                result2 = locks.lock(f2, locks.LOCK_SH | locks.LOCK_NB)
++                self.assertTrue(result2, "Second shared lock should succeed")
++                
++                # Unlock both
++                unlock1 = locks.unlock(f1)
++                unlock2 = locks.unlock(f2)
++                self.assertTrue(unlock1, "First unlock should succeed")
++                self.assertTrue(unlock2, "Second unlock should succeed")
++    
++    @unittest.skipIf(os.name == 'nt', "POSIX-specific test")
++    def test_shared_exclusive_conflict(self):
++        """Test that exclusive lock fails when shared lock is held."""
++        with open(self.temp_filename, 'rb') as f1:
++            # First get a shared lock
++            result1 = locks.lock(f1, locks.LOCK_SH | locks.LOCK_NB)
++            self.assertTrue(result1, "Shared lock should succeed")
++            
++            # Try to get exclusive lock (should fail)
++            with open(self.temp_filename, 'rb') as f2:
++                result2 = locks.lock(f2, locks.LOCK_EX | locks.LOCK_NB)
++                self.assertFalse(result2, "Exclusive lock should fail when shared lock is held")
++            
++            # Cleanup
++            locks.unlock(f1)
++    
++    @unittest.skipIf(os.name == 'nt', "POSIX-specific test")
++    def test_blocking_lock(self):
++        """Test blocking lock behavior (without LOCK_NB flag)."""
++        with open(self.temp_filename, 'rb') as f:
++            # Blocking lock should succeed and return True
++            result = locks.lock(f, locks.LOCK_EX)
++            self.assertTrue(result, "Blocking lock should return True on success")
++            
++            # Unlock
++            unlock_result = locks.unlock(f)
++            self.assertTrue(unlock_result, "unlock() should return True")
++
++
++if __name__ == '__main__':
++    # Check if we have fcntl support
++    try:
++        import fcntl
++        print("Running tests on POSIX system with fcntl support")
++        unittest.main(verbosity=2)
++    except ImportError:
++        print("fcntl not available, skipping POSIX-specific tests")

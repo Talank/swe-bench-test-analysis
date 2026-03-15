@@ -1,0 +1,253 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 88c9ca9f28..fcea1597ef 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -542,11 +542,7 @@ class Field(RegisterLookupMixin):
+         return NotImplemented
+ 
+     def __hash__(self):
+-        return hash((
+-            self.creation_counter,
+-            self.model._meta.app_label if hasattr(self, 'model') else None,
+-            self.model._meta.model_name if hasattr(self, 'model') else None,
+-        ))
++        return hash(self.creation_counter)
+ 
+     def __deepcopy__(self, memodict):
+         # We don't have to deepcopy very much here, since most things are not
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d71f5aabd0
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++"""Reproduce the Field.__hash__() mutability issue."""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.db import models
++
++# Create a field and store it in a dict
++f = models.CharField(max_length=200)
++print(f"Initial field hash: {hash(f)}")
++
++# Store field in dict
++d = {f: 1}
++print(f"Field stored in dict: {f in d}")
++
++# Define a model class using the field
++class Book(models.Model):
++    title = f
++    
++    class Meta:
++        app_label = 'test_app'
++
++print(f"Field hash after model assignment: {hash(f)}")
++
++# Check if we can find the field using the original hash
++print(f"Field still in dict? {f in d}")
++
++# Let's also check what happens if we try to access the dict
++try:
++    value = d[f]
++    print(f"SUCCESS: Can access dict value: {value}")
++except KeyError:
++    print("FAILURE: KeyError when trying to access field in dict")
++
++# This should pass but currently fails
++try:
++    assert f in d
++    print("SUCCESS: Field is still in dict after model assignment")
++except AssertionError:
++    print("FAILURE: Field is no longer in dict after model assignment")
+diff --git a/test_field_equality.py b/test_field_equality.py
+new file mode 100644
+index 0000000000..399e13a8cb
+--- /dev/null
++++ b/test_field_equality.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++"""Test that Field equality and ordering work correctly after hash fix."""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.db import models
++
++
++class AbstractModel(models.Model):
++    field = models.IntegerField()
++
++    class Meta:
++        abstract = True
++        app_label = 'test_app'
++
++
++class InheritAbstractModel1(AbstractModel):
++    class Meta:
++        app_label = 'test_app'
++
++
++class InheritAbstractModel2(AbstractModel):
++    class Meta:
++        app_label = 'test_app'
++
++
++abstract_model_field = AbstractModel._meta.get_field('field')
++inherit1_model_field = InheritAbstractModel1._meta.get_field('field')
++inherit2_model_field = InheritAbstractModel2._meta.get_field('field')
++
++print("Testing equality:")
++print(f"abstract_model_field == inherit1_model_field: {abstract_model_field == inherit1_model_field}")
++print(f"abstract_model_field == inherit2_model_field: {abstract_model_field == inherit2_model_field}")
++print(f"inherit1_model_field == inherit2_model_field: {inherit1_model_field == inherit2_model_field}")
++
++print("\nTesting ordering:")
++print(f"abstract_model_field < inherit1_model_field: {abstract_model_field < inherit1_model_field}")
++print(f"abstract_model_field < inherit2_model_field: {abstract_model_field < inherit2_model_field}")
++print(f"inherit1_model_field < inherit2_model_field: {inherit1_model_field < inherit2_model_field}")
++
++print("\nTesting hash values:")
++print(f"hash(abstract_model_field): {hash(abstract_model_field)}")
++print(f"hash(inherit1_model_field): {hash(inherit1_model_field)}")
++print(f"hash(inherit2_model_field): {hash(inherit2_model_field)}")
++
++print("\nField details:")
++print(f"abstract_model_field.creation_counter: {abstract_model_field.creation_counter}")
++print(f"inherit1_model_field.creation_counter: {inherit1_model_field.creation_counter}")
++print(f"inherit2_model_field.creation_counter: {inherit2_model_field.creation_counter}")
+diff --git a/test_field_hash_immutability.py b/test_field_hash_immutability.py
+new file mode 100644
+index 0000000000..460a2de2de
+--- /dev/null
++++ b/test_field_hash_immutability.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python
++"""Test that Field.__hash__() is immutable when field is assigned to a model."""
++
++import django
++from django.conf import settings
++from django.test import SimpleTestCase
++
++# Configure Django settings
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.db import models
++
++
++class FieldHashImmutabilityTest(SimpleTestCase):
++    def test_field_hash_immutable_after_model_assignment(self):
++        """Field hash should not change when assigned to a model."""
++        # Create a field
++        f = models.CharField(max_length=200)
++        initial_hash = hash(f)
++        
++        # Store field in dict
++        d = {f: 1}
++        
++        # Define a model class using the field
++        class TestModel(models.Model):
++            title = f
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        # Hash should remain the same
++        self.assertEqual(hash(f), initial_hash)
++        
++        # Field should still be in dict
++        self.assertIn(f, d)
++        
++        # Should be able to access the value
++        self.assertEqual(d[f], 1)
++
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/tests/model_fields/tests.py b/tests/model_fields/tests.py
+index 5208b40dc9..2981522c6e 100644
+--- a/tests/model_fields/tests.py
++++ b/tests/model_fields/tests.py
+@@ -128,9 +128,34 @@ class BasicFieldTests(SimpleTestCase):
+         self.assertLess(abstract_model_field, inherit2_model_field)
+         self.assertLess(inherit1_model_field, inherit2_model_field)
+ 
+-        self.assertNotEqual(hash(abstract_model_field), hash(inherit1_model_field))
+-        self.assertNotEqual(hash(abstract_model_field), hash(inherit2_model_field))
+-        self.assertNotEqual(hash(inherit1_model_field), hash(inherit2_model_field))
++        # Note: Fields with the same creation_counter will have the same hash,
++        # even if they belong to different models. This is correct behavior
++        # as hash immutability is more important than hash uniqueness.
++        # The equality checks above ensure fields from different models
++        # are still considered different.
++
++    def test_field_hash_immutability(self):
++        """Field hash should not change when assigned to a model."""
++        # Create a field
++        f = models.CharField(max_length=200)
++        initial_hash = hash(f)
++        
++        # Store field in dict before model assignment
++        d = {f: 'value'}
++        
++        # Define a model class using the field
++        class TestModel(models.Model):
++            title = f
++            
++            class Meta:
++                app_label = 'model_fields'
++        
++        # Hash should remain the same after model assignment
++        self.assertEqual(hash(f), initial_hash)
++        
++        # Field should still be accessible in dict
++        self.assertIn(f, d)
++        self.assertEqual(d[f], 'value')
+ 
+ 
+ class ChoicesTests(SimpleTestCase):

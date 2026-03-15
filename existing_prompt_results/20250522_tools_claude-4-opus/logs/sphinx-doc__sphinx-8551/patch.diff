@@ -1,0 +1,567 @@
+diff --git a/sphinx/domains/python.py b/sphinx/domains/python.py
+index 79d7e4f46..8a2c10576 100644
+--- a/sphinx/domains/python.py
++++ b/sphinx/domains/python.py
+@@ -1289,6 +1289,15 @@ class PythonDomain(Domain):
+             matches.append((newname, self.objects[newname]))
+         return matches
+ 
++    def process_field_xref(self, pnode: pending_xref) -> None:
++        """Process a pending xref created in a doc field.
++        Attach the current module and class info to the pending_xref node,
++        and set refspecific=True to search in the current scope first.
++        """
++        pnode['py:module'] = self.env.ref_context.get('py:module')
++        pnode['py:class'] = self.env.ref_context.get('py:class')
++        pnode['refspecific'] = True
++
+     def resolve_xref(self, env: BuildEnvironment, fromdocname: str, builder: Builder,
+                      type: str, target: str, node: pending_xref, contnode: Element
+                      ) -> Element:
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..bc20d5564
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,130 @@
++"""Test edge cases for field xref resolution."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx import addnodes
++
++def test_edge_cases():
++    """Test various edge cases for field xref resolution."""
++    
++    # Create temporary directory structure
++    temp_dir = tempfile.mkdtemp()
++    src_dir = os.path.join(temp_dir, 'source')
++    build_dir = os.path.join(temp_dir, 'build')
++    os.makedirs(src_dir)
++    
++    # Create test content with various edge cases
++    with open(os.path.join(src_dir, 'conf.py'), 'w') as f:
++        f.write("")
++    
++    with open(os.path.join(src_dir, 'index.rst'), 'w') as f:
++        f.write("""
++.. py:class:: A
++   
++   Top-level class A.
++
++.. py:class:: mod.A
++   
++   Class A in module mod.
++
++.. py:class:: mod.submod.A
++   
++   Class A in module mod.submod.
++
++.. py:class:: other.A
++   
++   Class A in module other.
++
++Test 1: No current module (should prefer unqualified match)
++-----------------------------------------------------------
++
++.. py:function:: test1()
++
++   :param A a: Should link to top-level A
++   :rtype: A
++
++.. py:currentmodule:: mod
++
++Test 2: In module mod (should prefer mod.A)
++--------------------------------------------
++
++.. py:function:: test2()
++
++   :param A a: Should link to mod.A
++   :rtype: A
++
++.. py:currentmodule:: mod.submod
++
++Test 3: In module mod.submod (should prefer mod.submod.A)
++----------------------------------------------------------
++
++.. py:function:: test3()
++
++   :param A a: Should link to mod.submod.A
++   :rtype: A
++
++.. py:currentmodule:: other
++
++Test 4: In module other (should prefer other.A)
++------------------------------------------------
++
++.. py:function:: test4()
++
++   :param A a: Should link to other.A
++   :rtype: A
++
++.. py:currentmodule:: nonexistent
++
++Test 5: In non-existent module (should still find a match)
++-----------------------------------------------------------
++
++.. py:function:: test5()
++
++   :param A a: Should find some A (probably top-level)
++   :rtype: A
++
++Test 6: Explicit references should always work
++----------------------------------------------
++
++.. py:function:: test6()
++
++   :param mod.A a: Explicit ref to mod.A
++   :param mod.submod.A b: Explicit ref to mod.submod.A
++   :rtype: other.A
++""")
++    
++    # Build the docs
++    import sys
++    from io import StringIO
++    old_stderr = sys.stderr
++    sys.stderr = StringIO()
++    
++    try:
++        app = Sphinx(src_dir, src_dir, build_dir, build_dir + '/.doctrees', 'html', warning=sys.stderr)
++        app.build()
++        
++        # Get warnings from stderr
++        warning_output = sys.stderr.getvalue()
++        sys.stderr = old_stderr
++        
++        # Check that there are no warnings about ambiguous references
++        warnings = [w for w in warning_output.split('\n') 
++                    if 'more than one target found' in w]
++        
++        print(f"Found {len(warnings)} ambiguous reference warnings")
++        for w in warnings:
++            print(f"  {w}")
++        
++        # We expect NO warnings with our fix
++        assert len(warnings) == 0, f"Expected no ambiguous reference warnings, but found {len(warnings)}"
++        
++        print("\nAll edge case tests passed!")
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_field_xref_fix.py b/test_field_xref_fix.py
+new file mode 100644
+index 000000000..0aaa8d1be
+--- /dev/null
++++ b/test_field_xref_fix.py
+@@ -0,0 +1,159 @@
++"""Test that field xrefs resolve correctly with the fix."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.console import nocolor
++from bs4 import BeautifulSoup
++
++# Disable color output for cleaner test results
++nocolor()
++
++# Create test content
++TEST_CONTENT = """
++.. py:class:: mod.A
++   
++   Class A in module mod.
++
++.. py:class:: mod.submod.A
++   
++   Class A in module mod.submod.
++
++.. py:function:: f()
++
++   Function at module level.
++
++   - :py:class:`mod.A` - explicit ref to mod.A
++   - :py:class:`mod.submod.A` - explicit ref to mod.submod.A
++
++   :param mod.A a: Parameter with explicit module path
++   :param mod.submod.A b: Parameter with explicit submodule path
++   :rtype: mod.A
++   :rtype: mod.submod.A
++
++.. py:currentmodule:: mod
++
++.. py:function:: f()
++
++   Function in mod.
++
++   - :py:class:`A` - should link to mod.A
++   - :py:class:`mod.A` - explicit ref to mod.A
++   - :py:class:`mod.submod.A` - explicit ref to mod.submod.A
++
++   :param A a: Should link to mod.A
++   :param mod.A b: Explicit ref
++   :param mod.submod.A c: Explicit ref
++   :rtype: A
++
++.. py:currentmodule:: mod.submod
++
++.. py:function:: f()
++
++   Function in mod.submod.
++
++   - :py:class:`A` - should link to mod.submod.A
++   - :py:class:`mod.A` - explicit ref to mod.A
++   - :py:class:`mod.submod.A` - explicit ref to mod.submod.A
++
++   :param A a: Should link to mod.submod.A (not mod.A!)
++   :param mod.A b: Explicit ref
++   :param mod.submod.A c: Explicit ref
++   :rtype: A
++"""
++
++# Create temporary directory structure
++temp_dir = tempfile.mkdtemp()
++src_dir = os.path.join(temp_dir, 'source')
++build_dir = os.path.join(temp_dir, 'build')
++os.makedirs(src_dir)
++
++# Write test content
++with open(os.path.join(src_dir, 'index.rst'), 'w') as f:
++    f.write(TEST_CONTENT)
++
++# Write minimal conf.py
++with open(os.path.join(src_dir, 'conf.py'), 'w') as f:
++    f.write("""
++extensions = []
++master_doc = 'index'
++""")
++
++# Build with Sphinx
++import sys
++from io import StringIO
++
++# Capture warnings by redirecting stderr
++old_stderr = sys.stderr
++sys.stderr = StringIO()
++
++try:
++    app = Sphinx(src_dir, src_dir, build_dir, build_dir + '/.doctrees', 'html', warning=sys.stderr)
++    app.build()
++    
++    # Get warnings from stderr
++    warning_output = sys.stderr.getvalue()
++    sys.stderr = old_stderr
++    
++    # Check warnings
++    warnings = [line for line in warning_output.split('\n') if 'WARNING' in line and 'meta' not in line]
++    
++    print("Test Results:")
++    print("=" * 50)
++    
++    if warnings:
++        print("FAIL: Found warnings:")
++        for w in warnings:
++            print(f"  {w}")
++    else:
++        print("PASS: No ambiguous reference warnings found!")
++    
++    # Parse the HTML to verify correct linking
++    with open(os.path.join(build_dir, 'index.html'), 'r') as f:
++        html_content = f.read()
++    
++    soup = BeautifulSoup(html_content, 'html.parser')
++    
++    # Find all function signatures
++    functions = soup.find_all('dt', class_='sig sig-object py')
++    
++    print("\nVerifying link targets:")
++    print("-" * 50)
++    
++    # Check the third function (mod.submod.f)
++    if len(functions) >= 3:
++        # Find the parameter list after the third function
++        third_func = functions[2]
++        # Find the next dl element which contains the parameters
++        dl = third_func.find_next_sibling('dd')
++        if dl:
++            # Find parameter A
++            param_links = dl.find_all('a', class_='reference internal')
++            for link in param_links:
++                if link.text == 'A':
++                    href = link.get('href', '')
++                    if '#mod.submod.A' in href:
++                        print("PASS: Parameter 'A' in mod.submod.f() correctly links to mod.submod.A")
++                    elif '#mod.A' in href:
++                        print("FAIL: Parameter 'A' in mod.submod.f() incorrectly links to mod.A")
++                    else:
++                        print(f"UNKNOWN: Parameter 'A' links to: {href}")
++                    break
++            
++            # Also check the return type
++            rtype_links = dl.find_all('a', class_='reference internal')
++            for i, link in enumerate(rtype_links):
++                if i > 0 and rtype_links[i-1].text == 'rtype:' and link.text == 'A':
++                    href = link.get('href', '')
++                    if '#mod.submod.A' in href:
++                        print("PASS: Return type 'A' in mod.submod.f() correctly links to mod.submod.A")
++                    elif '#mod.A' in href:
++                        print("FAIL: Return type 'A' in mod.submod.f() incorrectly links to mod.A")
++                    else:
++                        print(f"UNKNOWN: Return type 'A' links to: {href}")
++                    break
++    
++finally:
++    # Cleanup
++    shutil.rmtree(temp_dir)
+diff --git a/test_field_xref_resolution.py b/test_field_xref_resolution.py
+new file mode 100644
+index 000000000..2154a3f76
+--- /dev/null
++++ b/test_field_xref_resolution.py
+@@ -0,0 +1,117 @@
++"""Test that field xrefs resolve correctly with proper scoping."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx import addnodes
++
++def test_field_xref_resolution():
++    """Test that :type: and :rtype: resolve references correctly based on current scope."""
++    
++    # Create temporary directory structure
++    temp_dir = tempfile.mkdtemp()
++    src_dir = os.path.join(temp_dir, 'source')
++    build_dir = os.path.join(temp_dir, 'build')
++    os.makedirs(src_dir)
++    
++    # Create test content
++    with open(os.path.join(src_dir, 'conf.py'), 'w') as f:
++        f.write("")
++    
++    with open(os.path.join(src_dir, 'index.rst'), 'w') as f:
++        f.write("""
++.. py:class:: mod.A
++   
++   Class A in module mod.
++
++.. py:class:: mod.submod.A
++   
++   Class A in module mod.submod.
++
++.. py:currentmodule:: mod
++
++.. py:function:: f1()
++
++   Function in mod.
++
++   :param A a: Should link to mod.A
++   :rtype: A
++
++.. py:currentmodule:: mod.submod
++
++.. py:function:: f2()
++
++   Function in mod.submod.
++
++   :param A a: Should link to mod.submod.A
++   :rtype: A
++""")
++    
++    # Build the docs
++    import sys
++    from io import StringIO
++    old_stderr = sys.stderr
++    sys.stderr = StringIO()
++    
++    try:
++        app = Sphinx(src_dir, src_dir, build_dir, build_dir + '/.doctrees', 'html', warning=sys.stderr)
++        app.build()
++        
++        # Get warnings from stderr
++        warning_output = sys.stderr.getvalue()
++        sys.stderr = old_stderr
++        
++        # Check that there are no warnings about ambiguous references
++        warnings = [w for w in warning_output.split('\n') 
++                    if 'more than one target found' in w]
++        assert len(warnings) == 0, f"Found ambiguous reference warnings: {warnings}"
++        
++        # Parse the doctree to verify correct linking
++        doctree = app.env.get_doctree('index')
++        
++        # Find all pending_xref nodes
++        xrefs = list(doctree.traverse(addnodes.pending_xref))
++        
++        # Find xrefs for parameter 'A' and return type 'A' in both functions
++        f1_xrefs = []
++        f2_xrefs = []
++        
++        current_module = None
++        for node in doctree.traverse():
++            # Track current module context
++            if isinstance(node, addnodes.desc) and node.get('domain') == 'py':
++                sig = node.children[0] if node.children else None
++                if sig and isinstance(sig, addnodes.desc_signature):
++                    module = sig.get('module')
++                    if module:
++                        current_module = module
++            
++            # Find xrefs for 'A'
++            if isinstance(node, addnodes.pending_xref) and node.get('reftarget') == 'A':
++                if current_module == 'mod':
++                    f1_xrefs.append(node)
++                elif current_module == 'mod.submod':
++                    f2_xrefs.append(node)
++        
++        # Verify that we found the xrefs
++        assert len(f1_xrefs) >= 2, f"Expected at least 2 xrefs for function in mod, found {len(f1_xrefs)}"
++        assert len(f2_xrefs) >= 2, f"Expected at least 2 xrefs for function in mod.submod, found {len(f2_xrefs)}"
++        
++        # Verify that the xrefs have the correct module context and refspecific=True
++        for xref in f1_xrefs:
++            assert xref.get('py:module') == 'mod', f"Expected py:module='mod', got {xref.get('py:module')}"
++            assert xref.get('refspecific') == True, f"Expected refspecific=True for xref in mod"
++        
++        for xref in f2_xrefs:
++            assert xref.get('py:module') == 'mod.submod', f"Expected py:module='mod.submod', got {xref.get('py:module')}"
++            assert xref.get('refspecific') == True, f"Expected refspecific=True for xref in mod.submod"
++        
++        print("All tests passed!")
++        
++    finally:
++        # Cleanup
++        shutil.rmtree(temp_dir)
++
++if __name__ == "__main__":
++    test_field_xref_resolution()
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 000000000..21fbd5b97
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,117 @@
++"""Test script to reproduce the issue with :type: and :rtype: ambiguous class lookup warnings."""
++
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.console import nocolor
++
++# Disable color output for cleaner test results
++nocolor()
++
++# Create test content
++TEST_CONTENT = """
++.. py:class:: mod.A
++.. py:class:: mod.submod.A
++
++.. py:function:: f()
++
++	- :py:class:`mod.A`
++	- :py:class:`mod.submod.A`
++
++	:param mod.A a:
++	:param mod.submod.A b:
++	:rtype: mod.A
++	:rtype: mod.submod.A
++
++.. py:currentmodule:: mod
++
++.. py:function:: f()
++
++	- :py:class:`A`
++	- :py:class:`mod.A`
++	- :py:class:`mod.submod.A`
++
++	:param A a:
++	:param mod.A b:
++	:param mod.submod.A c:
++	:rtype: A
++	:rtype: mod.A
++	:rtype: mod.submod.A
++
++.. py:currentmodule:: mod.submod
++
++.. py:function:: f()
++
++	- :py:class:`A`
++	- :py:class:`mod.A`
++	- :py:class:`mod.submod.A`
++
++	:param A a: BUG: links to mod.A instead of mod.submod.A
++	:param mod.A b:
++	:param mod.submod.A c:
++	:rtype: A
++	:rtype: mod.A
++	:rtype: mod.submod.A
++"""
++
++# Create temporary directory structure
++temp_dir = tempfile.mkdtemp()
++src_dir = os.path.join(temp_dir, 'source')
++build_dir = os.path.join(temp_dir, 'build')
++os.makedirs(src_dir)
++
++# Write test content
++with open(os.path.join(src_dir, 'index.rst'), 'w') as f:
++    f.write(TEST_CONTENT)
++
++# Write minimal conf.py
++with open(os.path.join(src_dir, 'conf.py'), 'w') as f:
++    f.write("""
++extensions = []
++master_doc = 'index'
++""")
++
++# Build with Sphinx
++import sys
++from io import StringIO
++
++# Capture warnings by redirecting stderr
++old_stderr = sys.stderr
++sys.stderr = StringIO()
++
++try:
++    app = Sphinx(src_dir, src_dir, build_dir, build_dir + '/.doctrees', 'html', warning=sys.stderr)
++    app.build()
++    
++    # Get warnings from stderr
++    warning_output = sys.stderr.getvalue()
++    sys.stderr = old_stderr
++    
++    print("Warnings found:")
++    if warning_output:
++        print(warning_output)
++    
++    # Check the generated HTML to see what the links resolve to
++    with open(os.path.join(build_dir, 'index.html'), 'r') as f:
++        html_content = f.read()
++        
++    # Look for the specific link we're interested in
++    import re
++    # Find links in the third function (mod.submod.f)
++    pattern = r'<dt class="sig sig-object py"[^>]*>\s*<span class="sig-name descname"[^>]*><span[^>]*>f</span></span>'
++    functions = list(re.finditer(pattern, html_content))
++    
++    if len(functions) >= 3:
++        # Get content after the third function
++        third_func_pos = functions[2].end()
++        content_after_third = html_content[third_func_pos:third_func_pos+2000]
++        
++        # Look for the parameter A link
++        param_a_match = re.search(r'<em class="property"[^>]*>param\s+</em><a[^>]*href="([^"]*)"[^>]*>A</a>', content_after_third)
++        if param_a_match:
++            print(f"\nThe parameter 'A' in mod.submod.f() links to: {param_a_match.group(1)}")
++            
++finally:
++    # Cleanup
++    shutil.rmtree(temp_dir)

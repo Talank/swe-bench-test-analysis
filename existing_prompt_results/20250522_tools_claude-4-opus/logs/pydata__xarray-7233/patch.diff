@@ -1,0 +1,223 @@
+diff --git a/test_coarsen_coords.py b/test_coarsen_coords.py
+new file mode 100644
+index 00000000..14f6eb43
+--- /dev/null
++++ b/test_coarsen_coords.py
+@@ -0,0 +1,25 @@
++import numpy as np
++import xarray as xr
++
++# Test case from the issue
++da = xr.DataArray(np.arange(24), dims=["time"])
++da = da.assign_coords(day=365 * da)
++ds = da.to_dataset(name="T")
++
++print("Original dataset:")
++print(ds)
++print("\nOriginal coords:", list(ds.coords))
++
++# Apply coarsen.construct
++result = ds.coarsen(time=12).construct(time=("year", "month"))
++
++print("\nResult after coarsen.construct:")
++print(result)
++print("\nResult coords:", list(result.coords))
++
++# Check if 'day' is still a coordinate
++if 'day' in result.coords:
++    print("\n✓ SUCCESS: 'day' is still a coordinate")
++else:
++    print("\n✗ FAILURE: 'day' was demoted to a data variable")
++    print("  Data variables:", list(result.data_vars))
+diff --git a/test_coarsen_coords_comprehensive.py b/test_coarsen_coords_comprehensive.py
+new file mode 100644
+index 00000000..ac12f635
+--- /dev/null
++++ b/test_coarsen_coords_comprehensive.py
+@@ -0,0 +1,68 @@
++import numpy as np
++import xarray as xr
++
++def test_coarsen_construct_preserves_coords():
++    """Test that coarsen.construct preserves all coordinates"""
++    
++    # Test 1: Non-dimensional coordinate that depends on the coarsened dimension
++    print("Test 1: Non-dimensional coordinate depending on coarsened dimension")
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da)
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "day should remain a coordinate"
++    print("✓ Test 1 passed")
++    
++    # Test 2: Multiple non-dimensional coordinates
++    print("\nTest 2: Multiple non-dimensional coordinates")
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da, hour=24 * da)
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "day should remain a coordinate"
++    assert "hour" in result.coords, "hour should remain a coordinate"
++    print("✓ Test 2 passed")
++    
++    # Test 3: Coordinate that doesn't depend on coarsened dimension
++    print("\nTest 3: Coordinate independent of coarsened dimension")
++    da = xr.DataArray(np.arange(24).reshape(6, 4), dims=["x", "y"])
++    da = da.assign_coords(x_label=("x", ["a", "b", "c", "d", "e", "f"]))
++    da = da.assign_coords(constant=42)  # scalar coordinate
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(x=3).construct(x=("new_x", "sub_x"))
++    assert "x_label" in result.coords, "x_label should remain a coordinate"
++    assert "constant" in result.coords, "constant should remain a coordinate"
++    print("✓ Test 3 passed")
++    
++    # Test 4: Dimension coordinates
++    print("\nTest 4: Dimension coordinates")
++    da = xr.DataArray(
++        np.arange(24), 
++        dims=["time"],
++        coords={"time": np.arange(24) * 10}
++    )
++    da = da.assign_coords(day=365 * da)
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "day should remain a coordinate"
++    # The original time coordinate gets reshaped but should still exist
++    assert "time" in result.coords, "time should remain a coordinate"
++    print("✓ Test 4 passed")
++    
++    # Test 5: DataArray case
++    print("\nTest 5: DataArray with coordinates")
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da)
++    
++    result = da.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "day should remain a coordinate in DataArray"
++    print("✓ Test 5 passed")
++    
++    print("\n✅ All tests passed!")
++
++if __name__ == "__main__":
++    test_coarsen_construct_preserves_coords()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..6836b582
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,63 @@
++import numpy as np
++import xarray as xr
++
++# Edge case: Ensure the fix works when variables are added to reshaped Dataset
++# in a different order than they appear in the original
++print("Testing edge case with variable ordering...")
++
++# Create a dataset with multiple coordinates
++ds = xr.Dataset(
++    {
++        "temperature": (["time", "x"], np.random.rand(24, 10)),
++        "pressure": (["time", "x"], np.random.rand(24, 10)),
++    },
++    coords={
++        "time": np.arange(24),
++        "x": np.arange(10),
++        "day": (["time"], np.arange(24) * 365),  # non-dimensional coord depending on time
++        "station": (["x"], [f"S{i}" for i in range(10)]),  # non-dimensional coord depending on x
++        "metadata": 42,  # scalar coordinate
++    }
++)
++
++print("Original coordinates:", list(ds.coords))
++
++# Apply coarsen on both dimensions
++result = ds.coarsen(time=12, x=5).construct(time=("year", "month"), x=("region", "subregion"))
++
++print("\nResult coordinates:", list(result.coords))
++
++# Check all coordinates are preserved
++for coord in ["time", "x", "day", "station", "metadata"]:
++    if coord in result.coords:
++        print(f"✓ {coord} is preserved as coordinate")
++    else:
++        print(f"✗ {coord} was demoted to data variable")
++
++print("\n" + "="*50 + "\n")
++
++# Another edge case: coordinate with same name as dimension being coarsened
++print("Testing coordinate with same name as coarsened dimension...")
++
++da = xr.DataArray(
++    np.arange(24), 
++    dims=["time"],
++    coords={
++        "time": np.arange(24) * 10,  # dimension coordinate
++        "time_label": (["time"], [f"T{i}" for i in range(24)])  # non-dimensional coordinate
++    }
++)
++ds = da.to_dataset(name="data")
++
++print("Original coordinates:", list(ds.coords))
++
++result = ds.coarsen(time=12).construct(time=("year", "month"))
++
++print("Result coordinates:", list(result.coords))
++
++# Both time and time_label should be coordinates
++for coord in ["time", "time_label"]:
++    if coord in result.coords:
++        print(f"✓ {coord} is preserved as coordinate")
++    else:
++        print(f"✗ {coord} was demoted to data variable")
+diff --git a/xarray/core/rolling.py b/xarray/core/rolling.py
+index c194ec08..73c2c736 100644
+--- a/xarray/core/rolling.py
++++ b/xarray/core/rolling.py
+@@ -973,7 +973,8 @@ class Coarsen(CoarsenArithmetic, Generic[T_Xarray]):
+             else:
+                 reshaped[key] = var
+ 
+-        should_be_coords = set(window_dim) & set(self.obj.coords)
++        # Preserve all original coordinates
++        should_be_coords = set(self.obj.coords)
+         result = reshaped.set_coords(should_be_coords)
+         if isinstance(self.obj, DataArray):
+             return self.obj._from_temp_dataset(result)
+diff --git a/xarray/tests/test_coarsen.py b/xarray/tests/test_coarsen.py
+index d4449985..e5cc7715 100644
+--- a/xarray/tests/test_coarsen.py
++++ b/xarray/tests/test_coarsen.py
+@@ -318,3 +318,30 @@ def test_coarsen_construct(dask: bool) -> None:
+ 
+     with pytest.raises(ValueError):
+         ds.coarsen(time=12).construct(time=("bar",))
++
++
++def test_coarsen_construct_keeps_non_dimensional_coords():
++    """Test that coarsen.construct preserves non-dimensional coordinates"""
++    # Test with Dataset
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da)
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "Non-dimensional coordinate 'day' should be preserved"
++    
++    # Test with multiple non-dimensional coordinates
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da, hour=24 * da)
++    ds = da.to_dataset(name="T")
++    
++    result = ds.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "Non-dimensional coordinate 'day' should be preserved"
++    assert "hour" in result.coords, "Non-dimensional coordinate 'hour' should be preserved"
++    
++    # Test with DataArray
++    da = xr.DataArray(np.arange(24), dims=["time"])
++    da = da.assign_coords(day=365 * da)
++    
++    result = da.coarsen(time=12).construct(time=("year", "month"))
++    assert "day" in result.coords, "Non-dimensional coordinate 'day' should be preserved in DataArray"

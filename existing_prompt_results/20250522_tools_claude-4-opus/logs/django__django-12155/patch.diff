@@ -1,0 +1,645 @@
+diff --git a/django/contrib/admindocs/utils.py b/django/contrib/admindocs/utils.py
+index 4c0e7e2a56..34d6bd45cf 100644
+--- a/django/contrib/admindocs/utils.py
++++ b/django/contrib/admindocs/utils.py
+@@ -34,7 +34,12 @@ def trim_docstring(docstring):
+         return ''
+     # Convert tabs to spaces and split into lines
+     lines = docstring.expandtabs().splitlines()
+-    indent = min(len(line) - len(line.lstrip()) for line in lines if line.lstrip())
++    # Skip the first line when calculating indent to handle docstrings
++    # where the first line contains text
++    if len(lines) > 1 and any(line.lstrip() for line in lines[1:]):
++        indent = min(len(line) - len(line.lstrip()) for line in lines[1:] if line.lstrip())
++    else:
++        indent = 0
+     trimmed = [lines[0].lstrip()] + [line[indent:].rstrip() for line in lines[1:]]
+     return "\n".join(trimmed).strip()
+ 
+diff --git a/test_docstring_issue.py b/test_docstring_issue.py
+new file mode 100644
+index 0000000000..a134cf809a
+--- /dev/null
++++ b/test_docstring_issue.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python
++"""Test script to reproduce the docstring issue."""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='django.contrib.admindocs.urls',
++        INSTALLED_APPS=[
++            'django.contrib.admindocs',
++        ],
++    )
++    django.setup()
++
++from django.contrib.admindocs.utils import trim_docstring, parse_rst
++
++# Test case 1: Docstring with text starting on the first line
++def test_func1():
++    """test tests something.
++    
++    This is additional documentation.
++    """
++    pass
++
++# Test case 2: Docstring with empty first line (current Django style)
++def test_func2():
++    """
++    test tests something.
++    
++    This is additional documentation.
++    """
++    pass
++
++# Test case 3: Single line docstring
++def test_func3():
++    """Single line docstring."""
++    pass
++
++# Test case 4: Multi-line docstring with text on first line
++def test_func4():
++    """First line of documentation.
++    Second line of documentation.
++    Third line of documentation.
++    """
++    pass
++
++print("Testing trim_docstring function:")
++print("="*50)
++
++for i, func in enumerate([test_func1, test_func2, test_func3, test_func4], 1):
++    print(f"\nTest case {i}: {func.__name__}")
++    print(f"Original docstring:\n{repr(func.__doc__)}")
++    try:
++        trimmed = trim_docstring(func.__doc__)
++        print(f"Trimmed docstring:\n{repr(trimmed)}")
++        
++        # Try to parse with rst
++        print("Attempting to parse with rst...")
++        result = parse_rst(trimmed, 'model', 'test')
++        print("Success! Parsed without error.")
++    except Exception as e:
++        print(f"Error: {type(e).__name__}: {e}")
++    print("-"*50)
+diff --git a/test_docstring_issue2.py b/test_docstring_issue2.py
+new file mode 100644
+index 0000000000..92b3187bc6
+--- /dev/null
++++ b/test_docstring_issue2.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python
++"""Test script to reproduce the docstring issue more accurately."""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='django.contrib.admindocs.urls',
++        INSTALLED_APPS=[
++            'django.contrib.admindocs',
++        ],
++    )
++    django.setup()
++
++from django.contrib.admindocs.utils import trim_docstring, parse_rst
++
++# Let's check what the actual issue is with indentation
++def problematic_func():
++    """This is a docstring that starts on the first line.
++    This is the second line.
++    This is the third line.
++    """
++    pass
++
++print("Original docstring:")
++print(repr(problematic_func.__doc__))
++print()
++
++print("Let's see what trim_docstring does step by step:")
++docstring = problematic_func.__doc__
++lines = docstring.expandtabs().splitlines()
++print(f"Lines: {lines}")
++print(f"Line lengths and lstrip lengths:")
++for i, line in enumerate(lines):
++    print(f"  Line {i}: '{line}' - len={len(line)}, len(lstrip)={len(line.lstrip())}, indent={len(line) - len(line.lstrip())}")
++
++# Check what happens with the current implementation
++print("\nChecking indent calculation:")
++try:
++    indent = min(len(line) - len(line.lstrip()) for line in lines if line.lstrip())
++    print(f"Calculated indent: {indent}")
++except ValueError as e:
++    print(f"Error calculating indent: {e}")
++
++# Now let's see the trimmed result
++trimmed = trim_docstring(problematic_func.__doc__)
++print(f"\nTrimmed docstring:")
++print(repr(trimmed))
++
++# Let's also test with a docstring that has no indentation on subsequent lines
++def problematic_func2():
++    """This is a docstring that starts on the first line.
++This line has no indentation.
++This line also has no indentation.
++    """
++    pass
++
++print("\n" + "="*50)
++print("Testing problematic_func2:")
++print("Original docstring:")
++print(repr(problematic_func2.__doc__))
++
++trimmed2 = trim_docstring(problematic_func2.__doc__)
++print(f"\nTrimmed docstring:")
++print(repr(trimmed2))
+diff --git a/test_docstring_rst_error.py b/test_docstring_rst_error.py
+new file mode 100644
+index 0000000000..b80ac445b4
+--- /dev/null
++++ b/test_docstring_rst_error.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python
++"""Test script to reproduce the rst parsing error."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='django.contrib.admindocs.urls',
++        INSTALLED_APPS=[
++            'django.contrib.admindocs',
++        ],
++    )
++    django.setup()
++
++from django.contrib.admindocs.utils import trim_docstring, parse_rst
++import docutils.core
++
++# Try to reproduce the exact error with docutils
++def test_view():
++    """test tests something.
++    
++    More content here.
++    """
++    pass
++
++# Let's see what happens when we parse the trimmed docstring directly with docutils
++docstring = test_view.__doc__
++trimmed = trim_docstring(docstring)
++
++print("Original docstring:")
++print(repr(docstring))
++print("\nTrimmed docstring:")
++print(repr(trimmed))
++
++# The parse_rst function wraps text in a default-role directive
++# Let's see what happens
++source_template = """
++.. default-role:: cmsreference
++
++%s
++
++.. default-role::
++"""
++
++print("\nTesting with docutils directly:")
++print("Source to parse:")
++source = source_template % trimmed
++print(repr(source))
++
++try:
++    # Try parsing with docutils
++    overrides = {
++        'doctitle_xform': True,
++        'initial_header_level': 3,
++        "default_reference_context": "model",
++        "link_base": "/admindocs/",
++        'raw_enabled': False,
++        'file_insertion_enabled': False,
++    }
++    parts = docutils.core.publish_parts(
++        source,
++        source_path="test", destination_path=None,
++        writer_name='html', settings_overrides=overrides,
++    )
++    print("\nParsing successful!")
++    print("Fragment:", parts['fragment'])
++except Exception as e:
++    print(f"\nError parsing: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's also test with a docstring that would have issues
++def problematic_view():
++    """View description on first line.
++    
++    .. default-role:: some-role
++    
++    More content.
++    """
++    pass
++
++print("\n" + "="*60)
++print("Testing problematic_view:")
++docstring2 = problematic_view.__doc__
++trimmed2 = trim_docstring(docstring2)
++print("Trimmed docstring:")
++print(repr(trimmed2))
++
++source2 = source_template % trimmed2
++print("\nSource to parse:")
++print(repr(source2))
++
++try:
++    parts2 = docutils.core.publish_parts(
++        source2,
++        source_path="test2", destination_path=None,
++        writer_name='html', settings_overrides=overrides,
++    )
++    print("\nParsing successful!")
++except Exception as e:
++    print(f"\nError parsing: {type(e).__name__}: {e}")
++    # Print the actual error message from docutils
++    if hasattr(e, 'args') and e.args:
++        print("Error details:", e.args[0])
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..2d4c3d27b9
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,92 @@
++#!/usr/bin/env python
++"""Test edge cases for the trim_docstring fix."""
++
++from django.contrib.admindocs.utils import trim_docstring
++
++# Edge case 1: Empty docstring
++assert trim_docstring("") == ""
++assert trim_docstring(None) == ""
++assert trim_docstring("   \n  \n  ") == ""
++print("OK: Empty docstring tests passed")
++
++# Edge case 2: Single line docstring
++assert trim_docstring("Single line") == "Single line"
++assert trim_docstring("  Single line  ") == "Single line"
++assert trim_docstring("  Single line\n") == "Single line"
++print("OK: Single line tests passed")
++
++# Edge case 3: Only whitespace on subsequent lines
++docstring3 = """First line
++    
++    
++    """
++assert trim_docstring(docstring3) == "First line"
++print("OK: Whitespace-only subsequent lines test passed")
++
++# Edge case 4: Mixed indentation levels
++docstring4 = """First line
++    Second line (4 spaces)
++        Third line (8 spaces)
++    Fourth line (4 spaces)
++"""
++expected4 = """First line
++Second line (4 spaces)
++    Third line (8 spaces)
++Fourth line (4 spaces)"""
++assert trim_docstring(docstring4) == expected4
++print("OK: Mixed indentation test passed")
++
++# Edge case 5: No indentation on any line
++docstring5 = """First line
++Second line
++Third line"""
++assert trim_docstring(docstring5) == docstring5
++print("OK: No indentation test passed")
++
++# Edge case 6: Tab characters
++docstring6 = """First line
++\tSecond line (tab)
++\t\tThird line (2 tabs)
++\tFourth line (tab)"""
++# Tabs are expanded to spaces (8 spaces per tab by default)
++result6 = trim_docstring(docstring6)
++lines6 = result6.split('\n')
++assert lines6[0] == "First line"
++assert lines6[1] == "Second line (tab)"
++assert lines6[2].startswith("        Third line")  # One tab worth of indent preserved
++assert lines6[3] == "Fourth line (tab)"
++print("OK: Tab character test passed")
++
++# Edge case 7: First line is empty (Django style)
++docstring7 = """
++    This is line 2 with 4 spaces
++    This is line 3 with 4 spaces
++"""
++expected7 = """This is line 2 with 4 spaces
++This is line 3 with 4 spaces"""
++assert trim_docstring(docstring7) == expected7
++print("OK: Django-style (empty first line) test passed")
++
++# Edge case 8: Only first line has content
++docstring8 = """Only first line has content
++    
++    
++"""
++assert trim_docstring(docstring8) == "Only first line has content"
++print("OK: Only first line has content test passed")
++
++# Edge case 9: Inconsistent trailing whitespace
++docstring9 = """First line   
++    Second line with trailing spaces   
++    Third line\t\t
++"""
++result9 = trim_docstring(docstring9)
++lines9 = result9.split('\n')
++# The function strips trailing whitespace from all lines except the first
++# (first line only gets leading whitespace stripped)
++assert lines9[0] == "First line   "  # First line keeps trailing spaces
++assert lines9[1] == "Second line with trailing spaces"  # Other lines get rstrip()
++assert lines9[2] == "Third line"
++print("OK: Trailing whitespace test passed")
++
++print("\nAll edge case tests passed!")
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..33b7a76725
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""Test to reproduce the exact issue from the problem statement."""
++
++from django.contrib.admindocs.utils import trim_docstring
++
++# This is the exact example from the problem statement
++def test():
++    """test tests something.
++    """
++    pass
++
++# Let's trace through what happens
++docstring = test.__doc__
++print("Original docstring:")
++print(repr(docstring))
++
++# Expand tabs and split into lines
++lines = docstring.expandtabs().splitlines()
++print("\nLines after splitting:")
++for i, line in enumerate(lines):
++    print(f"  Line {i}: {repr(line)}")
++
++# Calculate indent with current implementation
++print("\nCalculating indent with current implementation:")
++for i, line in enumerate(lines):
++    if line.lstrip():
++        indent = len(line) - len(line.lstrip())
++        print(f"  Line {i}: indent = {indent}")
++
++current_indent = min(len(line) - len(line.lstrip()) for line in lines if line.lstrip())
++print(f"\nCurrent min indent: {current_indent}")
++
++# What happens with the fix (skipping first line)?
++print("\nCalculating indent with proposed fix (skipping first line):")
++for i, line in enumerate(lines[1:], 1):
++    if line.lstrip():
++        indent = len(line) - len(line.lstrip())
++        print(f"  Line {i}: indent = {indent}")
++
++if any(line.lstrip() for line in lines[1:]):
++    fixed_indent = min(len(line) - len(line.lstrip()) for line in lines[1:] if line.lstrip())
++    print(f"\nFixed min indent: {fixed_indent}")
++else:
++    print("\nNo non-empty lines after the first line")
++
++# Apply current trim_docstring
++trimmed_current = trim_docstring(docstring)
++print(f"\nCurrent trim_docstring result:")
++print(repr(trimmed_current))
++
++# Let's manually apply the fixed version
++if not docstring or not docstring.strip():
++    trimmed_fixed = ''
++else:
++    lines = docstring.expandtabs().splitlines()
++    # Skip first line when calculating indent
++    if len(lines) > 1 and any(line.lstrip() for line in lines[1:]):
++        indent = min(len(line) - len(line.lstrip()) for line in lines[1:] if line.lstrip())
++    else:
++        indent = 0
++    trimmed = [lines[0].lstrip()] + [line[indent:].rstrip() for line in lines[1:]]
++    trimmed_fixed = "\n".join(trimmed).strip()
++
++print(f"\nFixed trim_docstring result:")
++print(repr(trimmed_fixed))
++
++# Test another case with actual indentation
++def test2():
++    """First line of docstring.
++    Second line with 4 spaces indent.
++    Third line with 4 spaces indent.
++    """
++    pass
++
++print("\n" + "="*60)
++print("Testing test2 function:")
++docstring2 = test2.__doc__
++print("Original docstring:")
++print(repr(docstring2))
++
++lines2 = docstring2.expandtabs().splitlines()
++print("\nLines:")
++for i, line in enumerate(lines2):
++    print(f"  Line {i}: {repr(line)} (indent={len(line) - len(line.lstrip())})")
++
++# Current implementation
++current_indent2 = min(len(line) - len(line.lstrip()) for line in lines2 if line.lstrip())
++print(f"\nCurrent min indent (including first line): {current_indent2}")
++
++# Fixed implementation
++if len(lines2) > 1 and any(line.lstrip() for line in lines2[1:]):
++    fixed_indent2 = min(len(line) - len(line.lstrip()) for line in lines2[1:] if line.lstrip())
++else:
++    fixed_indent2 = 0
++print(f"Fixed min indent (excluding first line): {fixed_indent2}")
++
++trimmed_current2 = trim_docstring(docstring2)
++print(f"\nCurrent trim_docstring result:")
++print(repr(trimmed_current2))
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..0fcaf52dfc
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python
++"""Test to verify the fix works correctly."""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='django.contrib.admindocs.urls',
++        INSTALLED_APPS=[
++            'django.contrib.admindocs',
++        ],
++    )
++    django.setup()
++
++from django.contrib.admindocs.utils import trim_docstring, parse_rst
++
++# Test case from the problem statement
++def test():
++    """test tests something.
++    """
++    pass
++
++# Test case with indented continuation lines
++def test_indented():
++    """First line of docstring.
++    Second line with 4 spaces indent.
++    Third line with 4 spaces indent.
++    """
++    pass
++
++# Test case with Django-style docstring (empty first line)
++def test_django_style():
++    """
++    This is a Django-style docstring.
++    
++    With multiple paragraphs.
++    """
++    pass
++
++# Test single line docstring
++def test_single_line():
++    """Single line docstring."""
++    pass
++
++# Test with complex indentation
++def test_complex():
++    """Complex docstring on first line.
++    
++    This paragraph has normal indentation.
++    
++        This is an indented code block.
++        With multiple lines.
++    
++    Back to normal text.
++    """
++    pass
++
++print("Testing trim_docstring with various docstring styles:")
++print("="*60)
++
++test_functions = [test, test_indented, test_django_style, test_single_line, test_complex]
++
++for func in test_functions:
++    print(f"\nFunction: {func.__name__}")
++    print(f"Original docstring:")
++    print(repr(func.__doc__))
++    
++    trimmed = trim_docstring(func.__doc__)
++    print(f"\nTrimmed docstring:")
++    print(repr(trimmed))
++    
++    # Try parsing with rst to ensure no errors
++    try:
++        result = parse_rst(trimmed, 'model', 'test')
++        print("OK: RST parsing successful")
++    except Exception as e:
++        print(f"ERROR: RST parsing failed: {type(e).__name__}: {e}")
++    
++    print("-"*60)
++
++# Special test for the exact issue mentioned in the problem statement
++print("\nSpecial test for rst parsing with default-role directive:")
++print("="*60)
++
++# This should work now without the "no content permitted" error
++def view_with_docstring():
++    """View description starts on first line.
++    
++    Additional documentation here.
++    """
++    pass
++
++trimmed = trim_docstring(view_with_docstring.__doc__)
++print("Trimmed docstring:")
++print(repr(trimmed))
++
++try:
++    # This is how admindocs uses it
++    result = parse_rst(trimmed, 'view', 'view:test')
++    print("\nOK: Successfully parsed docstring with rst!")
++    print("HTML output:")
++    print(result)
++except Exception as e:
++    print(f"\nERROR: Failed to parse: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/tests/admin_docs/test_utils.py b/tests/admin_docs/test_utils.py
+index 17ea912015..ba04fe328c 100644
+--- a/tests/admin_docs/test_utils.py
++++ b/tests/admin_docs/test_utils.py
+@@ -118,3 +118,32 @@ class TestUtils(AdminDocsSimpleTestCase):
+         markup = '<p>reST, <cite>interpreted text</cite>, default role.</p>\n'
+         parts = docutils.core.publish_parts(source=source, writer_name="html4css1")
+         self.assertEqual(parts['fragment'], markup)
++
++    def test_trim_docstring_first_line_indent(self):
++        """
++        Test that trim_docstring correctly handles docstrings where the first line
++        contains text (rather than being empty).
++        """
++        # Docstring with text on first line and indented subsequent lines
++        docstring1 = """First line of text.
++        Second line indented.
++        Third line indented."""
++        expected1 = """First line of text.
++Second line indented.
++Third line indented."""
++        self.assertEqual(trim_docstring(docstring1), expected1)
++        
++        # Single line docstring should remain unchanged (except whitespace stripping)
++        docstring2 = """Single line docstring."""
++        self.assertEqual(trim_docstring(docstring2), "Single line docstring.")
++        
++        # Docstring with varying indentation
++        docstring3 = """First line.
++    Second line with 4 spaces.
++        Third line with 8 spaces.
++    Fourth line with 4 spaces."""
++        expected3 = """First line.
++Second line with 4 spaces.
++    Third line with 8 spaces.
++Fourth line with 4 spaces."""
++        self.assertEqual(trim_docstring(docstring3), expected3)

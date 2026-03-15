@@ -1,0 +1,337 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 92fe4affb9..3a462f1c4c 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -277,6 +277,7 @@ class Collector:
+             if self.can_fast_delete(instance):
+                 with transaction.mark_for_rollback_on_error():
+                     count = sql.DeleteQuery(model).delete_batch([instance.pk], self.using)
++                setattr(instance, model._meta.pk.attname, None)
+                 return count, {model._meta.label: count}
+ 
+         with transaction.atomic(using=self.using, savepoint=False):
+diff --git a/test_fast_delete_pk.py b/test_fast_delete_pk.py
+new file mode 100644
+index 0000000000..aaecc2ae6d
+--- /dev/null
++++ b/test_fast_delete_pk.py
+@@ -0,0 +1,58 @@
++"""
++Test specifically for the fast delete path to ensure PK is cleared.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models import deletion
++
++# Simple model that should use fast delete
++class SimpleModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(SimpleModel)
++
++# Test that fast delete is being used and PK is cleared
++instance = SimpleModel.objects.create(name="Test")
++
++# Check that this will use fast delete
++collector = deletion.Collector(using=instance._state.db)
++collector.collect([instance])
++can_fast_delete = collector.can_fast_delete(instance)
++print(f"Can use fast delete: {can_fast_delete}")
++print(f"Number of models in collector: {len(collector.data)}")
++
++# Now actually delete
++pk_before = instance.pk
++result = instance.delete()
++print(f"\nDelete result: {result}")
++print(f"PK before delete: {pk_before}")
++print(f"PK after delete: {instance.pk}")
++print(f"PK cleared correctly: {instance.pk is None}")
+diff --git a/test_pk_clear.py b/test_pk_clear.py
+new file mode 100644
+index 0000000000..050265b8f5
+--- /dev/null
++++ b/test_pk_clear.py
+@@ -0,0 +1,49 @@
++"""
++Test script to reproduce the issue where delete() doesn't clear PKs on models without dependencies.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Create a simple model without dependencies
++class SimpleModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(SimpleModel)
++
++# Test the issue
++print("Testing delete() behavior on model without dependencies...")
++instance = SimpleModel.objects.create(name="Test")
++print(f"Before delete: pk={instance.pk}")
++
++instance.delete()
++print(f"After delete: pk={instance.pk}")
++print(f"Expected: pk=None")
++print(f"Issue reproduced: {instance.pk is not None}")
+diff --git a/test_pk_clear_comprehensive.py b/test_pk_clear_comprehensive.py
+new file mode 100644
+index 0000000000..638fdb6955
+--- /dev/null
++++ b/test_pk_clear_comprehensive.py
+@@ -0,0 +1,120 @@
++"""
++Comprehensive test for PK clearing after delete().
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Test 1: Simple model without dependencies
++class SimpleModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Test 2: Model with custom primary key
++class CustomPKModel(models.Model):
++    custom_id = models.CharField(max_length=50, primary_key=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Test 3: Model with foreign key (has dependencies)
++class ParentModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class ChildModel(models.Model):
++    parent = models.ForeignKey(ParentModel, on_delete=models.CASCADE)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(SimpleModel)
++    schema_editor.create_model(CustomPKModel)
++    schema_editor.create_model(ParentModel)
++    schema_editor.create_model(ChildModel)
++
++# Enable foreign key constraints for SQLite
++if connection.vendor == 'sqlite':
++    with connection.cursor() as cursor:
++        cursor.execute('PRAGMA foreign_keys = ON')
++
++print("Test 1: Simple model without dependencies")
++instance = SimpleModel.objects.create(name="Test")
++pk_before = instance.pk
++instance.delete()
++print(f"  Before delete: pk={pk_before}")
++print(f"  After delete: pk={instance.pk}")
++print(f"  Success: {instance.pk is None}")
++
++print("\nTest 2: Model with custom primary key")
++instance2 = CustomPKModel.objects.create(custom_id="custom123", name="Test")
++pk_before = instance2.custom_id
++instance2.delete()
++print(f"  Before delete: custom_id={pk_before}")
++print(f"  After delete: custom_id={instance2.custom_id}")
++print(f"  Success: {instance2.custom_id is None}")
++
++print("\nTest 3: Model with dependencies (parent with child)")
++parent = ParentModel.objects.create(name="Parent")
++child = ChildModel.objects.create(parent=parent, name="Child")
++parent_pk_before = parent.pk
++child_pk_before = child.pk
++parent.delete()  # This should cascade delete the child
++print(f"  Parent - Before delete: pk={parent_pk_before}")
++print(f"  Parent - After delete: pk={parent.pk}")
++print(f"  Parent - Success: {parent.pk is None}")
++print(f"  Child - Before delete: pk={child_pk_before}")
++print(f"  Child - After delete: pk={child.pk}")
++print(f"  Child - Success: {child.pk is None}")
++
++print("\nTest 4: Model without dependencies but with signals")
++from django.db.models import signals
++
++delete_signal_called = []
++
++def pre_delete_handler(sender, instance, **kwargs):
++    delete_signal_called.append(('pre', instance.pk))
++
++def post_delete_handler(sender, instance, **kwargs):
++    delete_signal_called.append(('post', instance.pk))
++
++signals.pre_delete.connect(pre_delete_handler, sender=SimpleModel)
++signals.post_delete.connect(post_delete_handler, sender=SimpleModel)
++
++instance4 = SimpleModel.objects.create(name="Test with signals")
++pk_before = instance4.pk
++instance4.delete()
++print(f"  Before delete: pk={pk_before}")
++print(f"  After delete: pk={instance4.pk}")
++print(f"  Signals called: {delete_signal_called}")
++print(f"  Success: {instance4.pk is None and len(delete_signal_called) == 2}")
+diff --git a/test_pk_clear_simple.py b/test_pk_clear_simple.py
+new file mode 100644
+index 0000000000..7e91149316
+--- /dev/null
++++ b/test_pk_clear_simple.py
+@@ -0,0 +1,74 @@
++"""
++Simple test for PK clearing after delete() - focusing on models without dependencies.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Test 1: Simple model without dependencies
++class SimpleModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Test 2: Model with custom primary key
++class CustomPKModel(models.Model):
++    custom_id = models.CharField(max_length=50, primary_key=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(SimpleModel)
++    schema_editor.create_model(CustomPKModel)
++
++print("Test 1: Simple model without dependencies")
++instance = SimpleModel.objects.create(name="Test")
++pk_before = instance.pk
++instance.delete()
++print(f"  Before delete: pk={pk_before}")
++print(f"  After delete: pk={instance.pk}")
++print(f"  Success: {instance.pk is None}")
++
++print("\nTest 2: Model with custom primary key")
++instance2 = CustomPKModel.objects.create(custom_id="custom123", name="Test")
++pk_before = instance2.custom_id
++instance2.delete()
++print(f"  Before delete: custom_id={pk_before}")
++print(f"  After delete: custom_id={instance2.custom_id}")
++print(f"  Success: {instance2.custom_id is None}")
++
++print("\nTest 3: Multiple instances deleted separately")
++instances = []
++for i in range(3):
++    instances.append(SimpleModel.objects.create(name=f"Test {i}"))
++
++for instance in instances:
++    pk_before = instance.pk
++    instance.delete()
++    print(f"  Instance {pk_before}: pk after delete = {instance.pk}, Success: {instance.pk is None}")

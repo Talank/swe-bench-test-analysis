@@ -1,0 +1,750 @@
+diff --git a/django/db/backends/mysql/operations.py b/django/db/backends/mysql/operations.py
+index 50f85e0621..e2a0ae793a 100644
+--- a/django/db/backends/mysql/operations.py
++++ b/django/db/backends/mysql/operations.py
+@@ -70,7 +70,7 @@ class DatabaseOperations(BaseDatabaseOperations):
+ 
+     def _convert_field_to_tz(self, field_name, tzname):
+         if settings.USE_TZ:
+-            field_name = "CONVERT_TZ(%s, 'UTC', '%s')" % (field_name, tzname)
++            field_name = "CONVERT_TZ(%s, '%s', '%s')" % (field_name, self.connection.timezone_name, tzname)
+         return field_name
+ 
+     def datetime_cast_date_sql(self, field_name, tzname):
+diff --git a/django/db/backends/oracle/operations.py b/django/db/backends/oracle/operations.py
+index c1afb2ed5e..0ba0b8d30a 100644
+--- a/django/db/backends/oracle/operations.py
++++ b/django/db/backends/oracle/operations.py
+@@ -99,9 +99,13 @@ END;
+             return field_name
+         if not self._tzname_re.match(tzname):
+             raise ValueError("Invalid time zone name: %s" % tzname)
+-        # Convert from UTC to local time, returning TIMESTAMP WITH TIME ZONE
++        # Convert from database timezone to target timezone, returning TIMESTAMP WITH TIME ZONE
+         # and cast it back to TIMESTAMP to strip the TIME ZONE details.
+-        return "CAST((FROM_TZ(%s, '0:00') AT TIME ZONE '%s') AS TIMESTAMP)" % (field_name, tzname)
++        # Oracle uses offset format for UTC, so handle that case
++        db_tzname = self.connection.timezone_name
++        if db_tzname == 'UTC':
++            db_tzname = '0:00'
++        return "CAST((FROM_TZ(%s, '%s') AT TIME ZONE '%s') AS TIMESTAMP)" % (field_name, db_tzname, tzname)
+ 
+     def datetime_cast_date_sql(self, field_name, tzname):
+         field_name = self._convert_field_to_tz(field_name, tzname)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..8d4febf996
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,77 @@
++"""
++Test edge cases for the timezone fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++import pytz
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++USE_TZ = True
++TIME_ZONE = 'America/New_York'
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = []
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++# Test various timezone combinations
++test_cases = [
++    # (db_timezone, target_timezone, description)
++    ('UTC', 'UTC', 'Both UTC'),
++    ('Europe/Paris', 'Europe/Paris', 'Same non-UTC timezone'),
++    ('UTC', 'America/New_York', 'UTC to EST'),
++    ('Europe/Paris', 'America/New_York', 'Paris to New York'),
++    ('Asia/Tokyo', 'Europe/London', 'Tokyo to London'),
++]
++
++print("Testing various timezone combinations...\n")
++
++for db_tz, target_tz, description in test_cases:
++    # Mock connection with the database timezone
++    class MockConnection:
++        timezone_name = db_tz
++        timezone = pytz.timezone(db_tz)
++    
++    mysql_ops = MySQLOperations(MockConnection())
++    
++    field_name = "my_field"
++    converted = mysql_ops._convert_field_to_tz(field_name, target_tz)
++    
++    print(f"{description}:")
++    print(f"  Database TZ: {db_tz}")
++    print(f"  Target TZ:   {target_tz}")
++    print(f"  SQL:         {converted}")
++    
++    # Verify the format
++    expected = f"CONVERT_TZ(my_field, '{db_tz}', '{target_tz}')"
++    assert converted == expected, f"Expected {expected}, got {converted}"
++    print("  [PASS]")
++    print()
++
++# Test with USE_TZ = False
++print("Testing with USE_TZ = False...")
++settings.USE_TZ = False
++
++mysql_ops = MySQLOperations(MockConnection())
++converted = mysql_ops._convert_field_to_tz("my_field", "Europe/Paris")
++assert converted == "my_field", "Should not convert when USE_TZ is False"
++print("  [PASS] No conversion when USE_TZ is False")
++
++print("\nAll edge cases passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..15cf4f6338
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,128 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.utils import timezone
++import datetime
++import pytz
++
++# Test the fix for MySQL operations
++print("Testing MySQL operations fix...")
++
++# Import after Django is set up
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++        'TIME_ZONE': 'Europe/Paris',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++from django.db.backends.oracle.operations import DatabaseOperations as OracleOperations
++
++# Test MySQL operations
++class MockMySQLConnection:
++    timezone_name = 'Europe/Paris'
++    timezone = pytz.timezone('Europe/Paris')
++    
++mysql_ops = MySQLOperations(MockMySQLConnection())
++
++# Test the _convert_field_to_tz method with same timezone
++field_name = "my_datetime_field"
++tzname = "Europe/Paris"
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (same timezone):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'Europe/Paris')")
++print(f"  Actual:   {converted}")
++
++# Test with different timezone
++tzname = "America/New_York"
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (different timezone):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'America/New_York')")
++print(f"  Actual:   {converted}")
++
++# Test with UTC database timezone
++class MockMySQLConnectionUTC:
++    timezone_name = 'UTC'
++    timezone = pytz.UTC
++    
++mysql_ops_utc = MySQLOperations(MockMySQLConnectionUTC())
++tzname = "Europe/Paris"
++converted = mysql_ops_utc._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (UTC database):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'UTC', 'Europe/Paris')")
++print(f"  Actual:   {converted}")
++
++# Test Oracle operations
++print("\n\nTesting Oracle operations fix...")
++
++class MockOracleConnection:
++    timezone_name = 'Europe/Paris'
++    timezone = pytz.timezone('Europe/Paris')
++    
++oracle_ops = OracleOperations(MockOracleConnection())
++
++# Test the _convert_field_to_tz method
++field_name = "my_datetime_field"
++tzname = "Europe/Paris"
++converted = oracle_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nOracle _convert_field_to_tz (same timezone):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Actual:   {converted}")
++
++# Test with UTC database
++class MockOracleConnectionUTC:
++    timezone_name = 'UTC'
++    timezone = pytz.UTC
++    
++oracle_ops_utc = OracleOperations(MockOracleConnectionUTC())
++converted = oracle_ops_utc._convert_field_to_tz(field_name, tzname)
++print(f"\nOracle _convert_field_to_tz (UTC database):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected to contain: FROM_TZ(my_datetime_field, '0:00')")
++print(f"  Actual:   {converted}")
++
++# Test datetime operations
++print("\n\nTesting datetime operations...")
++
++# Test datetime_cast_date_sql
++converted = mysql_ops.datetime_cast_date_sql(field_name, tzname)
++print(f"\nMySQL datetime_cast_date_sql:")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Actual:   {converted}")
++
++# Test with USE_TZ = False
++print("\n\nTesting with USE_TZ = False...")
++original_use_tz = settings.USE_TZ
++settings.USE_TZ = False
++
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (USE_TZ=False):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: my_datetime_field (unchanged)")
++print(f"  Actual:   {converted}")
++
++settings.USE_TZ = original_use_tz
+diff --git a/test_fix_mysql.py b/test_fix_mysql.py
+new file mode 100644
+index 0000000000..74b3e4e26f
+--- /dev/null
++++ b/test_fix_mysql.py
+@@ -0,0 +1,105 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.utils import timezone
++import datetime
++import pytz
++
++# Test the fix for MySQL operations
++print("Testing MySQL operations fix...")
++
++# Import after Django is set up
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++        'TIME_ZONE': 'Europe/Paris',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++# Test MySQL operations
++class MockMySQLConnection:
++    timezone_name = 'Europe/Paris'
++    timezone = pytz.timezone('Europe/Paris')
++    
++mysql_ops = MySQLOperations(MockMySQLConnection())
++
++# Test the _convert_field_to_tz method with same timezone
++field_name = "my_datetime_field"
++tzname = "Europe/Paris"
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (same timezone):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'Europe/Paris')")
++print(f"  Actual:   {converted}")
++assert converted == "CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'Europe/Paris')", f"Expected same timezone conversion, got {converted}"
++
++# Test with different timezone
++tzname = "America/New_York"
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (different timezone):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'America/New_York')")
++print(f"  Actual:   {converted}")
++assert converted == "CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'America/New_York')", f"Expected different timezone conversion, got {converted}"
++
++# Test with UTC database timezone
++class MockMySQLConnectionUTC:
++    timezone_name = 'UTC'
++    timezone = pytz.UTC
++    
++mysql_ops_utc = MySQLOperations(MockMySQLConnectionUTC())
++tzname = "Europe/Paris"
++converted = mysql_ops_utc._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (UTC database):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: CONVERT_TZ(my_datetime_field, 'UTC', 'Europe/Paris')")
++print(f"  Actual:   {converted}")
++assert converted == "CONVERT_TZ(my_datetime_field, 'UTC', 'Europe/Paris')", f"Expected UTC to Paris conversion, got {converted}"
++
++# Test datetime operations
++print("\n\nTesting datetime operations...")
++
++# Test datetime_cast_date_sql
++converted = mysql_ops.datetime_cast_date_sql(field_name, tzname)
++print(f"\nMySQL datetime_cast_date_sql:")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Actual:   {converted}")
++assert "CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'Europe/Paris')" in converted, f"Expected proper timezone conversion in datetime_cast_date_sql"
++
++# Test with USE_TZ = False
++print("\n\nTesting with USE_TZ = False...")
++original_use_tz = settings.USE_TZ
++settings.USE_TZ = False
++
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz (USE_TZ=False):")
++print(f"  Input: field_name='{field_name}', tzname='{tzname}'")
++print(f"  Expected: my_datetime_field (unchanged)")
++print(f"  Actual:   {converted}")
++assert converted == field_name, f"Expected unchanged field name when USE_TZ=False, got {converted}"
++
++settings.USE_TZ = original_use_tz
++
++print("\n\nAll tests passed!")
+diff --git a/test_none_timezone.py b/test_none_timezone.py
+new file mode 100644
+index 0000000000..33dae78a30
+--- /dev/null
++++ b/test_none_timezone.py
+@@ -0,0 +1,53 @@
++"""
++Test the case where database TIME_ZONE is None (should default to UTC).
++"""
++import os
++import sys
++import django
++from django.conf import settings
++import pytz
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++        'TIME_ZONE': None,  # Explicitly None
++    }
++}
++
++INSTALLED_APPS = []
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++# Mock connection with None timezone (should default to UTC)
++class MockConnectionNone:
++    timezone_name = 'UTC'  # This is what the base class returns when TIME_ZONE is None
++    timezone = pytz.UTC
++
++mysql_ops = MySQLOperations(MockConnectionNone())
++
++field_name = "my_field"
++tzname = "Europe/Paris"
++
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"When database TIME_ZONE is None (defaults to UTC):")
++print(f"  Result: {converted}")
++print(f"  Expected: CONVERT_TZ(my_field, 'UTC', 'Europe/Paris')")
++
++assert converted == "CONVERT_TZ(my_field, 'UTC', 'Europe/Paris')", \
++    "Should use UTC when database TIME_ZONE is None"
++
++print("\n[PASS] Handles None timezone correctly!")
+diff --git a/test_problem_solved.py b/test_problem_solved.py
+new file mode 100644
+index 0000000000..41c5bb0e61
+--- /dev/null
++++ b/test_problem_solved.py
+@@ -0,0 +1,91 @@
++"""
++Demonstrate that the fix solves the original problem from the issue description.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++import datetime
++import pytz
++
++# Configure Django exactly as in the problem statement
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create settings matching the problem statement
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'  # tz1
++
++DATABASES = {
++    'legacy': {
++        'ENGINE': 'django.db.backends.mysql',
++        'NAME': 'test_db',
++        'TIME_ZONE': 'Europe/Paris',  # tz2 - same as tz1
++        'HOST': '',
++        'USER': 'root',
++        'PASSWORD': '',
++    },
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = []
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++print("PROBLEM STATEMENT VERIFICATION")
++print("=" * 50)
++print()
++print("Scenario from the issue:")
++print("- Django TIME_ZONE = 'Europe/Paris' (tz1)")
++print("- Database TIME_ZONE = 'Europe/Paris' (tz2)")
++print("- datetime value: 2017-07-06 20:50:00 in Europe/Paris")
++print()
++
++# Mock the legacy database connection
++class MockLegacyConnection:
++    timezone_name = 'Europe/Paris'
++    timezone = pytz.timezone('Europe/Paris')
++
++mysql_ops = MySQLOperations(MockLegacyConnection())
++
++# The problematic query from the issue
++field_name = "`my_model`.`my_datetime_field`"
++tzname = "Europe/Paris"
++
++print("BEFORE THE FIX:")
++print("The SQL generated would have been:")
++print("SELECT (1) AS `a` FROM `my_model` WHERE DATE(CONVERT_TZ(`my_model`.`my_datetime_field`, 'UTC', 'Europe/Paris')) = '2017-07-06' LIMIT 1;")
++print()
++print("This is WRONG because:")
++print("1. It assumes data is stored in UTC, but it's actually in Europe/Paris")
++print("2. It would fail without MySQL timezone tables when tz1 == tz2")
++print()
++
++print("AFTER THE FIX:")
++date_sql = mysql_ops.datetime_cast_date_sql(field_name, tzname)
++print(f"The SQL generated is now:")
++print(f"SELECT (1) AS `a` FROM `my_model` WHERE {date_sql} = '2017-07-06' LIMIT 1;")
++print()
++print("This is CORRECT because:")
++print("1. It converts from Europe/Paris to Europe/Paris (no-op)")
++print("2. It will work even without MySQL timezone tables")
++print()
++
++# Verify the fix
++expected_convert = f"CONVERT_TZ({field_name}, 'Europe/Paris', 'Europe/Paris')"
++assert expected_convert in date_sql, f"Expected {expected_convert} in {date_sql}"
++
++print("[VERIFIED] The fix correctly uses the database timezone instead of hardcoding UTC!")
++print()
++print("ADDITIONAL BENEFITS:")
++print("- When tz1 == tz2, the conversion is a no-op")
++print("- No need for MySQL timezone tables in this common scenario")
++print("- Legacy databases with non-UTC data now work correctly")
+diff --git a/test_real_scenario.py b/test_real_scenario.py
+new file mode 100644
+index 0000000000..9601991211
+--- /dev/null
++++ b/test_real_scenario.py
+@@ -0,0 +1,107 @@
++"""
++Test the real scenario from the problem statement.
++This tests that when tz1 == tz2 (both database and Django app use the same timezone),
++the CONVERT_TZ function should convert from the same timezone to the same timezone,
++effectively making it a no-op that doesn't require MySQL timezone tables.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.utils import timezone
++import datetime
++import pytz
++
++# Configure Django with the exact scenario from the problem statement
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module matching the problem statement
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'  # tz1
++
++DATABASES = {
++    'legacy': {
++        'ENGINE': 'django.db.backends.mysql',
++        'NAME': 'test_db',
++        'TIME_ZONE': 'Europe/Paris',  # tz2
++        'HOST': '',
++        'USER': 'root',
++        'PASSWORD': '',
++    },
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++# Import MySQL operations after Django setup
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++# Test the scenario where tz1 == tz2
++print("Testing the scenario from the problem statement...")
++print("tz1 (Django TIME_ZONE) = 'Europe/Paris'")
++print("tz2 (Database TIME_ZONE) = 'Europe/Paris'")
++
++# Mock the connection with the same timezone as Django
++class MockConnection:
++    timezone_name = 'Europe/Paris'
++    timezone = pytz.timezone('Europe/Paris')
++
++mysql_ops = MySQLOperations(MockConnection())
++
++# Test datetime operations that would be used in date lookups
++field_name = "`my_model`.`my_datetime_field`"
++tzname = "Europe/Paris"  # This is what Django would pass for date lookups
++
++# Test _convert_field_to_tz
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\n_convert_field_to_tz result:")
++print(f"  Before fix: CONVERT_TZ(`my_model`.`my_datetime_field`, 'UTC', 'Europe/Paris')")
++print(f"  After fix:  {converted}")
++print(f"  Expected:   CONVERT_TZ(`my_model`.`my_datetime_field`, 'Europe/Paris', 'Europe/Paris')")
++
++# Test datetime_cast_date_sql (used in __date lookups)
++date_sql = mysql_ops.datetime_cast_date_sql(field_name, tzname)
++print(f"\ndatetime_cast_date_sql result (used in __date lookups):")
++print(f"  Before fix: DATE(CONVERT_TZ(`my_model`.`my_datetime_field`, 'UTC', 'Europe/Paris'))")
++print(f"  After fix:  {date_sql}")
++print(f"  Expected:   DATE(CONVERT_TZ(`my_model`.`my_datetime_field`, 'Europe/Paris', 'Europe/Paris'))")
++
++# Verify the fix
++assert "CONVERT_TZ(`my_model`.`my_datetime_field`, 'Europe/Paris', 'Europe/Paris')" in date_sql, \
++    "The fix should use the database timezone as source, not UTC"
++
++print("\n[PASS] Fix verified! When tz1 == tz2, the conversion is from/to the same timezone.")
++print("  This means the query will work even without MySQL timezone tables.")
++
++# Test with different timezones to ensure it still works correctly
++print("\n\nTesting with different timezones (tz1 != tz2)...")
++
++# Mock connection with UTC timezone
++class MockConnectionUTC:
++    timezone_name = 'UTC'
++    timezone = pytz.UTC
++
++mysql_ops_utc = MySQLOperations(MockConnectionUTC())
++date_sql_utc = mysql_ops_utc.datetime_cast_date_sql(field_name, tzname)
++print(f"When database uses UTC and Django uses Europe/Paris:")
++print(f"  Result: {date_sql_utc}")
++print(f"  This correctly converts from UTC to Europe/Paris")
++
++assert "CONVERT_TZ(`my_model`.`my_datetime_field`, 'UTC', 'Europe/Paris')" in date_sql_utc, \
++    "Should convert from UTC to Europe/Paris when database uses UTC"
++
++print("\n[PASS] All scenarios work correctly!")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..23b3529b70
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,21 @@
++
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'  # tz1
++
++DATABASES = {
++    'legacy': {
++        'ENGINE': 'django.db.backends.mysql',
++        'NAME': 'test_db',
++        'TIME_ZONE': 'Europe/Paris',  # tz2 - same as tz1
++        'HOST': '',
++        'USER': 'root',
++        'PASSWORD': '',
++    },
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = []
++SECRET_KEY = 'test'
+diff --git a/test_timezone_issue.py b/test_timezone_issue.py
+new file mode 100644
+index 0000000000..a94dfb176e
+--- /dev/null
++++ b/test_timezone_issue.py
+@@ -0,0 +1,87 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.utils import timezone
++import datetime
++import pytz
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++        'TIME_ZONE': 'Europe/Paris',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++
++USE_TZ = True
++TIME_ZONE = 'Europe/Paris'
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    my_datetime_field = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test'
++        db_table = 'test_model'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue
++paris_tz = pytz.timezone('Europe/Paris')
++dt = datetime.datetime(2017, 7, 6, 20, 50)
++dt_aware = paris_tz.localize(dt)
++
++# Insert a record
++TestModel.objects.create(my_datetime_field=dt_aware)
++
++# Test regular filter (should work)
++exists_regular = TestModel.objects.filter(my_datetime_field=dt_aware).exists()
++print(f"Regular filter exists: {exists_regular}")
++
++# Test date lookup (this is where the issue occurs)
++exists_date = TestModel.objects.filter(my_datetime_field__date=dt_aware.date()).exists()
++print(f"Date filter exists: {exists_date}")
++
++# Let's see what SQL is generated
++from django.db import connection
++with connection.cursor() as cursor:
++    # Get the queries
++    queries = connection.queries[-2:]  # Last two queries
++    for q in queries:
++        print(f"\nSQL: {q['sql']}")
++
++# Let's also test with MySQL-like behavior by checking the operations
++from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
++
++# Create a mock connection for MySQL operations
++class MockConnection:
++    timezone = paris_tz
++    
++mysql_ops = MySQLOperations(MockConnection())
++
++# Test the _convert_field_to_tz method
++field_name = "my_datetime_field"
++tzname = "Europe/Paris"
++converted = mysql_ops._convert_field_to_tz(field_name, tzname)
++print(f"\nMySQL _convert_field_to_tz result: {converted}")
++print(f"Expected: CONVERT_TZ(my_datetime_field, 'Europe/Paris', 'Europe/Paris')")
++print(f"Actual:   {converted}")

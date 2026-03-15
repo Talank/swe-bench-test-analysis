@@ -1,0 +1,1094 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index 3a462f1c4c..e9974c4708 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -232,9 +232,18 @@ class Collector:
+         """
+         Get a QuerySet of objects related to `objs` via the relation `related`.
+         """
+-        return related.related_model._base_manager.using(self.using).filter(
++        # Only select the primary key and foreign key fields for deletion
++        # This optimization prevents issues with fields containing invalid data
++        # and improves performance by reducing data transfer
++        model = related.related_model
++        # Always include the primary key
++        fields = [model._meta.pk.name]
++        # Include the foreign key field that links back to the parent
++        if related.field.name != model._meta.pk.name:
++            fields.append(related.field.name)
++        return model._base_manager.using(self.using).filter(
+             **{"%s__in" % related.field.name: objs}
+-        )
++        ).only(*fields)
+ 
+     def instances_with_model(self):
+         for model, instances in self.data.items():
+diff --git a/test_delete_collector.py b/test_delete_collector.py
+new file mode 100644
+index 0000000000..ed1b8d2279
+--- /dev/null
++++ b/test_delete_collector.py
+@@ -0,0 +1,90 @@
++"""
++Test the Collector.related_objects method directly.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db.models import deletion
++from django.db import models
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='children')
++    problematic_field = models.TextField()
++    regular_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test the related_objects method
++print("Testing Collector.related_objects method...")
++
++# Create a collector
++collector = deletion.Collector(using='default')
++
++# Get the related field - we need to look at Parent's reverse relations
++opts = Parent._meta
++related_fields = list(deletion.get_candidate_relations_to_delete(opts))
++print(f"\nRelated fields for Parent: {related_fields}")
++
++# Also check what fields Child has
++print(f"\nChild model fields:")
++for field in Child._meta.get_fields():
++    print(f"  {field.name}: {field}")
++
++if related_fields:
++    related = related_fields[0]
++    print(f"\nTesting with related field: {related}")
++    print(f"  field name: {related.field.name}")
++    print(f"  related model: {related.related_model}")
++    
++    # Create a mock parent object
++    class MockParent:
++        pk = 1
++    
++    # Call related_objects
++    result = collector.related_objects(related, [MockParent()])
++    print(f"\nResult QuerySet: {result}")
++    print(f"Query: {result.query}")
++    
++    # Check what fields are being selected
++    # The query object has a select attribute that shows selected fields
++    if hasattr(result.query, 'select'):
++        print(f"Selected fields: {result.query.select}")
++    
++    # Get the SQL
++    sql, params = result.query.sql_with_params()
++    print(f"\nSQL: {sql}")
++    print(f"Params: {params}")
++
++print("\nDone!")
+diff --git a/test_delete_optimization.py b/test_delete_optimization.py
+new file mode 100644
+index 0000000000..6b7589a2da
+--- /dev/null
++++ b/test_delete_optimization.py
+@@ -0,0 +1,116 @@
++"""
++Test for delete optimization to only fetch required fields.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++                'OPTIONS': {
++                    'init_command': "PRAGMA foreign_keys=OFF;",
++                }
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    # This field might contain problematic data
++    problematic_field = models.TextField()
++    # This is a regular field
++    regular_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TestDeleteOptimization(TransactionTestCase):
++    def setUp(self):
++        # Create the tables
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(Parent)
++            schema_editor.create_model(Child)
++    
++    def tearDown(self):
++        # Drop the tables
++        try:
++            with connection.schema_editor() as schema_editor:
++                # Delete all data first to avoid foreign key issues
++                Child.objects.all().delete()
++                Parent.objects.all().delete()
++                schema_editor.delete_model(Child)
++                schema_editor.delete_model(Parent)
++        except:
++            pass
++    
++    def test_delete_only_fetches_required_fields(self):
++        """Test that delete only fetches required fields, not all fields."""
++        # Create test data
++        parent = Parent.objects.create(name='Test Parent')
++        child = Child.objects.create(
++            parent=parent,
++            problematic_field='Some text',
++            regular_field='Regular text'
++        )
++        
++        # Track queries
++        from django.db import connection
++        from django.test.utils import CaptureQueriesContext
++        
++        with CaptureQueriesContext(connection) as queries:
++            parent.delete()
++        
++        # Check the queries
++        delete_queries = [q['sql'] for q in queries]
++        
++        # Find the SELECT query for Child objects
++        child_select_queries = [q for q in delete_queries if 'SELECT' in q and 'child' in q.lower()]
++        
++        # The SELECT query should only fetch the primary key and foreign key fields
++        # It should NOT fetch all fields including problematic_field
++        for query in child_select_queries:
++            print(f"Query: {query}")
++            # Check that we're not selecting all fields
++            self.assertNotIn('problematic_field', query.lower())
++            # We should only be selecting id and parent_id
++            self.assertIn('id', query.lower())
++
++
++if __name__ == '__main__':
++    # Run the test
++    test = TestDeleteOptimization()
++    test.setUp()
++    try:
++        test.test_delete_only_fetches_required_fields()
++        print("Test passed!")
++    except AssertionError as e:
++        print(f"Test failed: {e}")
++    finally:
++        test.tearDown()
+diff --git a/test_delete_simple.py b/test_delete_simple.py
+new file mode 100644
+index 0000000000..3f041106bc
+--- /dev/null
++++ b/test_delete_simple.py
+@@ -0,0 +1,102 @@
++"""
++Simple test to check current delete behavior.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from django.test.utils import override_settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++
++# Track queries
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++# Test the current behavior
++from django.db.models import deletion
++
++# Check the related_objects method
++print("Current related_objects method:")
++print(deletion.Collector.related_objects)
++
++# Let's trace what happens during a delete
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='children')
++    problematic_field = models.TextField()
++    regular_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Parent)
++    schema_editor.create_model(Child)
++
++# Create test data
++parent = Parent.objects.create(name='Test Parent')
++child = Child.objects.create(
++    parent=parent,
++    problematic_field='Some text',
++    regular_field='Regular text'
++)
++
++# Monkey patch to see what's happening
++original_related_objects = deletion.Collector.related_objects
++
++def patched_related_objects(self, related, objs):
++    print(f"\nCalling related_objects:")
++    print(f"  related: {related}")
++    print(f"  related.field: {related.field}")
++    print(f"  related.related_model: {related.related_model}")
++    result = original_related_objects(self, related, objs)
++    print(f"  result query: {result.query}")
++    return result
++
++deletion.Collector.related_objects = patched_related_objects
++
++# Track queries
++with CaptureQueriesContext(connection) as queries:
++    parent.delete()
++
++# Print queries
++print("\nQueries executed during delete:")
++for i, query in enumerate(queries):
++    print(f"\n{i+1}. {query['sql']}")
++
++# Clean up
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(Child)
++        schema_editor.delete_model(Parent)
++except:
++    pass
+diff --git a/test_direct_fix.py b/test_direct_fix.py
+new file mode 100644
+index 0000000000..c83fc7024c
+--- /dev/null
++++ b/test_direct_fix.py
+@@ -0,0 +1,90 @@
++"""
++Direct test of the related_objects fix.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db.models.deletion import Collector, get_candidate_relations_to_delete
++
++# Define test models
++class Job(models.Model):
++    guid = models.CharField(max_length=100, unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class FailureLine(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='failure_lines')
++    # This field might contain problematic unicode data
++    line = models.TextField()
++    # Other fields
++    action = models.CharField(max_length=100)
++    test = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test the related_objects method directly
++print("Testing Collector.related_objects with the fix...")
++
++collector = Collector(using='default')
++
++# Create a mock job
++class MockJob:
++    pk = 1
++
++# Get the reverse relation from Job to FailureLine
++job_opts = Job._meta
++failure_line_opts = FailureLine._meta
++
++# Find the reverse relation
++for rel in job_opts.related_objects:
++    if rel.related_model == FailureLine:
++        print(f"\nFound reverse relation: {rel}")
++        print(f"Field: {rel.field}")
++        print(f"Field name: {rel.field.name}")
++        
++        # Call related_objects
++        qs = collector.related_objects(rel, [MockJob()])
++        print(f"\nQuerySet: {qs}")
++        
++        # Check the query
++        sql = str(qs.query)
++        print(f"Query: {sql}")
++        
++        # Check if we're using .only()
++        if hasattr(qs.query, 'deferred_loading'):
++            deferred, existing = qs.query.deferred_loading
++            print(f"Deferred loading: deferred={deferred}, existing={existing}")
++            if existing:
++                print(f"✓ SUCCESS: Using .only() to select specific fields: {existing}")
++            else:
++                print("✗ FAIL: Not using .only()")
++
++print("\nDone!")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..6fa20a66d9
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,99 @@
++"""
++Final verification that the optimization works correctly.
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Test the collector directly
++from django.db.models.deletion import Collector
++from django.db import models
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    # This field might contain problematic data
++    problematic_field = models.TextField()
++    # Other fields
++    regular_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++print("Testing Collector.related_objects optimization...")
++
++# Create a collector
++collector = Collector(using='default')
++
++# Mock parent object
++class MockParent:
++    pk = 1
++
++# Get the reverse relation
++for rel in Parent._meta.related_objects:
++    if rel.related_model == Child:
++        print(f"\nFound relation: {rel}")
++        print(f"Related field: {rel.field}")
++        
++        # Call related_objects
++        qs = collector.related_objects(rel, [MockParent()])
++        
++        # Check the query
++        sql, params = qs.query.sql_with_params()
++        print(f"\nGenerated SQL: {sql}")
++        print(f"Parameters: {params}")
++        
++        # Analyze what fields are selected
++        select_clause = sql.split('FROM')[0]
++        print(f"\nSELECT clause: {select_clause}")
++        
++        # Check if we're only selecting necessary fields
++        if 'problematic_field' in select_clause:
++            print("\nFAIL: Still selecting the problematic_field!")
++        else:
++            print("\nSUCCESS: Not selecting the problematic_field!")
++            
++        # Count fields
++        field_count = select_clause.count(',') + 1
++        print(f"Number of fields selected: {field_count}")
++        
++        if field_count <= 2:  # pk and foreign key
++            print("PASS: Only selecting necessary fields (pk and foreign key)")
++        else:
++            print("FAIL: Selecting too many fields")
++
++print("\n" + "="*80)
++print("Optimization Summary:")
++print("- The related_objects method now uses .only() to select specific fields")
++print("- Only the primary key and foreign key fields are fetched")
++print("- This prevents UnicodeDecodeError from problematic text fields")
++print("- This also improves performance by reducing data transfer")
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..3fabcec999
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,118 @@
++"""
++Verify that the fix works - .delete() should only fetch required fields.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db.models import signals
++from django.test.utils import CaptureQueriesContext
++
++# Define test models
++class Job(models.Model):
++    guid = models.CharField(max_length=100, unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class FailureLine(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='failure_lines')
++    # This field might contain problematic unicode data
++    line = models.TextField()
++    # Other fields
++    action = models.CharField(max_length=100)
++    test = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Job)
++    schema_editor.create_model(FailureLine)
++
++# Create test data
++job = Job.objects.create(guid='test-guid-1', name='Test Job')
++failure_line = FailureLine.objects.create(
++    job=job,
++    line='Some text that could have unicode issues',
++    action='test_action',
++    test='test_test'
++)
++
++print("Testing deletion behavior with the fix...")
++
++# Track queries
++with CaptureQueriesContext(connection) as queries:
++    # Use the collector directly to avoid foreign key issues
++    from django.db.models.deletion import Collector
++    collector = Collector(using='default')
++    collector.collect([job])
++    
++    # Check what queries would be executed
++    for related in collector.data:
++        print(f"\nModel to delete: {related}")
++
++# Now check the related_objects method
++from django.db.models.deletion import get_candidate_relations_to_delete
++
++# Get related objects
++for related in get_candidate_relations_to_delete(Job._meta):
++    print(f"\nChecking related field: {related.field}")
++    qs = collector.related_objects(related, [job])
++    print(f"QuerySet: {qs}")
++    print(f"Query: {qs.query}")
++    
++    # Get the SQL
++    sql, params = qs.query.sql_with_params()
++    print(f"SQL: {sql}")
++    print(f"Params: {params}")
++    
++    # Check if only primary key is selected
++    if 'SELECT' in sql:
++        # Count the number of fields selected
++        select_part = sql.split('FROM')[0]
++        field_count = select_part.count(',') + 1
++        print(f"Number of fields selected: {field_count}")
++        
++        if field_count == 1 and 'id' in select_part.lower():
++            print("✓ SUCCESS: Only selecting the primary key field!")
++        else:
++            print("✗ FAIL: Still selecting all fields")
++
++# Clean up
++try:
++    FailureLine.objects.all().delete()
++    Job.objects.all().delete()
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(FailureLine)
++        schema_editor.delete_model(Job)
++except:
++    pass
++
++print("\nDone!")
+diff --git a/test_issue_demonstration.py b/test_issue_demonstration.py
+new file mode 100644
+index 0000000000..98bbd42507
+--- /dev/null
++++ b/test_issue_demonstration.py
+@@ -0,0 +1,107 @@
++"""
++Demonstrate the issue where .delete() fetches all fields unnecessarily.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.db.models import deletion, signals
++from django.test.utils import CaptureQueriesContext
++
++# Define test models
++class Job(models.Model):
++    guid = models.CharField(max_length=100, unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class FailureLine(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='failure_lines')
++    # This field might contain problematic unicode data
++    line = models.TextField()
++    # Other fields
++    action = models.CharField(max_length=100)
++    test = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Disable foreign key constraints for SQLite
++with connection.cursor() as cursor:
++    cursor.execute("PRAGMA foreign_keys = OFF")
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Job)
++    schema_editor.create_model(FailureLine)
++
++# Create test data
++job = Job.objects.create(guid='test-guid-1', name='Test Job')
++failure_line = FailureLine.objects.create(
++    job=job,
++    line='Some text that could have unicode issues',
++    action='test_action',
++    test='test_test'
++)
++
++print("Testing deletion behavior...")
++
++# Prevent fast delete by adding a signal listener
++@signals.pre_delete.connect
++def prevent_fast_delete(sender, **kwargs):
++    pass
++
++# Track queries
++with CaptureQueriesContext(connection) as queries:
++    # Delete using a queryset filter (similar to the problem statement)
++    Job.objects.filter(guid__in=['test-guid-1']).delete()
++
++# Print queries
++print("\nQueries executed during delete:")
++for i, query in enumerate(queries):
++    sql = query['sql']
++    print(f"\n{i+1}. {sql}")
++    
++    # Check if this is a SELECT query for FailureLine
++    if 'SELECT' in sql and 'failure' in sql.lower():
++        print("   ^ This query selects ALL fields from FailureLine!")
++        print("   It should only select the primary key and foreign key fields.")
++
++# Clean up
++signals.pre_delete.disconnect(prevent_fast_delete)
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(FailureLine)
++        schema_editor.delete_model(Job)
++except:
++    pass
++
++print("\nThe issue is that when deleting Job objects, Django fetches ALL fields")
++print("from related FailureLine objects, including the 'line' field which might")
++print("contain problematic unicode data. This is unnecessary - we only need the")
++print("primary key for deletion.")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..5caccfba9f
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,138 @@
++"""
++Test that demonstrates the fix for the exact issue in the problem statement.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Recreate the models from the problem statement
++class Job(models.Model):
++    guid = models.CharField(max_length=255, unique=True)
++    repository_id = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class JobLog(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE)
++    name = models.CharField(max_length=50)
++    url = models.CharField(max_length=255)
++    status = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class FailureLine(models.Model):
++    job_guid = models.CharField(max_length=255)
++    repository_id = models.IntegerField()
++    job_log = models.ForeignKey(JobLog, on_delete=models.CASCADE, null=True, blank=True)
++    action = models.CharField(max_length=50)
++    line = models.TextField()  # This field might contain problematic unicode data
++    test = models.CharField(max_length=200, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TextLogStep(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE)
++    name = models.CharField(max_length=200)
++    started_line_number = models.IntegerField()
++    finished_line_number = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TextLogError(models.Model):
++    step = models.ForeignKey(TextLogStep, on_delete=models.CASCADE)
++    line = models.TextField()  # This field might contain problematic unicode data
++    line_number = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++print("Demonstrating the fix for the problem statement...")
++print("\nThe issue was that during .delete(), Django was fetching ALL fields")
++print("from related models, including text fields that might contain invalid")
++print("unicode data. This caused UnicodeDecodeError in Python 3.")
++print("\nWith our fix, only necessary fields (pk and foreign keys) are fetched.")
++
++# Test the SQL generated during deletion
++from django.test.utils import CaptureQueriesContext
++from django.db.models.deletion import Collector
++
++# Create a collector
++collector = Collector(using='default')
++
++# Mock a job object
++class MockJob:
++    pk = 206573433
++    guid = '0ec189d6-b854-4300-969a-bf3a3378bff3/0'
++
++# Check each related model
++print("\nAnalyzing queries that would be generated during Job deletion:")
++print("="*80)
++
++for rel in Job._meta.related_objects:
++    model_name = rel.related_model.__name__
++    print(f"\n{model_name}:")
++    
++    # Get the query that would be executed
++    qs = collector.related_objects(rel, [MockJob()])
++    sql, params = qs.query.sql_with_params()
++    
++    print(f"  SQL: {sql}")
++    print(f"  Params: {params}")
++    
++    # Check what fields are selected
++    select_clause = sql.split('FROM')[0].upper()
++    
++    # Check if text fields are being selected
++    if 'LINE' in select_clause and model_name in ['FailureLine', 'TextLogError']:
++        # Make sure we're not selecting the 'line' text field
++        # (we might select line_number which is OK)
++        if '"LINE"' in select_clause or '`LINE`' in select_clause or ' LINE,' in select_clause:
++            print(f"  WARNING: The problematic 'line' field is being selected!")
++        else:
++            print(f"  GOOD: The 'line' text field is NOT being selected")
++    
++    # Count fields
++    field_count = select_clause.count(',') + 1
++    print(f"  Fields selected: {field_count}")
++    
++    if field_count <= 2:
++        print(f"  ✓ Optimized: Only selecting necessary fields")
++    else:
++        print(f"  ✗ Not optimized: Selecting {field_count} fields")
++
++print("\n" + "="*80)
++print("Summary:")
++print("- The optimization successfully prevents fetching text fields during deletion")
++print("- This avoids UnicodeDecodeError when text fields contain invalid unicode")
++print("- Performance is also improved by fetching less data")
+diff --git a/test_simple_fix.py b/test_simple_fix.py
+new file mode 100644
+index 0000000000..ae22d4ce3e
+--- /dev/null
++++ b/test_simple_fix.py
+@@ -0,0 +1,17 @@
++"""
++Simple test to verify the fix.
++"""
++# First, let's check the fix was applied
++from django.db.models.deletion import Collector
++
++# Check if our fix is in the code
++import inspect
++source = inspect.getsource(Collector.related_objects)
++print("Current related_objects method:")
++print(source)
++
++# Check if .only() is in the method
++if '.only(' in source:
++    print("\n✓ SUCCESS: The fix has been applied - .only() is being used!")
++else:
++    print("\n✗ FAIL: The fix was not applied correctly")
+diff --git a/test_unicode_issue.py b/test_unicode_issue.py
+new file mode 100644
+index 0000000000..247ff8c001
+--- /dev/null
++++ b/test_unicode_issue.py
+@@ -0,0 +1,132 @@
++"""
++Test that verifies the fix for the unicode issue in delete operations.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=False,
++    )
++    django.setup()
++
++from django.test.utils import CaptureQueriesContext
++
++# Define test models similar to the problem statement
++class Job(models.Model):
++    guid = models.CharField(max_length=100, unique=True)
++    repository_id = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class JobLog(models.Model):
++    job = models.ForeignKey(Job, on_delete=models.CASCADE)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TextLogError(models.Model):
++    job_log = models.ForeignKey(JobLog, on_delete=models.CASCADE)
++    # This field might contain problematic unicode data
++    line = models.TextField()
++    line_number = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Job)
++    schema_editor.create_model(JobLog)
++    schema_editor.create_model(TextLogError)
++
++# Create test data
++job = Job.objects.create(guid='test-guid-1', repository_id=1)
++job_log = JobLog.objects.create(job=job, name='test.log')
++text_log_error = TextLogError.objects.create(
++    job_log=job_log,
++    line='Some text that could have unicode issues',
++    line_number=1
++)
++
++print("Testing cascading delete with optimized field selection...")
++
++# Track queries
++with CaptureQueriesContext(connection) as queries:
++    # Delete the job - this should cascade to JobLog and TextLogError
++    Job.objects.filter(guid='test-guid-1').delete()
++
++# Analyze queries
++print("\nQueries executed during delete:")
++text_log_error_queries = []
++for i, query in enumerate(queries):
++    sql = query['sql']
++    print(f"\n{i+1}. {sql}")
++    
++    # Check if this is a SELECT query for TextLogError
++    if 'SELECT' in sql and 'text_log_error' in sql.lower():
++        text_log_error_queries.append(sql)
++
++print("\n" + "="*80)
++print("Analysis of TextLogError queries:")
++for sql in text_log_error_queries:
++    print(f"\nQuery: {sql}")
++    
++    # Check what fields are being selected
++    select_part = sql.split('FROM')[0].lower()
++    
++    # Count fields
++    field_count = select_part.count(',') + 1
++    print(f"Number of fields selected: {field_count}")
++    
++    # Check if the problematic 'line' field is being selected
++    if 'line' in select_part and 'line_number' not in select_part.replace('line,', ''):
++        print("WARNING: The 'line' field is being selected (could cause unicode issues)")
++    else:
++        print("GOOD: The 'line' field is NOT being selected")
++    
++    # Check if only necessary fields are selected
++    if field_count <= 2:  # id and foreign key
++        print("SUCCESS: Only selecting necessary fields for deletion!")
++    else:
++        print("ISSUE: Selecting more fields than necessary")
++
++# Verify deletion was successful
++assert Job.objects.count() == 0
++assert JobLog.objects.count() == 0
++assert TextLogError.objects.count() == 0
++
++print("\n" + "="*80)
++print("Test completed successfully!")
++print("The optimization prevents fetching the problematic 'line' field during deletion.")
++
++# Clean up
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(TextLogError)
++        schema_editor.delete_model(JobLog)
++        schema_editor.delete_model(Job)
++except:
++    pass

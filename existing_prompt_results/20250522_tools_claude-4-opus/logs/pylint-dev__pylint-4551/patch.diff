@@ -1,0 +1,269 @@
+diff --git a/classes.dot b/classes.dot
+new file mode 100644
+index 000000000..04f2ee204
+--- /dev/null
++++ b/classes.dot
+@@ -0,0 +1,5 @@
++digraph "classes" {
++charset="utf-8"
++rankdir=BT
++"0" [label="{EdgeCases|annotation_and_default : float\lany_type : Any\lcallable_type : Callable[[int], str]\ldirect_assign : str\lno_annotation\ltuple_type : Tuple[str, int]\lwith_annotation : str\lwith_default : int\l|method_no_annotations(x, y)\lmethod_with_annotations(x: int, y: str) -> bool\l}", shape="record"];
++}
+diff --git a/classes.vcg b/classes.vcg
+new file mode 100644
+index 000000000..ef8c61748
+--- /dev/null
++++ b/classes.vcg
+@@ -0,0 +1,13 @@
++graph:{
++  title:"classes"
++  layoutalgorithm:dfs
++  late_edge_labels:yes
++  port_sharing:no
++  manhattan_edges:yes
++  node: {title:"0"  label:"\fbC\fn\n\f_________\n\f08a : str\n\f_________"
++  shape:box
++}
++  node: {title:"1"  label:"\fbD\fn\n\f_______________\n\f08active : bool\n\f08age : int\n\f08name : str\n\f_______________\n\f10process()"
++  shape:box
++}
++}
+diff --git a/pylint/pyreverse/diagrams.py b/pylint/pyreverse/diagrams.py
+index bf9f67af6..dbee14a28 100644
+--- a/pylint/pyreverse/diagrams.py
++++ b/pylint/pyreverse/diagrams.py
+@@ -91,9 +91,17 @@ class ClassDiagram(Figure, FilterMixIn):
+         ):
+             if not self.show_attr(node_name):
+                 continue
+-            names = self.class_names(associated_nodes)
+-            if names:
+-                node_name = "{} : {}".format(node_name, ", ".join(names))
++            
++            # Check if we have a type annotation for this attribute
++            if (hasattr(node, 'instance_attrs_annotations') and 
++                node_name in node.instance_attrs_annotations):
++                # Use the annotation string directly
++                node_name = "{} : {}".format(node_name, node.instance_attrs_annotations[node_name])
++            else:
++                # Fall back to inferred types
++                names = self.class_names(associated_nodes)
++                if names:
++                    node_name = "{} : {}".format(node_name, ", ".join(names))
+             attrs.append(node_name)
+         return sorted(attrs)
+ 
+diff --git a/pylint/pyreverse/inspector.py b/pylint/pyreverse/inspector.py
+index 8fa122022..ab5ba3ed8 100644
+--- a/pylint/pyreverse/inspector.py
++++ b/pylint/pyreverse/inspector.py
+@@ -162,6 +162,8 @@ class Linker(IdGeneratorMixIn, utils.LocalsVisitor):
+             baseobj.specializations = specializations
+         # resolve instance attributes
+         node.instance_attrs_type = collections.defaultdict(list)
++        # Add a mapping for type annotations
++        node.instance_attrs_annotations = {}
+         for assignattrs in node.instance_attrs.values():
+             for assignattr in assignattrs:
+                 if not isinstance(assignattr, astroid.Unknown):
+@@ -231,6 +233,59 @@ class Linker(IdGeneratorMixIn, utils.LocalsVisitor):
+         """
+         try:
+             values = set(node.infer())
++            
++            # Check if we're in __init__ and assigning from a parameter with type annotation
++            frame = node.frame()
++            if (isinstance(frame, astroid.FunctionDef) and 
++                frame.name == '__init__' and
++                isinstance(node.parent, astroid.Assign)):
++                # Check if the value being assigned is a parameter
++                param_name = None
++                if isinstance(node.parent.value, astroid.Name):
++                    param_name = node.parent.value.name
++                elif isinstance(node.parent.value, astroid.BoolOp):
++                    # Handle cases like "self.x = x or default_value"
++                    for value in node.parent.value.values:
++                        if isinstance(value, astroid.Name):
++                            param_name = value.name
++                            break
++                if param_name and frame.args:
++                    # Find the parameter index
++                    param_idx = None
++                    for idx, arg in enumerate(frame.args.args):
++                        if arg.name == param_name:
++                            param_idx = idx
++                            break
++                    
++                    # If we found the parameter and it has an annotation
++                    if param_idx is not None and param_idx < len(frame.args.annotations):
++                        annotation = frame.args.annotations[param_idx]
++                        if annotation is not None:
++                            # Store the annotation string for later use
++                            if hasattr(parent, 'instance_attrs_annotations'):
++                                parent.instance_attrs_annotations[node.attrname] = annotation.as_string()
++                            
++                            # Try to resolve the annotation to a type
++                            try:
++                                # For simple type annotations like 'str', 'int', etc.
++                                if isinstance(annotation, astroid.Name):
++                                    # Try to infer the annotation
++                                    inferred = next(annotation.infer())
++                                    if isinstance(inferred, astroid.ClassDef):
++                                        # Use the annotated type instead of inferred value
++                                        values = {inferred.instantiate_class()}
++                                elif isinstance(annotation, astroid.Subscript):
++                                    # For generic types like List[str], Dict[str, int], etc.
++                                    # Try to get the base type
++                                    if isinstance(annotation.value, astroid.Name):
++                                        base_inferred = next(annotation.value.infer())
++                                        if isinstance(base_inferred, astroid.ClassDef):
++                                            # Use the base type (e.g., list, dict)
++                                            values = {base_inferred.instantiate_class()}
++                            except (astroid.InferenceError, StopIteration):
++                                # If we can't infer the annotation, fall back to regular inference
++                                pass
++            
+             current = set(parent.instance_attrs_type[node.attrname])
+             parent.instance_attrs_type[node.attrname] = list(current | values)
+         except astroid.InferenceError:
+diff --git a/pylint/pyreverse/writer.py b/pylint/pyreverse/writer.py
+index 0d80bb9ca..56d294039 100644
+--- a/pylint/pyreverse/writer.py
++++ b/pylint/pyreverse/writer.py
+@@ -135,10 +135,26 @@ class DotWriter(DiagramWriter):
+             label = r"{}|{}\l|".format(label, r"\l".join(obj.attrs))
+             for func in obj.methods:
+                 if func.args.args:
+-                    args = [arg.name for arg in func.args.args if arg.name != "self"]
++                    args = []
++                    for i, arg in enumerate(func.args.args):
++                        if arg.name == "self":
++                            continue
++                        arg_str = arg.name
++                        # Add type annotation if available
++                        if i < len(func.args.annotations) and func.args.annotations[i] is not None:
++                            annotation = func.args.annotations[i]
++                            if hasattr(annotation, 'as_string'):
++                                arg_str = f"{arg.name}: {annotation.as_string()}"
++                        args.append(arg_str)
+                 else:
+                     args = []
+-                label = r"{}{}({})\l".format(label, func.name, ", ".join(args))
++                
++                # Format method signature with return type if available
++                method_sig = f"{func.name}({', '.join(args)})"
++                if func.returns is not None and hasattr(func.returns, 'as_string'):
++                    method_sig = f"{method_sig} -> {func.returns.as_string()}"
++                    
++                label = r"{}{}\l".format(label, method_sig)
+             label = "{%s}" % label
+         if is_exception(obj.node):
+             return dict(fontcolor="red", label=label, shape="record")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..b22e5159b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,28 @@
++"""Test edge cases for type hints"""
++from typing import Any, Callable, Tuple
++
++class EdgeCases:
++    def __init__(self, 
++                 no_annotation,
++                 with_annotation: str,
++                 with_default: int = 42,
++                 annotation_and_default: float = 3.14,
++                 any_type: Any = None,
++                 callable_type: Callable[[int], str] = None,
++                 tuple_type: Tuple[str, int] = None):
++        self.no_annotation = no_annotation
++        self.with_annotation = with_annotation
++        self.with_default = with_default
++        self.annotation_and_default = annotation_and_default
++        self.any_type = any_type
++        self.callable_type = callable_type
++        self.tuple_type = tuple_type
++        
++        # Direct assignment without parameter
++        self.direct_assign = "hello"
++        
++    def method_with_annotations(self, x: int, y: str = "default") -> bool:
++        return True
++        
++    def method_no_annotations(self, x, y):
++        pass
+diff --git a/test_original_example.py b/test_original_example.py
+new file mode 100644
+index 000000000..a90f4b2dc
+--- /dev/null
++++ b/test_original_example.py
+@@ -0,0 +1,3 @@
++class C(object):
++    def __init__(self, a: str = None):
++        self.a = a
+diff --git a/test_type_hints.py b/test_type_hints.py
+new file mode 100644
+index 000000000..5a54259de
+--- /dev/null
++++ b/test_type_hints.py
+@@ -0,0 +1,14 @@
++"""Test file to reproduce the type hints issue"""
++
++class C(object):
++    def __init__(self, a: str = None):
++        self.a = a
++
++class D:
++    def __init__(self, name: str, age: int = 0, active: bool = True):
++        self.name = name
++        self.age = age
++        self.active = active
++    
++    def process(self, data: str) -> int:
++        return len(data)
+diff --git a/test_type_hints_comprehensive.py b/test_type_hints_comprehensive.py
+new file mode 100644
+index 000000000..1a4285dfc
+--- /dev/null
++++ b/test_type_hints_comprehensive.py
+@@ -0,0 +1,39 @@
++"""Comprehensive test for type hints support"""
++from typing import List, Optional, Union, Dict
++
++class Employee:
++    def __init__(self, name: str, employee_id: int, salary: float = 50000.0):
++        self.name = name
++        self.employee_id = employee_id
++        self.salary = salary
++    
++    def get_info(self) -> str:
++        return f"{self.name} ({self.employee_id})"
++    
++    def give_raise(self, amount: float) -> None:
++        self.salary += amount
++
++class Department:
++    def __init__(self, name: str, employees: Optional[List[Employee]] = None):
++        self.name = name
++        self.employees = employees or []
++    
++    def add_employee(self, employee: Employee) -> bool:
++        if employee not in self.employees:
++            self.employees.append(employee)
++            return True
++        return False
++    
++    def get_employee_count(self) -> int:
++        return len(self.employees)
++    
++    def find_employee(self, employee_id: Union[int, str]) -> Optional[Employee]:
++        for emp in self.employees:
++            if emp.employee_id == employee_id:
++                return emp
++        return None
++
++class Company:
++    def __init__(self, name: str, departments: Dict[str, Department] = None):
++        self.name = name
++        self.departments = departments or {}

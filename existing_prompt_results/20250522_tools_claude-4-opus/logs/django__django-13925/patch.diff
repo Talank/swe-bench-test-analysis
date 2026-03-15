@@ -1,0 +1,549 @@
+diff --git a/debug_fix.py b/debug_fix.py
+new file mode 100644
+index 0000000000..cb73715cf2
+--- /dev/null
++++ b/debug_fix.py
+@@ -0,0 +1,58 @@
++"""Debug script to test the fix."""
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create models
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class User(Entity):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Debug the check
++print("Checking User model:")
++print(f"  User._meta.pk: {User._meta.pk}")
++print(f"  User._meta.pk.auto_created: {User._meta.pk.auto_created}")
++print(f"  hasattr(User._meta.pk, 'remote_field'): {hasattr(User._meta.pk, 'remote_field')}")
++if hasattr(User._meta.pk, 'remote_field'):
++    print(f"  User._meta.pk.remote_field: {User._meta.pk.remote_field}")
++    print(f"  hasattr(User._meta.pk.remote_field, 'parent_link'): {hasattr(User._meta.pk.remote_field, 'parent_link')}")
++    print(f"  User._meta.pk.remote_field.parent_link: {getattr(User._meta.pk.remote_field, 'parent_link', None)}")
++
++# Check parents
++print(f"\n  User._meta.parents: {User._meta.parents}")
++for parent, parent_link in User._meta.parents.items():
++    print(f"    Parent: {parent}")
++    print(f"    Parent link: {parent_link}")
++    print(f"    Parent link == User._meta.pk: {parent_link == User._meta.pk}")
++    print(f"    Parent._meta.pk: {parent._meta.pk}")
++    print(f"    Parent._meta.pk.auto_created: {parent._meta.pk.auto_created}")
++
++# Run the check
++errors = User._check_default_pk()
++print(f"\nW042 errors: {len(errors)}")
+diff --git a/debug_inheritance.py b/debug_inheritance.py
+new file mode 100644
+index 0000000000..67a807da05
+--- /dev/null
++++ b/debug_inheritance.py
+@@ -0,0 +1,57 @@
++"""Debug script to understand PK inheritance."""
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create models
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class User(Entity):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Debug info
++print("Entity model:")
++print(f"  pk field: {Entity._meta.pk}")
++print(f"  pk.auto_created: {Entity._meta.pk.auto_created}")
++print(f"  pk field type: {type(Entity._meta.pk)}")
++
++print("\nUser model:")
++print(f"  pk field: {User._meta.pk}")
++print(f"  pk.auto_created: {User._meta.pk.auto_created}")
++print(f"  pk field type: {type(User._meta.pk)}")
++print(f"  parents: {User._meta.parents}")
++
++# Check if they're the same field object
++print(f"\nSame pk field object? {Entity._meta.pk is User._meta.pk}")
++
++# Check parent link
++for parent, field in User._meta.parents.items():
++    print(f"\nParent: {parent}")
++    print(f"  Parent link field: {field}")
++    print(f"  Parent link field.primary_key: {field.primary_key}")
++    print(f"  Parent link field.auto_created: {field.auto_created}")
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..8a403be2e3 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1302,6 +1302,27 @@ class Model(metaclass=ModelBase):
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+             not cls._meta.app_config._is_default_auto_field_overridden
+         ):
++            # Skip warning if the auto-created pk is a parent link to a model
++            # with an explicit primary key (checking recursively up the chain)
++            if (hasattr(cls._meta.pk, 'remote_field') and 
++                cls._meta.pk.remote_field and 
++                getattr(cls._meta.pk.remote_field, 'parent_link', False)):
++                # Check if any ancestor model has an explicit primary key
++                for parent, parent_link in cls._meta.parents.items():
++                    if parent_link == cls._meta.pk:
++                        # Check this parent and its ancestors recursively
++                        parent_model = parent
++                        while parent_model:
++                            if not parent_model._meta.pk.auto_created:
++                                # Found an explicit PK in the inheritance chain
++                                return []
++                            # Check if this parent has parents (multi-level inheritance)
++                            if parent_model._meta.parents:
++                                # Get the first parent (Django doesn't support multiple inheritance well)
++                                parent_model = next(iter(parent_model._meta.parents.keys()))
++                            else:
++                                break
++            
+             return [
+                 checks.Warning(
+                     f"Auto-created primary key used when not defining a "
+diff --git a/test_final_fix.py b/test_final_fix.py
+new file mode 100644
+index 0000000000..09a0780632
+--- /dev/null
++++ b/test_final_fix.py
+@@ -0,0 +1,103 @@
++"""Test script to demonstrate the fix for W042 warning on inherited models."""
++import django
++from django.conf import settings
++from django.db import models
++from django.core import checks
++from django.apps import apps
++from django.apps.config import AppConfig
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'accounts',
++        'blocks',
++    ],
++    USE_TZ=True,
++)
++
++# Create app configs
++class AccountsConfig(AppConfig):
++    name = 'accounts'
++    label = 'accounts'
++
++class BlocksConfig(AppConfig):
++    name = 'blocks'
++    label = 'blocks'
++
++# Register apps
++apps.app_configs['accounts'] = AccountsConfig('accounts', None)
++apps.app_configs['blocks'] = BlocksConfig('blocks', None)
++apps.all_models['accounts'] = {}
++apps.all_models['blocks'] = {}
++apps.apps_ready = apps.models_ready = apps.ready = True
++
++django.setup()
++
++# Create models similar to the problem statement
++class Entity(models.Model):
++    """Base model with explicit primary key"""
++    id = models.BigAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'accounts'
++        abstract = False
++
++class User(Entity):
++    """User model inheriting from Entity"""
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'accounts'
++
++class ReservedUsername(Entity):
++    """Another model inheriting from Entity"""
++    username = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'accounts'
++
++class Block(models.Model):
++    """Model without explicit PK - should get W042"""
++    content = models.TextField()
++    
++    class Meta:
++        app_label = 'blocks'
++
++# Register models
++apps.all_models['accounts']['entity'] = Entity
++apps.all_models['accounts']['user'] = User
++apps.all_models['accounts']['reservedusername'] = ReservedUsername
++apps.all_models['blocks']['block'] = Block
++
++# Run checks
++print("Running Django system checks...\n")
++all_errors = []
++
++for model in [Entity, User, ReservedUsername, Block]:
++    errors = model._check_default_pk()
++    if errors:
++        all_errors.extend(errors)
++        print(f"{model.__name__}: W042 warning raised")
++    else:
++        print(f"{model.__name__}: No W042 warning (correct)")
++
++print(f"\nTotal W042 warnings: {len(all_errors)}")
++print("\nExpected behavior:")
++print("- Entity: No warning (has explicit PK)")
++print("- User: No warning (inherits from Entity with explicit PK)")
++print("- ReservedUsername: No warning (inherits from Entity with explicit PK)")
++print("- Block: Should have warning (no explicit PK)")
++
++# Verify expected behavior
++expected_warnings = 1  # Only Block should get W042
++if len(all_errors) == expected_warnings:
++    print(f"\n✅ SUCCESS: Got expected number of warnings ({expected_warnings})")
++else:
++    print(f"\n❌ FAILURE: Expected {expected_warnings} warnings but got {len(all_errors)}")
+diff --git a/test_inheritance_pk.py b/test_inheritance_pk.py
+new file mode 100644
+index 0000000000..ce3782ee30
+--- /dev/null
++++ b/test_inheritance_pk.py
+@@ -0,0 +1,61 @@
++"""Test to reproduce the issue with W042 warning on inherited primary keys."""
++import django
++from django.conf import settings
++from django.db import models
++from django.core import checks
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Test case
++def test_inherited_pk():
++    # Create parent model with explicit primary key
++    class Entity(models.Model):
++        id = models.BigAutoField(primary_key=True)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Create child model that inherits from Entity
++    class User(Entity):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Run checks
++    errors = checks.run_checks()
++    
++    # Filter for W042 warnings
++    w042_errors = [e for e in errors if e.id == 'models.W042']
++    
++    print(f"Number of W042 warnings: {len(w042_errors)}")
++    for error in w042_errors:
++        print(f"  - {error.obj}: {error.msg}")
++    
++    # The issue is that User model gets W042 warning even though it inherits
++    # from Entity which has an explicit primary key
++    return w042_errors
++
++if __name__ == '__main__':
++    errors = test_inherited_pk()
++    if errors:
++        print("\nISSUE REPRODUCED: Child model gets W042 warning despite inheriting explicit PK from parent")
++    else:
++        print("\nNo W042 warnings found - issue may be fixed")
+diff --git a/test_inheritance_pk_detailed.py b/test_inheritance_pk_detailed.py
+new file mode 100644
+index 0000000000..0da6a634d1
+--- /dev/null
++++ b/test_inheritance_pk_detailed.py
+@@ -0,0 +1,77 @@
++"""Test to reproduce the issue with W042 warning on inherited primary keys."""
++import django
++from django.conf import settings
++from django.db import models
++from django.core import checks
++from django.apps import apps
++from django.apps.config import AppConfig
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'test_app',
++    ],
++    USE_TZ=True,
++)
++
++# Create a test app config
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++    label = 'test_app'
++
++# Register the app
++apps.app_configs['test_app'] = TestAppConfig('test_app', None)
++apps.all_models['test_app'] = {}
++apps.apps_ready = apps.models_ready = apps.ready = True
++
++django.setup()
++
++# Test case
++def test_inherited_pk():
++    # Create parent model with explicit primary key
++    class Entity(models.Model):
++        id = models.BigAutoField(primary_key=True)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Create child model that inherits from Entity
++    class User(Entity):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Register models
++    apps.all_models['test_app']['entity'] = Entity
++    apps.all_models['test_app']['user'] = User
++    
++    # Debug info
++    print(f"Entity._meta.pk: {Entity._meta.pk}")
++    print(f"Entity._meta.pk.auto_created: {Entity._meta.pk.auto_created}")
++    print(f"User._meta.pk: {User._meta.pk}")
++    print(f"User._meta.pk.auto_created: {User._meta.pk.auto_created}")
++    print(f"User._meta.parents: {User._meta.parents}")
++    
++    # Run checks on User model
++    errors = User._check_default_pk()
++    
++    print(f"\nNumber of W042 warnings for User model: {len(errors)}")
++    for error in errors:
++        print(f"  - {error.msg}")
++    
++    return errors
++
++if __name__ == '__main__':
++    errors = test_inherited_pk()
++    if errors:
++        print("\nISSUE REPRODUCED: Child model gets W042 warning despite inheriting explicit PK from parent")
++    else:
++        print("\nNo W042 warnings found - issue may be fixed")
+diff --git a/test_simple_fix.py b/test_simple_fix.py
+new file mode 100644
+index 0000000000..d26ae27b87
+--- /dev/null
++++ b/test_simple_fix.py
+@@ -0,0 +1,75 @@
++"""Simple test to verify the fix works."""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++django.setup()
++
++from django.db import models
++from django.test.utils import isolate_apps
++
++@isolate_apps('check_framework')
++def test_fix():
++    # Create models similar to the problem statement
++    class Entity(models.Model):
++        """Base model with explicit primary key"""
++        id = models.BigAutoField(primary_key=True)
++        
++        class Meta:
++            app_label = 'check_framework'
++
++    class User(Entity):
++        """User model inheriting from Entity"""
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'check_framework'
++
++    class ReservedUsername(Entity):
++        """Another model inheriting from Entity"""
++        username = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'check_framework'
++
++    class Block(models.Model):
++        """Model without explicit PK - should get W042"""
++        content = models.TextField()
++        
++        class Meta:
++            app_label = 'check_framework'
++
++    # Check each model
++    print("Checking models for W042 warning:\n")
++    
++    models_to_check = [
++        (Entity, False, "has explicit PK"),
++        (User, False, "inherits from Entity with explicit PK"),
++        (ReservedUsername, False, "inherits from Entity with explicit PK"),
++        (Block, True, "no explicit PK defined"),
++    ]
++    
++    all_pass = True
++    for model, should_warn, reason in models_to_check:
++        errors = model._check_default_pk()
++        has_warning = len(errors) > 0
++        
++        status = "✅" if has_warning == should_warn else "❌"
++        print(f"{status} {model.__name__}: {'W042 raised' if has_warning else 'No W042'} - {reason}")
++        
++        if has_warning != should_warn:
++            all_pass = False
++    
++    return all_pass
++
++if __name__ == '__main__':
++    print("Testing fix for Django issue: models.W042 raised on inherited manually specified primary key\n")
++    
++    if test_fix():
++        print("\n✅ All tests passed! The fix is working correctly.")
++    else:
++        print("\n❌ Some tests failed!")
+diff --git a/tests/check_framework/test_model_checks.py b/tests/check_framework/test_model_checks.py
+index d4342ada07..d5da1ae1d4 100644
+--- a/tests/check_framework/test_model_checks.py
++++ b/tests/check_framework/test_model_checks.py
+@@ -415,3 +415,45 @@ class ModelDefaultAutoFieldTests(SimpleTestCase):
+                 app_label = 'check_framework.apps.CheckPKConfig'
+ 
+         self.assertEqual(checks.run_checks(app_configs=apps.get_app_configs()), [])
++
++    def test_inherited_explicit_pk(self):
++        # Test that child models inheriting from a parent with explicit PK
++        # should not get W042 warning
++        class Entity(models.Model):
++            id = models.BigAutoField(primary_key=True)
++
++        class User(Entity):
++            name = models.CharField(max_length=100)
++
++        # User should not get W042 warning since it inherits explicit PK from Entity
++        self.assertEqual(checks.run_checks(app_configs=self.apps.get_app_configs()), [])
++
++    def test_inherited_auto_pk(self):
++        # Test that child models inheriting from a parent with auto-created PK
++        # should still get W042 warning
++        class Entity(models.Model):
++            pass  # Auto-created PK
++
++        class User(Entity):
++            name = models.CharField(max_length=100)
++
++        # Both Entity and User should get W042 warning
++        errors = checks.run_checks(app_configs=self.apps.get_app_configs())
++        self.assertEqual(len(errors), 2)
++        self.assertEqual({error.id for error in errors}, {'models.W042'})
++        model_names = {error.obj.__name__ for error in errors}
++        self.assertEqual(model_names, {'Entity', 'User'})
++
++    def test_multi_level_inheritance_explicit_pk(self):
++        # Test multi-level inheritance with explicit PK at the root
++        class Entity(models.Model):
++            id = models.BigAutoField(primary_key=True)
++
++        class User(Entity):
++            name = models.CharField(max_length=100)
++        
++        class AdminUser(User):
++            permissions = models.CharField(max_length=100)
++
++        # Neither User nor AdminUser should get W042 warning
++        self.assertEqual(checks.run_checks(app_configs=self.apps.get_app_configs()), [])

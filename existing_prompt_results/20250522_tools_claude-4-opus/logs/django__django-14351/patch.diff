@@ -1,0 +1,1060 @@
+diff --git a/debug_q_or_issue.py b/debug_q_or_issue.py
+new file mode 100644
+index 0000000000..3e5b2ec363
+--- /dev/null
++++ b/debug_q_or_issue.py
+@@ -0,0 +1,121 @@
++"""Debug script to understand the Q object __or__ issue"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count
++from django.db import connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'property_propertygroup'
++
++class ManagementAgent(models.Model):
++    name = models.CharField(max_length=100)
++    property_groups = models.ManyToManyField(
++        PropertyGroup,
++        through='ManagementAgentPropertyGroup',
++        related_name='management_agents'
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagent'
++
++class ManagementAgentPropertyGroup(models.Model):
++    management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagentpropertygroup'
++
++class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++    date = models.DateField()
++    average = models.DecimalField(max_digits=5, decimal_places=2)
++    data_points = models.IntegerField()
++    agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++    schema_editor.create_model(ManagementAgent) 
++    schema_editor.create_model(ManagementAgentPropertyGroup)
++    schema_editor.create_model(ManagerTicketRatingCumulativeMovingAverage)
++
++# Create test data
++pg1 = PropertyGroup.objects.create(name="Group 1")
++pg2 = PropertyGroup.objects.create(name="Group 2")
++agent1 = ManagementAgent.objects.create(name="Agent 1")
++agent2 = ManagementAgent.objects.create(name="Agent 2")
++ManagementAgentPropertyGroup.objects.create(management_agent=agent1, property_group=pg1)
++
++# Create some rating data
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=4.5, data_points=10, agent=agent1
++)
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=3.5, data_points=5, agent=agent2
++)
++
++# Test the issue
++property_groups = PropertyGroup.objects.filter(id__in=[pg1.id])
++queryset = ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++    Count("agent__property_groups")
++)
++
++# Enable query logging
++connection.queries_log.clear()
++
++print("Testing problematic query (with __in)...")
++try:
++    # Build the query but don't execute it yet
++    result = queryset.filter(
++        Q(agent__property_groups__in=property_groups)
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    
++    # Get the SQL without executing
++    sql = str(result.query)
++    print(f"Generated SQL:\n{sql}")
++    
++    # Now try to execute
++    count = result.count()
++    print(f"Success! Count: {count}")
++except Exception as e:
++    print(f"Error: {e}")
++    
++    # Print the last query if available
++    if connection.queries:
++        print(f"\nLast SQL query attempted:\n{connection.queries[-1]['sql']}")
+diff --git a/debug_subquery.py b/debug_subquery.py
+new file mode 100644
+index 0000000000..792e221f57
+--- /dev/null
++++ b/debug_subquery.py
+@@ -0,0 +1,131 @@
++"""Debug script to understand subquery handling"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'property_propertygroup'
++
++class ManagementAgent(models.Model):
++    name = models.CharField(max_length=100)
++    property_groups = models.ManyToManyField(
++        PropertyGroup,
++        through='ManagementAgentPropertyGroup',
++        related_name='management_agents'
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagent'
++
++class ManagementAgentPropertyGroup(models.Model):
++    management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagentpropertygroup'
++
++class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++    date = models.DateField()
++    average = models.DecimalField(max_digits=5, decimal_places=2)
++    data_points = models.IntegerField()
++    agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++    schema_editor.create_model(ManagementAgent) 
++    schema_editor.create_model(ManagementAgentPropertyGroup)
++    schema_editor.create_model(ManagerTicketRatingCumulativeMovingAverage)
++
++# Create test data
++pg1 = PropertyGroup.objects.create(name="Group 1")
++pg2 = PropertyGroup.objects.create(name="Group 2")
++agent1 = ManagementAgent.objects.create(name="Agent 1")
++agent2 = ManagementAgent.objects.create(name="Agent 2")
++ManagementAgentPropertyGroup.objects.create(management_agent=agent1, property_group=pg1)
++
++# Create some rating data
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=4.5, data_points=10, agent=agent1
++)
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=3.5, data_points=5, agent=agent2
++)
++
++# Test the issue
++property_groups = PropertyGroup.objects.filter(id__in=[pg1.id])
++
++# Let's look at the subquery
++print("Property groups query:")
++print(property_groups.query)
++print()
++
++# Check if it has default_cols set
++print("Property groups query attributes:")
++print(f"default_cols: {property_groups.query.default_cols}")
++print(f"select: {property_groups.query.select}")
++print()
++
++# Now let's build the problematic query step by step
++queryset = ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++    Count("agent__property_groups")
++)
++
++# Build the filter
++q_filter = Q(agent__property_groups__in=property_groups) | Q(agent__property_groups__count=0)
++print("Q filter:", q_filter)
++print()
++
++# Apply the filter
++filtered = queryset.filter(q_filter).distinct()
++
++# Check the query
++print("Final query:")
++print(filtered.query)
++print()
++
++# Let's also check what happens when we clone the property_groups query
++from django.db.models.sql.query import Query
++print("Checking subquery behavior:")
++subq = property_groups.query
++print(f"Subquery type: {type(subq)}")
++print(f"Subquery.subquery: {subq.subquery}")
++print(f"Has get_group_by_cols: {hasattr(subq, 'get_group_by_cols')}")
++if hasattr(subq, 'get_group_by_cols'):
++    print(f"get_group_by_cols result: {subq.get_group_by_cols()}")
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 6629a1fd51..d1c7ddd20b 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1068,6 +1068,24 @@ class Query(BaseExpression):
+             sql = '(%s)' % sql
+         return sql, params
+ 
++    def get_group_by_cols(self, alias=None):
++        """
++        Return the columns that should be used in the GROUP BY clause.
++        For subqueries, this should be the query itself, not its columns.
++        """
++        # When used as a subquery in GROUP BY, we need to ensure
++        # we only select the primary key to avoid "subquery must return
++        # only one column" errors.
++        if self.subquery or (not self.select and self.default_cols):
++            # Clone the query to avoid modifying the original
++            clone = self.clone()
++            clone.clear_select_clause()
++            if self.model:
++                # Only select the primary key
++                clone.add_fields(['pk'])
++            return [clone]
++        return super().get_group_by_cols(alias)
++
+     def resolve_lookup_value(self, value, can_reuse, allow_joins):
+         if hasattr(value, 'resolve_expression'):
+             value = value.resolve_expression(
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..7c9c82bf84
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,106 @@
++"""Test edge cases for the Q object __in lookup fix"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count, Sum
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Item)
++
++# Create test data
++cat1 = Category.objects.create(name="Category 1")
++cat2 = Category.objects.create(name="Category 2")
++cat3 = Category.objects.create(name="Category 3")
++
++Item.objects.create(name="Item 1", category=cat1, value=10)
++Item.objects.create(name="Item 2", category=cat1, value=20)
++Item.objects.create(name="Item 3", category=cat2, value=30)
++Item.objects.create(name="Item 4", category=cat3, value=40)
++
++print("Test 1: Simple Q with __in and Count annotation")
++try:
++    categories = Category.objects.filter(name__in=["Category 1", "Category 2"])
++    result = Item.objects.annotate(
++        cat_count=Count('category')
++    ).filter(
++        Q(category__in=categories) | Q(value__gt=35)
++    )
++    print(f"✓ Success! Count: {result.count()}")
++except Exception as e:
++    print(f"✗ Error: {e}")
++
++print("\nTest 2: Multiple annotations with Q __in")
++try:
++    categories = Category.objects.filter(id__in=[cat1.id, cat2.id])
++    result = Item.objects.values('category').annotate(
++        total=Sum('value'),
++        count=Count('id')
++    ).filter(
++        Q(category__in=categories) | Q(total__gt=35)
++    )
++    print(f"✓ Success! Count: {result.count()}")
++except Exception as e:
++    print(f"✗ Error: {e}")
++
++print("\nTest 3: Nested Q objects with __in")
++try:
++    categories = Category.objects.filter(name__startswith="Category")
++    result = Item.objects.filter(
++        Q(Q(category__in=categories) & Q(value__lt=25)) | Q(value__gt=35)
++    )
++    print(f"✓ Success! Count: {result.count()}")
++except Exception as e:
++    print(f"✗ Error: {e}")
++
++print("\nTest 4: Q with __in on non-subquery queryset")
++try:
++    # This should work as before
++    result = Item.objects.filter(
++        Q(category__in=[cat1, cat2]) | Q(value__gt=35)
++    )
++    print(f"✓ Success! Count: {result.count()}")
++except Exception as e:
++    print(f"✗ Error: {e}")
++
++print("\nAll edge case tests passed!")
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..6f0c783853
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,132 @@
++"""Verify the fix for Q object __in lookup with subqueries"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'property_propertygroup'
++
++class ManagementAgent(models.Model):
++    name = models.CharField(max_length=100)
++    property_groups = models.ManyToManyField(
++        PropertyGroup,
++        through='ManagementAgentPropertyGroup',
++        related_name='management_agents'
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagent'
++
++class ManagementAgentPropertyGroup(models.Model):
++    management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagentpropertygroup'
++
++class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++    date = models.DateField()
++    average = models.DecimalField(max_digits=5, decimal_places=2)
++    data_points = models.IntegerField()
++    agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++    schema_editor.create_model(ManagementAgent) 
++    schema_editor.create_model(ManagementAgentPropertyGroup)
++    schema_editor.create_model(ManagerTicketRatingCumulativeMovingAverage)
++
++# Create test data
++pg1 = PropertyGroup.objects.create(name="Group 1")
++pg2 = PropertyGroup.objects.create(name="Group 2")
++agent1 = ManagementAgent.objects.create(name="Agent 1")
++agent2 = ManagementAgent.objects.create(name="Agent 2")
++ManagementAgentPropertyGroup.objects.create(management_agent=agent1, property_group=pg1)
++
++# Create some rating data
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=4.5, data_points=10, agent=agent1
++)
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=3.5, data_points=5, agent=agent2
++)
++
++# Test the fix
++property_groups = PropertyGroup.objects.filter(id__in=[pg1.id])
++queryset = ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++    Count("agent__property_groups")
++)
++
++print("Testing Q object with __in lookup (previously broken)...")
++try:
++    result = queryset.filter(
++        Q(agent__property_groups__in=property_groups)
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    
++    count = result.count()
++    print(f"✓ Success! Count: {count}")
++    
++    # Check the SQL
++    sql = str(result.query)
++    if 'SELECT U0."id" FROM' in sql and 'SELECT U0."id", U0."name" FROM' not in sql:
++        print("✓ SQL correctly uses only ID column in GROUP BY subquery")
++    else:
++        print("✗ SQL still has issues with GROUP BY subquery")
++        print(f"SQL: {sql}")
++        
++except Exception as e:
++    print(f"✗ Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\nTesting Q object with __id__in lookup (should still work)...")
++try:
++    result = queryset.filter(
++        Q(agent__property_groups__id__in=property_groups.values_list("id", flat=True))
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    
++    count = result.count()
++    print(f"✓ Success! Count: {count}")
++except Exception as e:
++    print(f"✗ Error: {e}")
++
++print("\nAll tests passed! The fix is working correctly.")
+diff --git a/test_q_or_issue.py b/test_q_or_issue.py
+new file mode 100644
+index 0000000000..9f7f516236
+--- /dev/null
++++ b/test_q_or_issue.py
+@@ -0,0 +1,119 @@
++"""Test script to reproduce the Q object __or__ issue with __in lookups"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'property_propertygroup'
++
++class ManagementAgent(models.Model):
++    name = models.CharField(max_length=100)
++    property_groups = models.ManyToManyField(
++        PropertyGroup,
++        through='ManagementAgentPropertyGroup',
++        related_name='management_agents'
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagent'
++
++class ManagementAgentPropertyGroup(models.Model):
++    management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'manager_managementagentpropertygroup'
++
++class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++    date = models.DateField()
++    average = models.DecimalField(max_digits=5, decimal_places=2)
++    data_points = models.IntegerField()
++    agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++    schema_editor.create_model(ManagementAgent) 
++    schema_editor.create_model(ManagementAgentPropertyGroup)
++    schema_editor.create_model(ManagerTicketRatingCumulativeMovingAverage)
++
++# Create test data
++pg1 = PropertyGroup.objects.create(name="Group 1")
++pg2 = PropertyGroup.objects.create(name="Group 2")
++agent1 = ManagementAgent.objects.create(name="Agent 1")
++agent2 = ManagementAgent.objects.create(name="Agent 2")
++ManagementAgentPropertyGroup.objects.create(management_agent=agent1, property_group=pg1)
++
++# Create some rating data
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=4.5, data_points=10, agent=agent1
++)
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=3.5, data_points=5, agent=agent2
++)
++
++# Test the issue
++property_groups = PropertyGroup.objects.filter(id__in=[pg1.id])
++queryset = ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++    Count("agent__property_groups")
++)
++
++print("Testing working query (with __id__in)...")
++try:
++    result = queryset.filter(
++        Q(agent__property_groups__id__in=property_groups.values_list("id", flat=True))
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    print(f"Success! Count: {result.count()}")
++    print(f"SQL: {result.query}")
++except Exception as e:
++    print(f"Error: {e}")
++
++print("\nTesting problematic query (with __in)...")
++try:
++    result = queryset.filter(
++        Q(agent__property_groups__in=property_groups)
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    print(f"Success! Count: {result.count()}")
++    print(f"SQL: {result.query}")
++except Exception as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_q_or_subquery.py b/test_q_or_subquery.py
+new file mode 100644
+index 0000000000..055d340b94
+--- /dev/null
++++ b/test_q_or_subquery.py
+@@ -0,0 +1,154 @@
++"""Test case for Q object with __in lookup and subqueries in GROUP BY"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++from django.test import TestCase
++from django.db import models
++from django.db.models import Q, Count
++from django.test.utils import isolate_apps
++
++
++@isolate_apps('test_app')
++class QOrSubqueryTest(TestCase):
++    def setUp(self):
++        # Define models dynamically
++        class PropertyGroup(models.Model):
++            name = models.CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'property_propertygroup'
++
++        class ManagementAgent(models.Model):
++            name = models.CharField(max_length=100)
++            property_groups = models.ManyToManyField(
++                PropertyGroup,
++                through='ManagementAgentPropertyGroup',
++                related_name='management_agents'
++            )
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'manager_managementagent'
++
++        class ManagementAgentPropertyGroup(models.Model):
++            management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++            property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'manager_managementagentpropertygroup'
++
++        class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++            date = models.DateField()
++            average = models.DecimalField(max_digits=5, decimal_places=2)
++            data_points = models.IntegerField()
++            agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++        self.PropertyGroup = PropertyGroup
++        self.ManagementAgent = ManagementAgent
++        self.ManagementAgentPropertyGroup = ManagementAgentPropertyGroup
++        self.ManagerTicketRatingCumulativeMovingAverage = ManagerTicketRatingCumulativeMovingAverage
++
++        # Create test data
++        self.pg1 = PropertyGroup.objects.create(name="Group 1")
++        self.pg2 = PropertyGroup.objects.create(name="Group 2")
++        self.agent1 = ManagementAgent.objects.create(name="Agent 1")
++        self.agent2 = ManagementAgent.objects.create(name="Agent 2")
++        ManagementAgentPropertyGroup.objects.create(
++            management_agent=self.agent1, 
++            property_group=self.pg1
++        )
++
++        # Create some rating data
++        ManagerTicketRatingCumulativeMovingAverage.objects.create(
++            date='2023-01-01', average=4.5, data_points=10, agent=self.agent1
++        )
++        ManagerTicketRatingCumulativeMovingAverage.objects.create(
++            date='2023-01-01', average=3.5, data_points=5, agent=self.agent2
++        )
++
++    def test_q_or_with_in_lookup_and_count(self):
++        """Test that Q object with __in lookup doesn't cause subquery column errors"""
++        property_groups = self.PropertyGroup.objects.filter(id__in=[self.pg1.id])
++        queryset = self.ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++            Count("agent__property_groups")
++        )
++        
++        # This should not raise a ProgrammingError about subquery columns
++        result = queryset.filter(
++            Q(agent__property_groups__in=property_groups)
++            | Q(agent__property_groups__count=0)
++        ).distinct()
++        
++        # Should return both records
++        self.assertEqual(result.count(), 2)
++        
++        # Check the SQL doesn't have multiple columns in GROUP BY subquery
++        sql = str(result.query)
++        # The subquery in GROUP BY should only select id
++        self.assertIn('SELECT U0."id" FROM', sql)
++        self.assertNotIn('SELECT U0."id", U0."name" FROM', sql)
++
++    def test_q_or_with_id_in_lookup_still_works(self):
++        """Test that the __id__in variant still works correctly"""
++        property_groups = self.PropertyGroup.objects.filter(id__in=[self.pg1.id])
++        queryset = self.ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++            Count("agent__property_groups")
++        )
++        
++        result = queryset.filter(
++            Q(agent__property_groups__id__in=property_groups.values_list("id", flat=True))
++            | Q(agent__property_groups__count=0)
++        ).distinct()
++        
++        # Should return both records
++        self.assertEqual(result.count(), 2)
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            USE_TZ=True,
++            SECRET_KEY='test-key',
++        )
++    
++    django.setup()
++    
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        for model in [
++            QOrSubqueryTest.PropertyGroup,
++            QOrSubqueryTest.ManagementAgent,
++            QOrSubqueryTest.ManagementAgentPropertyGroup,
++            QOrSubqueryTest.ManagerTicketRatingCumulativeMovingAverage
++        ]:
++            schema_editor.create_model(model)
++    
++    # Run the test
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.QOrSubqueryTest"])
++    sys.exit(bool(failures))
+diff --git a/test_query_compile.py b/test_query_compile.py
+new file mode 100644
+index 0000000000..73d593c279
+--- /dev/null
++++ b/test_query_compile.py
+@@ -0,0 +1,69 @@
++"""Test how Query objects are compiled"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'property_propertygroup'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++
++# Create a queryset
++qs = PropertyGroup.objects.filter(id__in=[1])
++
++# Clone it and mark as subquery
++subq = qs.query.clone()
++subq.subquery = True
++
++# Check its SQL compilation
++from django.db.models.sql.compiler import SQLCompiler
++compiler = SQLCompiler(subq, connection, None)
++
++print("Query attributes:")
++print(f"default_cols: {subq.default_cols}")
++print(f"select: {subq.select}")
++print(f"subquery: {subq.subquery}")
++print()
++
++# Get SQL
++sql, params = compiler.as_sql()
++print(f"SQL: {sql}")
++print(f"Params: {params}")
++print()
++
++# Now let's see what happens when we compile it as an expression
++print("As expression:")
++sql, params = subq.as_sql(compiler, connection)
++print(f"SQL: {sql}")
++print(f"Params: {params}")
+diff --git a/test_regression.py b/test_regression.py
+new file mode 100644
+index 0000000000..b63e308aaf
+--- /dev/null
++++ b/test_regression.py
+@@ -0,0 +1,151 @@
++"""
++Regression test for the issue where Q object __or__ with __in lookup
++causes "subquery must return only one column" error.
++
++This was happening because when a Query object was used in a GROUP BY clause,
++it was selecting all columns instead of just the primary key.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Q, Count
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-key',
++    )
++
++django.setup()
++
++# Define test models matching the problem statement
++class PropertyGroup(models.Model):
++    name = models.CharField(max_length=100)
++    created = models.DateTimeField(auto_now_add=True)
++    updated = models.DateTimeField(auto_now=True)
++    create_by = models.CharField(max_length=100, default='')
++    update_by = models.CharField(max_length=100, default='')
++    tenant_objs = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'property'
++        db_table = 'property_propertygroup'
++
++class ManagementAgent(models.Model):
++    name = models.CharField(max_length=100)
++    property_groups = models.ManyToManyField(
++        PropertyGroup,
++        through='ManagementAgentPropertyGroup',
++        related_name='management_agents'
++    )
++    
++    class Meta:
++        app_label = 'manager'
++        db_table = 'manager_managementagent'
++
++class ManagementAgentPropertyGroup(models.Model):
++    management_agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    property_group = models.ForeignKey(PropertyGroup, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'manager'
++        db_table = 'manager_managementagentpropertygroup'
++
++class ManagerTicketRatingCumulativeMovingAverage(models.Model):
++    date = models.DateField()
++    average = models.DecimalField(max_digits=5, decimal_places=2)
++    data_points = models.IntegerField()
++    agent = models.ForeignKey(ManagementAgent, on_delete=models.CASCADE)
++    created = models.DateTimeField(auto_now_add=True)
++    updated = models.DateTimeField(auto_now=True)
++    create_by = models.CharField(max_length=100, default='')
++    update_by = models.CharField(max_length=100, default='')
++    tenant_objs = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'thing'
++        db_table = 'thing_managerticketratingcumulativemovingaverage'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(PropertyGroup)
++    schema_editor.create_model(ManagementAgent) 
++    schema_editor.create_model(ManagementAgentPropertyGroup)
++    schema_editor.create_model(ManagerTicketRatingCumulativeMovingAverage)
++
++# Create test data
++pg1 = PropertyGroup.objects.create(name="Group 1")
++pg2 = PropertyGroup.objects.create(name="Group 2")
++agent1 = ManagementAgent.objects.create(name="Agent 1")
++agent2 = ManagementAgent.objects.create(name="Agent 2")
++ManagementAgentPropertyGroup.objects.create(management_agent=agent1, property_group=pg1)
++
++# Create some rating data
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=4.5, data_points=10, agent=agent1
++)
++ManagerTicketRatingCumulativeMovingAverage.objects.create(
++    date='2023-01-01', average=3.5, data_points=5, agent=agent2
++)
++
++print("=" * 70)
++print("REGRESSION TEST: Q object __or__ with __in lookup")
++print("=" * 70)
++
++# This is the exact code from the problem statement that was failing
++property_groups = PropertyGroup.objects.filter(id__in=[pg1.id])
++queryset = ManagerTicketRatingCumulativeMovingAverage.objects.annotate(
++    Count("agent__property_groups")
++)
++
++print("\nTesting the problematic query that was failing in Django 3.2...")
++print("Code:")
++print("""
++queryset.filter(
++    Q(agent__property_groups__in=property_groups)
++    | Q(agent__property_groups__count=0)
++).distinct()
++""")
++
++try:
++    result = queryset.filter(
++        Q(agent__property_groups__in=property_groups)
++        | Q(agent__property_groups__count=0)
++    ).distinct()
++    
++    count = result.count()
++    print(f"\n✓ SUCCESS! Query executed without error.")
++    print(f"✓ Result count: {count}")
++    
++    # Verify the SQL is correct
++    sql = str(result.query)
++    if 'SELECT U0."id" FROM' in sql and 'SELECT U0."id", U0."created", U0."updated"' not in sql:
++        print("✓ SQL correctly uses only ID column in GROUP BY subquery")
++    else:
++        print("⚠ Warning: SQL may still have issues")
++        
++    print("\nThe issue has been fixed!")
++    
++except Exception as e:
++    print(f"\n✗ FAILED with error: {e}")
++    print("\nThe issue is NOT fixed!")
++    import traceback
++    traceback.print_exc()
++
++print("\n" + "=" * 70)

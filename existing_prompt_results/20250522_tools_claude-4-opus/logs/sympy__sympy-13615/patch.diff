@@ -1,0 +1,291 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..379d201a35
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,16 @@
++from sympy import *
++from sympy.sets import FiniteSet, Interval, Complement
++
++# Define symbols
++x, y = symbols('x y')
++
++# Create the sets
++a = FiniteSet(x, y, 2)
++b = Interval(-10, 10)
++
++# Test the complement
++result = Complement(a, b)
++print(f"a = {a}")
++print(f"b = {b}")
++print(f"Complement(a, b) = {result}")
++print(f"Expected: {{x, y}} \\ [-10, 10]")
+diff --git a/sympy/sets/sets.py b/sympy/sets/sets.py
+index 917717bb74..3fd3aa60f3 100644
+--- a/sympy/sets/sets.py
++++ b/sympy/sets/sets.py
+@@ -217,7 +217,38 @@ def _complement(self, other):
+             return S.EmptySet
+ 
+         elif isinstance(other, FiniteSet):
+-            return FiniteSet(*[el for el in other if self.contains(el) != True])
++            # Separate elements into those we can definitively evaluate and those we cannot
++            definite_not_in_self = []
++            maybe_in_self = []
++            
++            for el in other:
++                contains_result = self.contains(el)
++                if contains_result is S.true:
++                    # Definitely in self, so exclude from result
++                    continue
++                elif contains_result is S.false:
++                    # Definitely not in self, so include in result
++                    definite_not_in_self.append(el)
++                else:
++                    # Can't determine, keep as unevaluated
++                    maybe_in_self.append(el)
++            
++            # Build the result
++            if maybe_in_self:
++                # We have some elements we can't evaluate
++                if definite_not_in_self:
++                    # Union of definite elements and unevaluated complement
++                    return Union(FiniteSet(*definite_not_in_self),
++                                Complement(FiniteSet(*maybe_in_self), self, evaluate=False))
++                else:
++                    # Just the unevaluated complement
++                    return Complement(FiniteSet(*maybe_in_self), self, evaluate=False)
++            else:
++                # All elements could be evaluated
++                if definite_not_in_self:
++                    return FiniteSet(*definite_not_in_self)
++                else:
++                    return S.EmptySet
+ 
+     def symmetric_difference(self, other):
+         """
+diff --git a/test_complement_fix.py b/test_complement_fix.py
+new file mode 100644
+index 0000000000..30d8e7cdcd
+--- /dev/null
++++ b/test_complement_fix.py
+@@ -0,0 +1,83 @@
++from sympy import *
++from sympy.sets import FiniteSet, Interval, Complement
++
++# Define symbols
++x, y, z = symbols('x y z')
++
++# Test 1: Original issue - mixed symbols and numbers
++print("Test 1: Original issue")
++a = FiniteSet(x, y, 2)
++b = Interval(-10, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == Complement(FiniteSet(x, y), b, evaluate=False), f"Expected {{x, y}} \\ Interval(-10, 10), got {result}"
++print("✓ Passed\n")
++
++# Test 2: All numbers in interval
++print("Test 2: All numbers in interval")
++a = FiniteSet(1, 2, 3)
++b = Interval(0, 5)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == S.EmptySet, f"Expected EmptySet, got {result}"
++print("✓ Passed\n")
++
++# Test 3: Some numbers in interval, some outside
++print("Test 3: Mixed numbers in/out of interval")
++a = FiniteSet(-5, 0, 5, 15)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == FiniteSet(-5, 15), f"Expected {{-5, 15}}, got {result}"
++print("✓ Passed\n")
++
++# Test 4: Only symbols
++print("Test 4: Only symbols")
++a = FiniteSet(x, y, z)
++b = Interval(-10, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == Complement(FiniteSet(x, y, z), b, evaluate=False), f"Expected {{x, y, z}} \\ Interval(-10, 10), got {result}"
++print("✓ Passed\n")
++
++# Test 5: Edge cases with interval boundaries
++print("Test 5: Numbers at interval boundaries")
++a = FiniteSet(-10, 0, 10, x)
++b = Interval(-10, 10)  # Closed interval, includes -10 and 10
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == Complement(FiniteSet(x), b, evaluate=False), f"Expected {{x}} \\ Interval(-10, 10), got {result}"
++print("✓ Passed\n")
++
++# Test 6: Open interval boundaries
++print("Test 6: Open interval boundaries")
++a = FiniteSet(-10, 0, 10, x)
++b = Interval(-10, 10, left_open=True, right_open=True)  # Open interval, excludes -10 and 10
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++# -10 and 10 are definitely not in the open interval, x is uncertain
++expected = Union(FiniteSet(-10, 10), Complement(FiniteSet(x), b, evaluate=False))
++assert result == expected, f"Expected Union({{-10, 10}}, {{x}} \\ Interval.open(-10, 10)), got {result}"
++print("✓ Passed\n")
++
++# Test 7: Empty FiniteSet
++print("Test 7: Empty FiniteSet")
++a = FiniteSet()
++b = Interval(-10, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == S.EmptySet, f"Expected EmptySet, got {result}"
++print("✓ Passed\n")
++
++# Test 8: Complex expressions with symbols
++print("Test 8: Complex expressions")
++a = FiniteSet(x**2, 5, sqrt(2), pi)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++# x**2 is symbolic so it stays unevaluated, 5 is in [0,10] so removed, 
++# sqrt(2) ≈ 1.414 is in [0,10] so removed, pi ≈ 3.14 is in [0,10] so removed
++assert result == Complement(FiniteSet(x**2), b, evaluate=False), f"Expected {{x**2}} \\ Interval(0, 10), got {result}"
++print("✓ Passed\n")
++
++print("All tests passed!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..a68997d57b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,64 @@
++from sympy import *
++from sympy.sets import FiniteSet, Interval, Complement, Union
++
++x, y, z = symbols('x y z')
++
++print("Edge case tests for Complement with mixed symbols and numbers:")
++print("="*60)
++
++# Test 1: Symbol that could be evaluated in some contexts
++print("\nTest 1: Symbol with assumptions")
++n = Symbol('n', real=True)
++a = FiniteSet(n, 5)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++# Even with real assumption, we don't know if n is in [0, 10]
++
++# Test 2: Expressions that evaluate to numbers
++print("\nTest 2: Expressions that evaluate to numbers")
++a = FiniteSet(sqrt(4), x + 0, 2*3)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++# sqrt(4) = 2, x + 0 = x, 2*3 = 6
++
++# Test 3: Mixed with infinity
++print("\nTest 3: With infinity")
++a = FiniteSet(oo, -oo, x, 5)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++
++# Test 4: Complex numbers
++print("\nTest 4: Complex numbers")
++a = FiniteSet(I, 2 + 3*I, x, 5)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++
++# Test 5: Nested complements
++print("\nTest 5: Nested complements")
++a = FiniteSet(x, 5)
++b = Interval(0, 10)
++c = Complement(a, b)
++d = Interval(-5, 15)
++result = Complement(c, d)
++print(f"Complement(Complement({a}, {b}), {d}) = {result}")
++
++# Test 6: Empty result with symbols
++print("\nTest 6: All elements removed")
++a = FiniteSet(5, 7)
++b = Interval(0, 10)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++assert result == S.EmptySet
++
++# Test 7: Rational numbers
++print("\nTest 7: Rational numbers")
++a = FiniteSet(Rational(1, 2), Rational(11, 2), x)
++b = Interval(0, 5)
++result = Complement(a, b)
++print(f"Complement({a}, {b}) = {result}")
++
++print("\nAll edge cases handled correctly!")
+diff --git a/test_expected_behavior.py b/test_expected_behavior.py
+new file mode 100644
+index 0000000000..34ac64653d
+--- /dev/null
++++ b/test_expected_behavior.py
+@@ -0,0 +1,36 @@
++from sympy import *
++from sympy.sets import FiniteSet, Interval, Complement
++
++x, y = symbols('x y')
++
++# Current behavior
++a = FiniteSet(x, y, 2)
++b = Interval(-10, 10)
++result = Complement(a, b)
++print("Current behavior:")
++print(f"Complement({a}, {b}) = {result}")
++print(f"Type: {type(result)}")
++
++# What would an unevaluated complement look like?
++unevaluated = Complement(a, b, evaluate=False)
++print("\nUnevaluated complement:")
++print(f"Complement({a}, {b}, evaluate=False) = {unevaluated}")
++print(f"Type: {type(unevaluated)}")
++
++# What makes sense mathematically?
++print("\nMathematically:")
++print("- The number 2 is in [-10, 10], so it should be removed")
++print("- The symbols x and y might or might not be in [-10, 10], we don't know")
++print("- So the result should be something that expresses this uncertainty")
++
++# Let's check a similar case with only symbols
++c = FiniteSet(x, y)
++result2 = Complement(c, b)
++print(f"\nComplement({c}, {b}) = {result2}")
++print(f"Type: {type(result2)}")
++
++# And a case with only numbers
++d = FiniteSet(2, 3, 15)
++result3 = Complement(d, b)
++print(f"\nComplement({d}, {b}) = {result3}")
++print(f"Type: {type(result3)}")
+diff --git a/test_issue_9637.py b/test_issue_9637.py
+new file mode 100644
+index 0000000000..2ed3d9bb69
+--- /dev/null
++++ b/test_issue_9637.py
+@@ -0,0 +1,18 @@
++from sympy import *
++from sympy.sets import FiniteSet, Interval, Complement
++
++n = Symbol('n')
++a = FiniteSet(n)
++
++print("a =", a)
++print("S.Reals =", S.Reals)
++
++result1 = Complement(a, S.Reals)
++print("Complement(a, S.Reals) =", result1)
++
++result2 = Complement(a, S.Reals, evaluate=False)
++print("Complement(a, S.Reals, evaluate=False) =", result2)
++
++print("\nAre they equal?", result1 == result2)
++print("result1 type:", type(result1))
++print("result2 type:", type(result2))

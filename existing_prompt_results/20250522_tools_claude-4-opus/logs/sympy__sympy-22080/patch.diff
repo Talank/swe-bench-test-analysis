@@ -1,0 +1,232 @@
+diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py
+index b669a2c783..f6e4e5fbad 100644
+--- a/sympy/printing/pycode.py
++++ b/sympy/printing/pycode.py
+@@ -6,7 +6,7 @@
+ from collections import defaultdict
+ from itertools import chain
+ from sympy.core import S
+-from .precedence import precedence
++from .precedence import precedence, PRECEDENCE
+ from .codeprinter import CodePrinter
+ 
+ _kw_py2and3 = {
+@@ -84,6 +84,22 @@ class AbstractPythonCodePrinter(CodePrinter):
+         [(k, 'math.' + v) for k, v in _known_functions_math.items()]
+     ))
+     _kc = {k: 'math.'+v for k, v in _known_constants_math.items()}
++    
++    def _get_precedence(self, item):
++        """Get precedence, with special handling for Mod which prints as %"""
++        from sympy.core.mod import Mod
++        if isinstance(item, Mod):
++            # Mod prints as %, which has multiplication precedence in Python
++            return PRECEDENCE["Mul"]
++        return precedence(item)
++    
++    def parenthesize(self, item, level, strict=False):
++        """Override parenthesize to use our custom precedence"""
++        item_prec = self._get_precedence(item)
++        if (item_prec < level) or ((not strict) and item_prec <= level):
++            return "(%s)" % self._print(item)
++        else:
++            return self._print(item)
+     _operators = {'and': 'and', 'or': 'or', 'not': 'not'}
+     _default_settings = dict(
+         CodePrinter._default_settings,
+@@ -233,8 +249,9 @@ def _print_ComplexInfinity(self, expr):
+         return self._print_NaN(expr)
+ 
+     def _print_Mod(self, expr):
+-        PREC = precedence(expr)
+-        return ('{} % {}'.format(*map(lambda x: self.parenthesize(x, PREC), expr.args)))
++        # In Python, % has the same precedence as multiplication
++        PREC = PRECEDENCE["Mul"]
++        return '{} % {}'.format(*map(lambda x: self.parenthesize(x, PREC), expr.args))
+ 
+     def _print_Piecewise(self, expr):
+         result = []
+@@ -427,6 +444,53 @@ def _hprint_Pow(self, expr, rational=False, sqrt='math.sqrt'):
+ 
+ 
+ class PythonCodePrinter(AbstractPythonCodePrinter):
++    
++    def _print_Mul(self, expr):
++        """Override _print_Mul to handle Mod precedence correctly"""
++        from sympy.core.mod import Mod
++        from sympy.core.mul import Mul, _keep_coeff
++        from sympy.core.numbers import Integer
++        
++        # First check if this is a simple -Mod(x,y) case
++        if (len(expr.args) == 2 and 
++            isinstance(expr.args[0], Integer) and expr.args[0] == -1 and
++            isinstance(expr.args[1], Mod)):
++            # Special case: -Mod(x, y) should be -(x % y)
++            return "-({})".format(self._print(expr.args[1]))
++            
++        # For other cases, we need to ensure Mod gets parentheses when needed
++        # Get the string from parent first
++        result = super()._print_Mul(expr)
++        
++        # Check if we have Mod in the factors and need to fix precedence
++        has_mod = any(isinstance(arg, Mod) for arg in expr.args)
++        if has_mod:
++            # If the result contains % without proper parentheses, we need to fix it
++            # This is a bit hacky but necessary due to precedence issues
++            c, e = expr.as_coeff_Mul()
++            if c < 0 and isinstance(e, Mod):
++                # Cases like -2*Mod(x,y) which become -2*x % y
++                # We need -2*(x % y)
++                # The parent returns something like "-2*x % y"
++                # We need to fix this
++                mod_str = self._print(e)
++                if c == -1:
++                    return "-({})".format(mod_str)
++                else:
++                    return "{}*({})".format(c, mod_str)
++            elif isinstance(e, Mul) and any(isinstance(arg, Mod) for arg in e.args):
++                # Case where Mod is part of a larger multiplication
++                # We need to ensure it has parentheses
++                # Rebuild the multiplication with proper parentheses
++                factors = []
++                for arg in expr.args:
++                    if isinstance(arg, Mod):
++                        factors.append("({})".format(self._print(arg)))
++                    else:
++                        factors.append(self._print(arg))
++                return "*".join(factors)
++                
++        return result
+ 
+     def _print_sign(self, e):
+         return '(0.0 if {e} == 0 else {f}(1, {e}))'.format(
+diff --git a/test_mod_bug.py b/test_mod_bug.py
+new file mode 100644
+index 0000000000..f93a7f5ce4
+--- /dev/null
++++ b/test_mod_bug.py
+@@ -0,0 +1,34 @@
++import inspect
++from sympy import Mod, lambdify, symbols
++
++x, y = symbols('x y')
++expr = -Mod(x, y)
++
++# Test with default modules
++f = lambdify([x, y], expr)
++print("With default modules:")
++print(f"f(3, 7) = {f(3, 7)}")
++print(f"Source: {inspect.getsource(f)}")
++
++# Test with empty modules
++g = lambdify([x, y], expr, modules=[])
++print("\nWith modules=[]:")
++print(f"g(3, 7) = {g(3, 7)}")
++print(f"Source: {inspect.getsource(g)}")
++
++# Expected result: Both should return -3
++# Actual result: g(3, 7) returns 4 because it evaluates as (-x % y) instead of -(x % y)
++
++# Let's also test with more complex expressions
++expr2 = 2 * Mod(x, y)
++h = lambdify([x, y], expr2, modules=[])
++print(f"\nWith expr = 2 * Mod(x, y) and modules=[]:")
++print(f"h(3, 7) = {h(3, 7)}")
++print(f"Source: {inspect.getsource(h)}")
++
++# Test with another expression
++expr3 = Mod(x, y) * 2
++i = lambdify([x, y], expr3, modules=[])
++print(f"\nWith expr = Mod(x, y) * 2 and modules=[]:")
++print(f"i(3, 7) = {i(3, 7)}")
++print(f"Source: {inspect.getsource(i)}")
+diff --git a/test_mod_comprehensive.py b/test_mod_comprehensive.py
+new file mode 100644
+index 0000000000..33ef73f387
+--- /dev/null
++++ b/test_mod_comprehensive.py
+@@ -0,0 +1,43 @@
++import inspect
++from sympy import symbols, Mod, lambdify, sin, cos, exp
++
++x, y, z = symbols('x y z')
++
++# Test cases
++test_cases = [
++    # (expression, test_values, expected_result, description)
++    (-Mod(x, y), (3, 7), -3, "Negative modulo"),
++    (2 * Mod(x, y), (3, 7), 6, "Multiplication before modulo"),
++    (Mod(x, y) * 2, (3, 7), 6, "Multiplication after modulo"),
++    (-2 * Mod(x, y), (3, 7), -6, "Negative multiplication"),
++    (Mod(x, y) + 1, (3, 7), 4, "Addition with modulo"),
++    (1 - Mod(x, y), (3, 7), -2, "Subtraction with modulo"),
++    (Mod(x + y, z), (3, 4, 5), 2, "Modulo with expression as first arg"),
++    (Mod(x, y + z), (10, 3, 4), 3, "Modulo with expression as second arg"),
++    (sin(Mod(x, y)), (3, 7), sin(3), "Function of modulo"),
++    (Mod(x, y) ** 2, (3, 7), 9, "Power of modulo"),
++    (-Mod(x, y) - 1, (3, 7), -4, "Negative modulo with subtraction"),
++    (Mod(-x, y), (3, 7), 4, "Modulo of negative"),
++    (Mod(x, y) / 2, (8, 5), 1.5, "Division after modulo"),
++]
++
++print("Testing with modules=[]:")
++for expr, values, expected, desc in test_cases:
++    f = lambdify([x, y, z][:len(values)], expr, modules=[])
++    result = f(*values)
++    status = "PASS" if abs(result - expected) < 1e-10 else "FAIL"
++    print(f"{status}: {desc}")
++    print(f"  Expression: {expr}")
++    print(f"  Values: {values}")
++    print(f"  Expected: {expected}, Got: {result}")
++    print(f"  Source: {inspect.getsource(f).strip()}")
++    print()
++
++# Also test with default modules
++print("\nTesting with default modules:")
++for expr, values, expected, desc in test_cases[:3]:  # Just test first few
++    f = lambdify([x, y, z][:len(values)], expr)
++    result = f(*values)
++    status = "PASS" if abs(result - expected) < 1e-10 else "FAIL"
++    print(f"{status}: {desc}")
++    print(f"  Result: {result}")
+diff --git a/test_mod_lambdify_fix.py b/test_mod_lambdify_fix.py
+new file mode 100644
+index 0000000000..890709b40a
+--- /dev/null
++++ b/test_mod_lambdify_fix.py
+@@ -0,0 +1,35 @@
++"""Test for the Mod lambdify bug fix"""
++from sympy import symbols, Mod, lambdify
++
++def test_mod_lambdify_precedence():
++    """Test that Mod is properly parenthesized in lambdify output"""
++    x, y = symbols('x y')
++    
++    # Test case 1: -Mod(x, y)
++    expr1 = -Mod(x, y)
++    f1 = lambdify([x, y], expr1, modules=[])
++    assert f1(3, 7) == -3, f"Expected -3, got {f1(3, 7)}"
++    
++    # Test case 2: 2*Mod(x, y)
++    expr2 = 2 * Mod(x, y)
++    f2 = lambdify([x, y], expr2, modules=[])
++    assert f2(3, 7) == 6, f"Expected 6, got {f2(3, 7)}"
++    
++    # Test case 3: -2*Mod(x, y)
++    expr3 = -2 * Mod(x, y)
++    f3 = lambdify([x, y], expr3, modules=[])
++    assert f3(3, 7) == -6, f"Expected -6, got {f3(3, 7)}"
++    
++    # Test case 4: Mod(x, y)*2
++    expr4 = Mod(x, y) * 2
++    f4 = lambdify([x, y], expr4, modules=[])
++    assert f4(3, 7) == 6, f"Expected 6, got {f4(3, 7)}"
++    
++    # Test with default modules too
++    g1 = lambdify([x, y], expr1)
++    assert g1(3, 7) == -3, f"Expected -3 with default modules, got {g1(3, 7)}"
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_mod_lambdify_precedence()

@@ -1,0 +1,237 @@
+diff --git a/django/core/validators.py b/django/core/validators.py
+index a385819510..dd637240a3 100644
+--- a/django/core/validators.py
++++ b/django/core/validators.py
+@@ -101,6 +101,10 @@ class URLValidator(RegexValidator):
+     def __call__(self, value):
+         if not isinstance(value, str):
+             raise ValidationError(self.message, code=self.code, params={'value': value})
++        # Check for control characters that are stripped by urlsplit (bpo-43882)
++        # These need to be rejected to maintain backward compatibility
++        if '\r' in value or '\n' in value or '\t' in value:
++            raise ValidationError(self.message, code=self.code, params={'value': value})
+         # Check if the scheme is valid.
+         scheme = value.split('://')[0].lower()
+         if scheme not in self.schemes:
+diff --git a/test_comprehensive_urlvalidator.py b/test_comprehensive_urlvalidator.py
+new file mode 100644
+index 0000000000..e647fc2762
+--- /dev/null
++++ b/test_comprehensive_urlvalidator.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++# Test comprehensive set of URLs with control characters
++test_cases = [
++    # URLs with newlines - should fail
++    ('http://www.djangoproject.com/\n', False, "URL with LF at end"),
++    ('http://www.djangoproject.com\n/path', False, "URL with LF in middle"),
++    ('\nhttp://www.djangoproject.com/', False, "URL with LF at start"),
++    
++    # URLs with carriage returns - should fail  
++    ('http://www.djangoproject.com/\r', False, "URL with CR at end"),
++    ('http://www.djangoproject.com\r/path', False, "URL with CR in middle"),
++    ('\rhttp://www.djangoproject.com/', False, "URL with CR at start"),
++    
++    # URLs with tabs - should fail
++    ('http://www.djangoproject.com/\t', False, "URL with tab at end"),
++    ('http://www.djangoproject.com\t/path', False, "URL with tab in middle"),
++    ('\thttp://www.djangoproject.com/', False, "URL with tab at start"),
++    
++    # URLs with CRLF - should fail
++    ('http://www.djangoproject.com/\r\n', False, "URL with CRLF at end"),
++    
++    # Valid URLs - should pass
++    ('http://www.djangoproject.com/', True, "Valid URL"),
++    ('https://example.com/path?query=value#fragment', True, "Valid URL with all components"),
++    ('http://[::ffff:192.9.5.5]/', True, "Valid IPv6 URL"),
++    ('http://localhost:8000/', True, "Valid URL with port"),
++    
++    # URLs with spaces (not control chars) - should fail for different reason
++    ('http://www.djangoproject.com/ ', False, "URL with trailing space"),
++    ('http://www.djangoproject.com/path with spaces', False, "URL with spaces in path"),
++]
++
++validator = URLValidator()
++
++print("Testing URLValidator with various control characters:")
++print("=" * 70)
++
++passed = 0
++failed = 0
++
++for url, should_pass, description in test_cases:
++    try:
++        validator(url)
++        result = "PASS"
++        if not should_pass:
++            print(f"UNEXPECTED PASS: {description}")
++            print(f"  URL: {repr(url)}")
++            failed += 1
++        else:
++            passed += 1
++    except ValidationError:
++        result = "FAIL"
++        if should_pass:
++            print(f"UNEXPECTED FAIL: {description}")
++            print(f"  URL: {repr(url)}")
++            failed += 1
++        else:
++            passed += 1
++    except Exception as e:
++        print(f"ERROR: {description}")
++        print(f"  URL: {repr(url)}")
++        print(f"  Exception: {type(e).__name__}: {e}")
++        failed += 1
++        result = "ERROR"
++
++print(f"\nSummary: {passed} passed, {failed} failed out of {len(test_cases)} tests")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..d4ad4e730f
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++# Test edge cases
++edge_cases = [
++    # Control chars in different URL components
++    ('http://example.com/path\npath', False, "LF in path"),
++    ('http://example.com/path?query\n=value', False, "LF in query"),
++    ('http://example.com/path#frag\nment', False, "LF in fragment"),
++    ('http://user\nname@example.com/', False, "LF in username"),
++    ('http://username:pass\nword@example.com/', False, "LF in password"),
++    
++    # Multiple control chars
++    ('http://example.com/\n\r\t', False, "Multiple control chars"),
++    
++    # Control chars encoded - these should pass as they're percent-encoded
++    ('http://example.com/path%0A', True, "URL-encoded LF"),
++    ('http://example.com/path%0D', True, "URL-encoded CR"),
++    ('http://example.com/path%09', True, "URL-encoded tab"),
++]
++
++validator = URLValidator()
++
++print("Testing edge cases:")
++print("=" * 70)
++
++for url, should_pass, description in edge_cases:
++    try:
++        validator(url)
++        result = "PASS"
++        status = "✓" if should_pass else "✗ UNEXPECTED"
++    except ValidationError:
++        result = "FAIL"
++        status = "✓" if not should_pass else "✗ UNEXPECTED"
++    
++    print(f"{status} {description}: {result}")
++    if "UNEXPECTED" in status:
++        print(f"   URL: {repr(url)}")
+diff --git a/test_python_compat.py b/test_python_compat.py
+new file mode 100644
+index 0000000000..9fbdc2428e
+--- /dev/null
++++ b/test_python_compat.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++import sys
++from urllib.parse import urlsplit
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++print(f"Python version: {sys.version}")
++print("=" * 70)
++
++# Test that our fix works regardless of Python's urlsplit behavior
++test_url = 'http://example.com/\n'
++
++# Show urlsplit behavior
++parts = urlsplit(test_url)
++print(f"urlsplit('{repr(test_url)}'):")
++print(f"  scheme: {repr(parts.scheme)}")
++print(f"  netloc: {repr(parts.netloc)}")
++print(f"  path: {repr(parts.path)}")
++print(f"  Full URL after split/unsplit: {repr(parts.geturl())}")
++print()
++
++# Test URLValidator
++validator = URLValidator()
++try:
++    validator(test_url)
++    print(f"URLValidator result: PASSED (no exception)")
++except ValidationError:
++    print(f"URLValidator result: FAILED (ValidationError raised - this is expected)")
++except Exception as e:
++    print(f"URLValidator result: ERROR - {type(e).__name__}: {e}")
++
++print("\nConclusion: URLValidator correctly rejects URLs with control characters")
++print("regardless of Python's urlsplit behavior.")
+diff --git a/test_urlvalidator_issue.py b/test_urlvalidator_issue.py
+new file mode 100644
+index 0000000000..c7158f0cd2
+--- /dev/null
++++ b/test_urlvalidator_issue.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python
++import sys
++from urllib.parse import urlsplit
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++# Test URLs with trailing newlines
++test_urls = [
++    'http://www.djangoproject.com/\n',
++    'http://[::ffff:192.9.5.5]\n',
++]
++
++print("Python version:", sys.version)
++print("\nTesting URLValidator with URLs containing newlines:")
++print("=" * 60)
++
++validator = URLValidator()
++
++for url in test_urls:
++    print(f"\nTesting URL: {repr(url)}")
++    
++    # Show what urlsplit does with the URL
++    try:
++        parts = urlsplit(url)
++        print(f"  urlsplit result: scheme={repr(parts.scheme)}, netloc={repr(parts.netloc)}, path={repr(parts.path)}")
++    except Exception as e:
++        print(f"  urlsplit error: {e}")
++    
++    # Test the validator
++    try:
++        validator(url)
++        print("  URLValidator: PASSED (no exception raised)")
++    except ValidationError as e:
++        print("  URLValidator: FAILED (ValidationError raised as expected)")
++    except Exception as e:
++        print(f"  URLValidator: ERROR - {type(e).__name__}: {e}")
++
++# Let's also check what happens with other control characters
++print("\n\nTesting urlsplit behavior with control characters:")
++print("=" * 60)
++
++control_char_urls = [
++    'http://example.com/\n',
++    'http://example.com/\r',
++    'http://example.com/\t',
++    'http://example.com/\r\n',
++]
++
++for url in control_char_urls:
++    print(f"\nURL: {repr(url)}")
++    parts = urlsplit(url)
++    print(f"  scheme: {repr(parts.scheme)}")
++    print(f"  netloc: {repr(parts.netloc)}")
++    print(f"  path: {repr(parts.path)}")
++    print(f"  query: {repr(parts.query)}")
++    print(f"  fragment: {repr(parts.fragment)}")

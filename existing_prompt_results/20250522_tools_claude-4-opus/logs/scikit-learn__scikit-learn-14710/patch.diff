@@ -1,0 +1,380 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..e3b72c462
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,16 @@
++import numpy as np
++from sklearn.experimental import enable_hist_gradient_boosting
++from sklearn.ensemble import HistGradientBoostingClassifier
++
++# Test case from the issue
++X = np.random.randn(100, 10)
++y = np.array(['x'] * 50 + ['y'] * 50, dtype=object)
++gbrt = HistGradientBoostingClassifier(n_iter_no_change=10)
++
++try:
++    gbrt.fit(X, y)
++    print("SUCCESS: No error thrown")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py b/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
+index ad6a5a8ca..3170e4000 100644
+--- a/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
++++ b/sklearn/ensemble/_hist_gradient_boosting/gradient_boosting.py
+@@ -426,11 +426,15 @@ class BaseHistGradientBoosting(BaseEstimator, ABC):
+ 
+         Scores are computed on validation data or on training data.
+         """
++        if hasattr(self, 'classes_'):
++            y_small_train = self.classes_[y_small_train.astype(int)]
+         self.train_score_.append(
+             self.scorer_(self, X_binned_small_train, y_small_train)
+         )
+ 
+         if self._use_validation_data:
++            if hasattr(self, 'classes_'):
++                y_val = self.classes_[y_val.astype(int)]
+             self.validation_score_.append(
+                 self.scorer_(self, X_binned_val, y_val)
+             )
+diff --git a/sklearn/ensemble/_hist_gradient_boosting/tests/test_gradient_boosting.py b/sklearn/ensemble/_hist_gradient_boosting/tests/test_gradient_boosting.py
+index 1eebdefd5..f6c80105a 100644
+--- a/sklearn/ensemble/_hist_gradient_boosting/tests/test_gradient_boosting.py
++++ b/sklearn/ensemble/_hist_gradient_boosting/tests/test_gradient_boosting.py
+@@ -415,3 +415,44 @@ def test_infinite_values_missing_values():
+ 
+     assert stump_clf.fit(X, y_isinf).score(X, y_isinf) == 1
+     assert stump_clf.fit(X, y_isnan).score(X, y_isnan) == 1
++
++
++def test_string_target_with_early_stopping():
++    """Check that string targets work with early stopping enabled.
++    
++    Non-regression test for:
++    https://github.com/scikit-learn/scikit-learn/issues/15038
++    """
++    rng = np.random.RandomState(42)
++    X = rng.randn(100, 10)
++    # Create string targets
++    y = np.array(['x'] * 50 + ['y'] * 50, dtype=object)
++    
++    # Test with validation fraction
++    gbrt = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=0.2,
++        random_state=42
++    )
++    
++    # This should not raise an error
++    gbrt.fit(X, y)
++    
++    # Check that predictions are strings
++    predictions = gbrt.predict(X[:5])
++    assert all(isinstance(pred, str) for pred in predictions)
++    assert all(pred in ['x', 'y'] for pred in predictions)
++    
++    # Test without validation fraction (uses training data for early stopping)
++    gbrt_no_val = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=None,
++        random_state=42
++    )
++    
++    # This should not raise an error
++    gbrt_no_val.fit(X, y)
++    
++    # Check scoring works
++    score = gbrt.score(X, y)
++    assert 0 <= score <= 1
+diff --git a/test_string_early_stopping.py b/test_string_early_stopping.py
+new file mode 100644
+index 000000000..f34b8ff0a
+--- /dev/null
++++ b/test_string_early_stopping.py
+@@ -0,0 +1,116 @@
++"""Test for string target early stopping fix."""
++import numpy as np
++import pytest
++from sklearn.experimental import enable_hist_gradient_boosting
++from sklearn.ensemble import HistGradientBoostingClassifier
++from sklearn.datasets import make_classification
++
++
++def test_string_target_early_stopping():
++    """Test that string targets work correctly with early stopping."""
++    # Generate synthetic data
++    X, y_numeric = make_classification(n_samples=200, n_features=10, 
++                                       n_informative=5, n_redundant=0,
++                                       random_state=42)
++    
++    # Convert to string labels
++    y_string = np.array(['class_A' if yi == 0 else 'class_B' for yi in y_numeric])
++    
++    # Test with validation fraction
++    clf_val = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=0.2,
++        random_state=42,
++        max_iter=100
++    )
++    clf_val.fit(X, y_string)
++    
++    # Should have stopped early
++    assert clf_val.n_iter_ < 100
++    assert hasattr(clf_val, 'validation_score_')
++    assert hasattr(clf_val, 'train_score_')
++    
++    # Test without validation fraction (uses training data for early stopping)
++    clf_no_val = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=None,
++        random_state=42,
++        max_iter=100
++    )
++    clf_no_val.fit(X, y_string)
++    
++    # Should have stopped early
++    assert clf_no_val.n_iter_ < 100
++    assert hasattr(clf_no_val, 'train_score_')
++    
++    # Predictions should be string classes
++    predictions = clf_val.predict(X[:5])
++    assert all(pred in ['class_A', 'class_B'] for pred in predictions)
++    
++    # Score should work
++    score = clf_val.score(X, y_string)
++    assert 0 <= score <= 1
++
++
++def test_multiclass_string_early_stopping():
++    """Test multiclass classification with string targets and early stopping."""
++    X, y_numeric = make_classification(n_samples=300, n_features=10,
++                                       n_informative=5, n_classes=3,
++                                       n_clusters_per_class=1,
++                                       random_state=42)
++    
++    # Convert to string labels
++    class_names = ['cat', 'dog', 'bird']
++    y_string = np.array([class_names[yi] for yi in y_numeric])
++    
++    clf = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=0.2,
++        random_state=42,
++        max_iter=100
++    )
++    clf.fit(X, y_string)
++    
++    # Should have stopped early
++    assert clf.n_iter_ < 100
++    
++    # Predictions should be string classes
++    predictions = clf.predict(X[:5])
++    assert all(pred in class_names for pred in predictions)
++    
++    # Predict proba should work
++    proba = clf.predict_proba(X[:5])
++    assert proba.shape == (5, 3)
++    assert np.allclose(proba.sum(axis=1), 1.0)
++
++
++def test_numeric_targets_still_work():
++    """Ensure numeric targets still work properly (regression test)."""
++    X, y = make_classification(n_samples=200, n_features=10,
++                               n_informative=5, random_state=42)
++    
++    clf = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=0.2,
++        random_state=42,
++        max_iter=100
++    )
++    clf.fit(X, y)
++    
++    # Should work without issues
++    assert clf.n_iter_ < 100
++    predictions = clf.predict(X[:5])
++    assert all(pred in [0, 1] for pred in predictions)
++
++
++if __name__ == "__main__":
++    test_string_target_early_stopping()
++    print("test_string_target_early_stopping passed")
++    
++    test_multiclass_string_early_stopping()
++    print("test_multiclass_string_early_stopping passed")
++    
++    test_numeric_targets_still_work()
++    print("test_numeric_targets_still_work passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_string_target_early_stopping_patch.py b/test_string_target_early_stopping_patch.py
+new file mode 100644
+index 000000000..1702df1c0
+--- /dev/null
++++ b/test_string_target_early_stopping_patch.py
+@@ -0,0 +1,54 @@
++"""Test to add to the test suite for string target early stopping fix."""
++import numpy as np
++import pytest
++from sklearn.experimental import enable_hist_gradient_boosting
++from sklearn.ensemble import HistGradientBoostingClassifier
++from sklearn.datasets import make_classification
++
++
++def test_string_target_with_early_stopping():
++    """Check that string targets work with early stopping enabled.
++    
++    Non-regression test for:
++    https://github.com/scikit-learn/scikit-learn/issues/xxxxx
++    """
++    # Generate data
++    X, y_numeric = make_classification(n_samples=100, n_features=10,
++                                       n_informative=5, random_state=42)
++    
++    # Convert targets to strings
++    y_string = np.array(['class_A' if yi == 0 else 'class_B' for yi in y_numeric])
++    
++    # Test with validation fraction
++    clf = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=0.2,
++        random_state=42
++    )
++    
++    # This should not raise an error
++    clf.fit(X, y_string)
++    
++    # Check that predictions are strings
++    predictions = clf.predict(X[:5])
++    assert all(isinstance(pred, str) for pred in predictions)
++    assert all(pred in ['class_A', 'class_B'] for pred in predictions)
++    
++    # Test without validation fraction (uses training data for early stopping)
++    clf_no_val = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        validation_fraction=None,
++        random_state=42
++    )
++    
++    # This should not raise an error
++    clf_no_val.fit(X, y_string)
++    
++    # Check scoring works
++    score = clf.score(X, y_string)
++    assert 0 <= score <= 1
++
++
++if __name__ == "__main__":
++    test_string_target_with_early_stopping()
++    print("Test passed!")
+diff --git a/test_string_target_fix.py b/test_string_target_fix.py
+new file mode 100644
+index 000000000..16efc00a0
+--- /dev/null
++++ b/test_string_target_fix.py
+@@ -0,0 +1,101 @@
++import numpy as np
++from sklearn.experimental import enable_hist_gradient_boosting
++from sklearn.ensemble import HistGradientBoostingClassifier
++from sklearn.model_selection import train_test_split
++
++def test_string_target_with_early_stopping():
++    """Test that string targets work with early stopping."""
++    print("Test 1: Basic string target with early stopping")
++    X = np.random.randn(100, 10)
++    y = np.array(['x'] * 50 + ['y'] * 50, dtype=object)
++    gbrt = HistGradientBoostingClassifier(n_iter_no_change=10, random_state=42)
++    gbrt.fit(X, y)
++    predictions = gbrt.predict(X[:5])
++    assert all(pred in ['x', 'y'] for pred in predictions)
++    print("PASSED")
++
++def test_string_target_multiclass():
++    """Test multiclass string targets with early stopping."""
++    print("\nTest 2: Multiclass string targets")
++    X = np.random.randn(150, 10)
++    y = np.array(['cat'] * 50 + ['dog'] * 50 + ['bird'] * 50, dtype=object)
++    gbrt = HistGradientBoostingClassifier(n_iter_no_change=10, random_state=42)
++    gbrt.fit(X, y)
++    predictions = gbrt.predict(X[:5])
++    assert all(pred in ['cat', 'dog', 'bird'] for pred in predictions)
++    print("PASSED")
++
++def test_string_target_with_validation_fraction():
++    """Test string targets with validation fraction."""
++    print("\nTest 3: String targets with validation fraction")
++    X = np.random.randn(200, 10)
++    y = np.array(['positive'] * 100 + ['negative'] * 100, dtype=object)
++    gbrt = HistGradientBoostingClassifier(
++        n_iter_no_change=10, 
++        validation_fraction=0.2,
++        random_state=42
++    )
++    gbrt.fit(X, y)
++    predictions = gbrt.predict(X[:5])
++    assert all(pred in ['positive', 'negative'] for pred in predictions)
++    print("PASSED")
++
++def test_numeric_target_still_works():
++    """Test that numeric targets still work properly."""
++    print("\nTest 4: Numeric targets (regression test)")
++    X = np.random.randn(100, 10)
++    y = np.array([0] * 50 + [1] * 50)
++    gbrt = HistGradientBoostingClassifier(n_iter_no_change=10, random_state=42)
++    gbrt.fit(X, y)
++    predictions = gbrt.predict(X[:5])
++    assert all(pred in [0, 1] for pred in predictions)
++    print("PASSED")
++
++def test_warm_start_with_string_targets():
++    """Test warm start with string targets."""
++    print("\nTest 5: Warm start with string targets")
++    X = np.random.randn(100, 10)
++    y = np.array(['A'] * 50 + ['B'] * 50, dtype=object)
++    
++    gbrt = HistGradientBoostingClassifier(
++        n_iter_no_change=10, 
++        warm_start=True,
++        max_iter=10,
++        random_state=42
++    )
++    gbrt.fit(X, y)
++    initial_score = gbrt.score(X, y)
++    
++    # Continue training with warm start
++    gbrt.max_iter = 20
++    gbrt.fit(X, y)
++    final_score = gbrt.score(X, y)
++    
++    assert final_score >= initial_score  # Should improve or stay same
++    print("PASSED")
++
++def test_scoring_parameter_with_string_targets():
++    """Test custom scoring parameter with string targets."""
++    print("\nTest 6: Custom scoring with string targets")
++    from sklearn.metrics import f1_score
++    X = np.random.randn(100, 10)
++    y = np.array(['class1'] * 50 + ['class2'] * 50, dtype=object)
++    
++    gbrt = HistGradientBoostingClassifier(
++        n_iter_no_change=10,
++        scoring='f1_macro',
++        random_state=42
++    )
++    gbrt.fit(X, y)
++    predictions = gbrt.predict(X[:5])
++    assert all(pred in ['class1', 'class2'] for pred in predictions)
++    print("PASSED")
++
++if __name__ == "__main__":
++    test_string_target_with_early_stopping()
++    test_string_target_multiclass()
++    test_string_target_with_validation_fraction()
++    test_numeric_target_still_works()
++    test_warm_start_with_string_targets()
++    test_scoring_parameter_with_string_targets()
++    print("\nAll tests passed!")

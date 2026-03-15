@@ -1,0 +1,832 @@
+diff --git a/django/db/models/deletion.py b/django/db/models/deletion.py
+index ae82d26340..e7d196afb0 100644
+--- a/django/db/models/deletion.py
++++ b/django/db/models/deletion.py
+@@ -1,9 +1,10 @@
+-from collections import Counter
++from collections import Counter, defaultdict
+ from itertools import chain
+ from operator import attrgetter
+ 
+ from django.db import IntegrityError, connections, transaction
+ from django.db.models import signals, sql
++from django.db.models.sql.constants import CURSOR
+ 
+ 
+ class ProtectedError(IntegrityError):
+@@ -310,9 +311,75 @@ class Collector:
+                     )
+ 
+             # fast deletes
++            # Group fast deletes by model and field to combine queries intelligently
++            from collections import defaultdict
++            
++            # First, analyze queries to group them properly
++            fast_delete_groups = defaultdict(lambda: defaultdict(list))
++            
+             for qs in self.fast_deletes:
+-                count = qs._raw_delete(using=self.using)
+-                deleted_counter[qs.model._meta.label] += count
++                model = qs.model
++                # Try to identify the field being filtered
++                field_identifier = None
++                if (hasattr(qs.query, 'where') and 
++                    hasattr(qs.query.where, 'children') and 
++                    qs.query.where.children):
++                    # Look at the first condition to identify the field
++                    first_child = qs.query.where.children[0]
++                    if hasattr(first_child, 'lhs') and hasattr(first_child.lhs, 'target'):
++                        field_identifier = first_child.lhs.target.name
++                
++                if field_identifier:
++                    # Group by model and field
++                    fast_delete_groups[model][field_identifier].append(qs)
++                else:
++                    # Can't identify field, treat each query separately
++                    fast_delete_groups[model][id(qs)].append(qs)
++            
++            # Process the groups
++            for model, field_groups in fast_delete_groups.items():
++                # Check if we have multiple fields for the same model
++                field_names = [k for k in field_groups.keys() if not isinstance(k, int)]
++                
++                if len(field_names) > 1:
++                    # We have multiple different fields (e.g., created_by and updated_by)
++                    # Combine all queries for this model
++                    all_queries = []
++                    for queries in field_groups.values():
++                        all_queries.extend(queries)
++                    
++                    if len(all_queries) == 1:
++                        # Only one query after all
++                        count = all_queries[0]._raw_delete(using=self.using)
++                        deleted_counter[model._meta.label] += count
++                    else:
++                        # Combine the WHERE clauses with OR
++                        combined_where = all_queries[0].query.where_class()
++                        combined_where.connector = 'OR'
++                        
++                        for qs in all_queries:
++                            where_clone = qs.query.where.clone()
++                            if where_clone.children:
++                                if len(where_clone.children) > 1 or where_clone.connector == 'AND':
++                                    combined_where.children.append(where_clone)
++                                else:
++                                    combined_where.children.extend(where_clone.children)
++                        
++                        # Create a DeleteQuery with the combined WHERE
++                        delete_query = sql.DeleteQuery(model)
++                        delete_query.where = combined_where
++                        delete_query.get_initial_alias()
++                        
++                        cursor = delete_query.get_compiler(self.using).execute_sql(CURSOR)
++                        count = cursor.rowcount if cursor else 0
++                        deleted_counter[model._meta.label] += count
++                else:
++                    # All queries are for the same field (or unidentifiable)
++                    # These are likely batches, so execute them separately
++                    for queries in field_groups.values():
++                        for qs in queries:
++                            count = qs._raw_delete(using=self.using)
++                            deleted_counter[model._meta.label] += count
+ 
+             # update fields
+             for model, instances_for_fieldvalues in self.field_updates.items():
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/models.py b/test_app/models.py
+new file mode 100644
+index 0000000000..acd796b29e
+--- /dev/null
++++ b/test_app/models.py
+@@ -0,0 +1,23 @@
++
++from django.db import models
++
++class Person(models.Model):
++    name = models.CharField(max_length=100)
++    friends = models.ManyToManyField('self')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class User(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Entry(models.Model):
++    title = models.CharField(max_length=100)
++    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_entries')
++    updated_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='updated_entries')
++    
++    class Meta:
++        app_label = 'test_app'
+diff --git a/test_batch_debug.py b/test_batch_debug.py
+new file mode 100644
+index 0000000000..0ec189d5d8
+--- /dev/null
++++ b/test_batch_debug.py
+@@ -0,0 +1,52 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Person, User, Entry
++from django.db import connection
++from django.db.models import deletion
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Monkey patch to debug fast_deletes
++original_collect = deletion.Collector.collect
++
++def debug_collect(self, *args, **kwargs):
++    result = original_collect(self, *args, **kwargs)
++    print(f"\nAfter collect, fast_deletes has {len(self.fast_deletes)} entries")
++    for i, qs in enumerate(self.fast_deletes):
++        print(f"  {i}: Model={qs.model.__name__}, Query={qs.query}")
++    return result
++
++deletion.Collector.collect = debug_collect
++
++# Create many users and entries to trigger batching
++print("Creating test data...")
++users = []
++for i in range(10):
++    user = User.objects.create(name=f"User {i}")
++    users.append(user)
++    for j in range(50):  # 50 entries per user = 500 total
++        Entry.objects.create(
++            title=f"Entry {i}-{j}",
++            created_by=user,
++            updated_by=user
++        )
++
++print(f"\nDeleting {len(users)} users with {Entry.objects.count()} entries...")
++
++# Delete all users
++collector = deletion.Collector(using='default')
++collector.collect(User.objects.all())
++print(f"\nTotal fast_deletes: {len(collector.fast_deletes)}")
+diff --git a/test_batch_preservation.py b/test_batch_preservation.py
+new file mode 100644
+index 0000000000..617b3617e8
+--- /dev/null
++++ b/test_batch_preservation.py
+@@ -0,0 +1,81 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from django.core.management import call_command
++from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
++
++# Define models
++class BigModel(models.Model):
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++class RelatedModel(models.Model):
++    big = models.ForeignKey(BigModel, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(BigModel)
++    schema_editor.create_model(RelatedModel)
++
++# Create many objects to trigger batching
++print(f"Creating test data (batch size info: GET_ITERATOR_CHUNK_SIZE={GET_ITERATOR_CHUNK_SIZE})...")
++big_objects = []
++for i in range(2000):  # Create 2000 objects
++    big = BigModel.objects.create(name=f"Big {i}")
++    big_objects.append(big)
++    RelatedModel.objects.create(big=big)
++
++print(f"Created {len(big_objects)} BigModel objects")
++
++# Calculate expected batches
++batch_size = connection.ops.bulk_batch_size(['pk'], big_objects)
++expected_batches = len(big_objects) // batch_size + (1 if len(big_objects) % batch_size else 0)
++print(f"Bulk batch size: {batch_size}")
++print(f"Expected batches for related deletes: {expected_batches}")
++
++# Delete and check queries
++print("\nDeleting all BigModel objects...")
++with CaptureQueriesContext(connection) as context:
++    BigModel.objects.all().delete()
++
++delete_queries = [q for q in context.captured_queries if 'DELETE' in q['sql']]
++print(f"\nTotal DELETE queries: {len(delete_queries)}")
++
++# Count queries by table
++related_deletes = [q for q in delete_queries if 'test_app_relatedmodel' in q['sql']]
++big_deletes = [q for q in delete_queries if 'test_app_bigmodel' in q['sql'] and 'test_app_relatedmodel' not in q['sql']]
++
++print(f"RelatedModel DELETE queries: {len(related_deletes)} (expected: {expected_batches})")
++print(f"BigModel DELETE queries: {len(big_deletes)}")
++
++# Verify batching is preserved
++if len(related_deletes) == expected_batches:
++    print("\nSUCCESS: Batching is preserved! Queries are NOT combined when they're part of batch processing.")
++else:
++    print(f"\nFAILURE: Expected {expected_batches} batched queries but got {len(related_deletes)}")
++
++# Show a sample of the queries
++if related_deletes:
++    print("\nFirst RelatedModel DELETE query:")
++    print(f"  {related_deletes[0]['sql'][:200]}...")
++    if len(related_deletes) > 1:
++        print(f"\nLast RelatedModel DELETE query:")
++        print(f"  {related_deletes[-1]['sql'][:200]}...")
++
++# Cleanup
++with connection.schema_editor() as schema_editor:
++    schema_editor.delete_model(RelatedModel)
++    schema_editor.delete_model(BigModel)
+diff --git a/test_combined_debug.py b/test_combined_debug.py
+new file mode 100644
+index 0000000000..bc2f142b0c
+--- /dev/null
++++ b/test_combined_debug.py
+@@ -0,0 +1,53 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Person, User, Entry
++from django.db import connection
++from django.db.models import deletion
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Monkey patch to debug fast_deletes
++original_delete = deletion.Collector.delete
++
++def debug_delete(self):
++    print("\n=== Debugging combined delete ===")
++    
++    # Group fast deletes by model
++    from collections import defaultdict
++    fast_deletes_by_model = defaultdict(list)
++    for qs in self.fast_deletes:
++        fast_deletes_by_model[qs.model].append(qs)
++    
++    for model, querysets in fast_deletes_by_model.items():
++        print(f"\nModel: {model}")
++        print(f"Number of querysets: {len(querysets)}")
++        for i, qs in enumerate(querysets):
++            print(f"  QuerySet {i}: {qs.query}")
++            print(f"    WHERE: {qs.query.where}")
++    
++    return original_delete(self)
++
++deletion.Collector.delete = debug_delete
++
++# Create test data
++user = User.objects.create(name="Test User")
++entry1 = Entry.objects.create(title="Entry 1", created_by=user, updated_by=user)
++entry2 = Entry.objects.create(title="Entry 2", created_by=user, updated_by=user)
++
++# Test deletion
++print("Testing User deletion with debug info:")
++user.delete()
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..4c6b337954
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,153 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Person, User, Entry
++from django.db import connection
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++def test_single_relation():
++    """Test model with single foreign key relation"""
++    print("\n=== Test 1: Single relation ===")
++    
++    # Create a new model with single FK
++    from django.db import models
++    
++    class Author(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++            
++    class Book(models.Model):
++        title = models.CharField(max_length=100)
++        author = models.ForeignKey(Author, on_delete=models.CASCADE)
++        class Meta:
++            app_label = 'test_app'
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Author)
++        schema_editor.create_model(Book)
++    
++    author = Author.objects.create(name="Test Author")
++    Book.objects.create(title="Book 1", author=author)
++    Book.objects.create(title="Book 2", author=author)
++    
++    with CaptureQueriesContext(connection) as context:
++        author.delete()
++    
++    # Should only have 3 queries: BEGIN, DELETE books, DELETE author
++    delete_queries = [q for q in context.captured_queries if 'DELETE' in q['sql']]
++    print(f"Number of DELETE queries: {len(delete_queries)}")
++    for q in delete_queries:
++        print(f"  {q['sql']}")
++    
++    # Cleanup
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(Book)
++        schema_editor.delete_model(Author)
++
++def test_multiple_relations():
++    """Test the original case with multiple FKs to same model"""
++    print("\n=== Test 2: Multiple relations to same model ===")
++    
++    user = User.objects.create(name="Test User")
++    Entry.objects.create(title="Entry 1", created_by=user, updated_by=user)
++    Entry.objects.create(title="Entry 2", created_by=user, updated_by=user)
++    
++    with CaptureQueriesContext(connection) as context:
++        user.delete()
++    
++    delete_queries = [q for q in context.captured_queries if 'DELETE' in q['sql']]
++    print(f"Number of DELETE queries: {len(delete_queries)}")
++    for q in delete_queries:
++        print(f"  {q['sql']}")
++    
++    # Check that we have OR in the query
++    entry_deletes = [q for q in delete_queries if 'test_app_entry' in q['sql']]
++    assert len(entry_deletes) == 1, f"Expected 1 entry delete query, got {len(entry_deletes)}"
++    assert ' OR ' in entry_deletes[0]['sql'], "Expected OR in combined query"
++
++def test_many_to_many():
++    """Test M2M relations"""
++    print("\n=== Test 3: Many-to-many relations ===")
++    
++    person = Person.objects.create(name="Test Person")
++    friend1 = Person.objects.create(name="Friend 1")
++    friend2 = Person.objects.create(name="Friend 2")
++    person.friends.add(friend1, friend2)
++    friend1.friends.add(person)  # Reverse relation
++    
++    with CaptureQueriesContext(connection) as context:
++        person.delete()
++    
++    delete_queries = [q for q in context.captured_queries if 'DELETE' in q['sql']]
++    print(f"Number of DELETE queries: {len(delete_queries)}")
++    for q in delete_queries:
++        print(f"  {q['sql']}")
++    
++    # Check that M2M deletes are combined
++    m2m_deletes = [q for q in delete_queries if 'person_friends' in q['sql']]
++    assert len(m2m_deletes) == 1, f"Expected 1 M2M delete query, got {len(m2m_deletes)}"
++    assert ' OR ' in m2m_deletes[0]['sql'], "Expected OR in combined M2M query"
++
++def test_three_relations():
++    """Test model with three FK relations to same model"""
++    print("\n=== Test 4: Three relations to same model ===")
++    
++    from django.db import models
++    
++    class Task(models.Model):
++        title = models.CharField(max_length=100)
++        created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_tasks')
++        assigned_to = models.ForeignKey(User, on_delete=models.CASCADE, related_name='assigned_tasks')
++        reviewed_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reviewed_tasks')
++        class Meta:
++            app_label = 'test_app'
++    
++    # Create table
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Task)
++    
++    user = User.objects.create(name="Multi User")
++    Task.objects.create(title="Task 1", created_by=user, assigned_to=user, reviewed_by=user)
++    
++    with CaptureQueriesContext(connection) as context:
++        user.delete()
++    
++    delete_queries = [q for q in context.captured_queries if 'DELETE' in q['sql']]
++    print(f"Number of DELETE queries: {len(delete_queries)}")
++    for q in delete_queries:
++        print(f"  {q['sql']}")
++    
++    # Check that all three relations are combined with OR
++    task_deletes = [q for q in delete_queries if 'test_app_task' in q['sql']]
++    assert len(task_deletes) == 1, f"Expected 1 task delete query, got {len(task_deletes)}"
++    # Should have 2 ORs for 3 conditions
++    or_count = task_deletes[0]['sql'].count(' OR ')
++    assert or_count == 2, f"Expected 2 ORs in query with 3 conditions, got {or_count}"
++    
++    # Cleanup
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(Task)
++
++# Run all tests
++test_single_relation()
++test_multiple_relations()
++test_many_to_many()
++test_three_relations()
++
++print("\n✅ All tests passed!")
+diff --git a/test_fast_delete.py b/test_fast_delete.py
+new file mode 100644
+index 0000000000..d856e6c789
+--- /dev/null
++++ b/test_fast_delete.py
+@@ -0,0 +1,99 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = ['test_app']
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++# Create a test app
++os.makedirs('/testbed/test_app', exist_ok=True)
++with open('/testbed/test_app/__init__.py', 'w') as f:
++    f.write('')
++
++with open('/testbed/test_app/models.py', 'w') as f:
++    f.write("""
++from django.db import models
++
++class Person(models.Model):
++    name = models.CharField(max_length=100)
++    friends = models.ManyToManyField('self')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class User(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Entry(models.Model):
++    title = models.CharField(max_length=100)
++    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_entries')
++    updated_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='updated_entries')
++    
++    class Meta:
++        app_label = 'test_app'
++""")
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Person, User, Entry
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Create test data
++user = User.objects.create(name="Test User")
++entry1 = Entry.objects.create(title="Entry 1", created_by=user, updated_by=user)
++entry2 = Entry.objects.create(title="Entry 2", created_by=user, updated_by=user)
++
++person = Person.objects.create(name="Test Person")
++friend = Person.objects.create(name="Friend")
++person.friends.add(friend)
++
++# Test deletion and capture queries
++print("Testing User deletion:")
++with CaptureQueriesContext(connection) as context:
++    user.delete()
++    
++for i, query in enumerate(context.captured_queries):
++    print(f"Query {i+1}: {query['sql']}")
++
++# Recreate data for Person test
++user = User.objects.create(name="Test User 2")
++entry1 = Entry.objects.create(title="Entry 3", created_by=user, updated_by=user)
++entry2 = Entry.objects.create(title="Entry 4", created_by=user, updated_by=user)
++
++person = Person.objects.create(name="Test Person 2")
++friend = Person.objects.create(name="Friend 2")
++person.friends.add(friend)
++
++print("\nTesting Person deletion:")
++with CaptureQueriesContext(connection) as context:
++    person.delete()
++    
++for i, query in enumerate(context.captured_queries):
++    print(f"Query {i+1}: {query['sql']}")
+diff --git a/test_fast_delete_debug.py b/test_fast_delete_debug.py
+new file mode 100644
+index 0000000000..b7003a0272
+--- /dev/null
++++ b/test_fast_delete_debug.py
+@@ -0,0 +1,48 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Person, User, Entry
++from django.db import connection
++from django.db.models import deletion
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Monkey patch to debug fast_deletes
++original_delete = deletion.Collector.delete
++
++def debug_delete(self):
++    print("\n=== Fast deletes before processing ===")
++    for i, qs in enumerate(self.fast_deletes):
++        print(f"Fast delete {i}:")
++        print(f"  Model: {qs.model}")
++        print(f"  Query: {qs.query}")
++        if hasattr(qs.query, 'where'):
++            print(f"  Where: {qs.query.where}")
++            if hasattr(qs.query.where, 'children'):
++                print(f"  Where children: {qs.query.where.children}")
++    
++    return original_delete(self)
++
++deletion.Collector.delete = debug_delete
++
++# Create test data
++user = User.objects.create(name="Test User")
++entry1 = Entry.objects.create(title="Entry 1", created_by=user, updated_by=user)
++entry2 = Entry.objects.create(title="Entry 2", created_by=user, updated_by=user)
++
++# Test deletion
++print("Testing User deletion with debug info:")
++user.delete()
+diff --git a/test_large_batch_debug.py b/test_large_batch_debug.py
+new file mode 100644
+index 0000000000..1fe6153154
+--- /dev/null
++++ b/test_large_batch_debug.py
+@@ -0,0 +1,75 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import test models
++from django.db import connection
++from django.db.models import deletion
++from django.core.management import call_command
++
++# Define models similar to the test
++class Avatar(models.Model):
++    desc = models.TextField(null=True)
++    class Meta:
++        app_label = 'test_app'
++
++class TestUser(models.Model):
++    avatar = models.ForeignKey(Avatar, models.CASCADE, null=True)
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_user2'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Avatar)
++    schema_editor.create_model(TestUser)
++
++# Monkey patch to debug fast_deletes
++original_collect = deletion.Collector.collect
++
++def debug_collect(self, *args, **kwargs):
++    result = original_collect(self, *args, **kwargs)
++    print(f"\nAfter collect, fast_deletes has {len(self.fast_deletes)} entries")
++    for i, qs in enumerate(self.fast_deletes):
++        # Check if queries have the same base
++        if i < 5:  # Only print first 5
++            print(f"  {i}: Model={qs.model.__name__}")
++            if hasattr(qs.query, 'where') and hasattr(qs.query.where, 'children'):
++                for child in qs.query.where.children:
++                    print(f"      Where condition: {child}")
++    if len(self.fast_deletes) > 5:
++        print(f"  ... and {len(self.fast_deletes) - 5} more")
++    return result
++
++deletion.Collector.collect = debug_collect
++
++# Create many avatars
++print("Creating test data...")
++avatars = []
++for i in range(2000):
++    avatar = Avatar.objects.create(desc=f"Avatar {i}")
++    avatars.append(avatar)
++    # Create a user for each avatar
++    TestUser.objects.create(avatar=avatar)
++
++print(f"\nDeleting {len(avatars)} avatars...")
++
++# Delete all avatars
++collector = deletion.Collector(using='default')
++collector.collect(Avatar.objects.all())
++print(f"\nTotal fast_deletes: {len(collector.fast_deletes)}")
++
++# Check batch size
++from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
++batch_size = connection.ops.bulk_batch_size(['pk'], avatars)
++print(f"Batch size: {batch_size}")
++print(f"GET_ITERATOR_CHUNK_SIZE: {GET_ITERATOR_CHUNK_SIZE}")
++print(f"Expected batches: {len(avatars) // batch_size + (1 if len(avatars) % batch_size else 0)}")
+diff --git a/test_query_analysis.py b/test_query_analysis.py
+new file mode 100644
+index 0000000000..1ef7f46cc2
+--- /dev/null
++++ b/test_query_analysis.py
+@@ -0,0 +1,41 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from test_app.models import User, Entry
++from django.db.models.fields.related_lookups import RelatedIn
++
++# Create some test queries
++qs1 = Entry.objects.filter(created_by_id__in=[1, 2, 3])
++qs2 = Entry.objects.filter(updated_by_id__in=[1, 2, 3])
++qs3 = Entry.objects.filter(created_by_id__in=[4, 5, 6])
++
++print("Query 1 (created_by in [1,2,3]):")
++print(f"  WHERE: {qs1.query.where}")
++print(f"  Children: {qs1.query.where.children}")
++if qs1.query.where.children:
++    child = qs1.query.where.children[0]
++    print(f"  Child type: {type(child)}")
++    print(f"  Child lhs: {child.lhs}")
++    print(f"  Child lhs.target: {child.lhs.target}")
++    print(f"  Child lhs.target.name: {child.lhs.target.name}")
++    print(f"  Child rhs: {child.rhs}")
++
++print("\nQuery 2 (updated_by in [1,2,3]):")
++if qs2.query.where.children:
++    child = qs2.query.where.children[0]
++    print(f"  Child lhs.target.name: {child.lhs.target.name}")
++    print(f"  Child rhs: {child.rhs}")
++
++print("\nQuery 3 (created_by in [4,5,6]):")
++if qs3.query.where.children:
++    child = qs3.query.where.children[0]
++    print(f"  Child lhs.target.name: {child.lhs.target.name}")
++    print(f"  Child rhs: {child.rhs}")
+diff --git a/test_queryset_combine.py b/test_queryset_combine.py
+new file mode 100644
+index 0000000000..8089ee0c92
+--- /dev/null
++++ b/test_queryset_combine.py
+@@ -0,0 +1,34 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.models import Q
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Import models after Django setup
++from test_app.models import Entry
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Test combining queries
++qs1 = Entry.objects.filter(created_by_id=1)
++qs2 = Entry.objects.filter(updated_by_id=1)
++
++print("qs1 query:", qs1.query)
++print("qs2 query:", qs2.query)
++
++# Try combining with Q objects
++combined = Entry.objects.filter(Q(created_by_id=1) | Q(updated_by_id=1))
++print("\nCombined query:", combined.query)
++
++# Let's see the SQL
++print("\nSQL for combined query:")
++print(combined.query.get_compiler('default').as_sql())
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..6f517a0750
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,10 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = ['test_app']
++SECRET_KEY = 'test'
++USE_TZ = False

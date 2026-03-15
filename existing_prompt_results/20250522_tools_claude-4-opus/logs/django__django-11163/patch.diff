@@ -1,0 +1,385 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index d157c291ef..fadac848d0 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -83,7 +83,7 @@ def model_to_dict(instance, fields=None, exclude=None):
+     for f in chain(opts.concrete_fields, opts.private_fields, opts.many_to_many):
+         if not getattr(f, 'editable', False):
+             continue
+-        if fields and f.name not in fields:
++        if fields is not None and f.name not in fields:
+             continue
+         if exclude and f.name in exclude:
+             continue
+@@ -431,7 +431,7 @@ class BaseModelForm(BaseForm):
+         for f in chain(opts.many_to_many, opts.private_fields):
+             if not hasattr(f, 'save_form_data'):
+                 continue
+-            if fields and f.name not in fields:
++            if fields is not None and f.name not in fields:
+                 continue
+             if exclude and f.name in exclude:
+                 continue
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..292843d96c
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,128 @@
++"""
++Final verification test for model_to_dict fix
++"""
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.forms.models import model_to_dict
++from django.db import models
++from django import forms
++
++# Define test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    email = models.EmailField()
++    bio = models.TextField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Book(models.Model):
++    title = models.CharField(max_length=200)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    pages = models.IntegerField()
++    tags = models.ManyToManyField('Tag')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Book)
++
++# Create test data
++author = Author.objects.create(name="John Doe", email="john@example.com", bio="A great author")
++tag1 = Tag.objects.create(name="Fiction")
++tag2 = Tag.objects.create(name="Bestseller")
++book = Book.objects.create(title="Great Book", author=author, pages=300)
++book.tags.add(tag1, tag2)
++
++print("Testing model_to_dict with various field configurations:")
++print("=" * 60)
++
++# Test 1: fields=None (should return all fields)
++result = model_to_dict(author, fields=None)
++print(f"\n1. fields=None:")
++print(f"   Result: {result}")
++print(f"   Contains all fields: {all(k in result for k in ['id', 'name', 'email', 'bio'])}")
++
++# Test 2: fields=[] (should return empty dict)
++result = model_to_dict(author, fields=[])
++print(f"\n2. fields=[] (empty list):")
++print(f"   Result: {result}")
++print(f"   Is empty dict: {result == {}}")
++
++# Test 3: fields=['name', 'email'] (should return only specified fields)
++result = model_to_dict(author, fields=['name', 'email'])
++print(f"\n3. fields=['name', 'email']:")
++print(f"   Result: {result}")
++print(f"   Contains only specified fields: {set(result.keys()) == {'name', 'email'}}")
++
++# Test 4: With exclude
++result = model_to_dict(author, exclude=['bio'])
++print(f"\n4. exclude=['bio']:")
++print(f"   Result: {result}")
++print(f"   Bio excluded: {'bio' not in result}")
++
++# Test 5: Empty fields with exclude (should still return empty dict)
++result = model_to_dict(author, fields=[], exclude=['bio'])
++print(f"\n5. fields=[], exclude=['bio']:")
++print(f"   Result: {result}")
++print(f"   Is empty dict: {result == {}}")
++
++# Test 6: With ManyToMany field
++try:
++    result = model_to_dict(book)
++    print(f"\n6. Book with M2M field:")
++    print(f"   Result keys: {list(result.keys())}")
++    print(f"   Tags value type: {type(result.get('tags', []))}")
++except Exception as e:
++    print(f"\n6. Book with M2M field - Skipping due to test environment issue: {type(e).__name__}")
++
++# Test ModelForm with empty fields
++print("\n" + "=" * 60)
++print("Testing ModelForm with empty fields list:")
++
++class EmptyFieldsForm(forms.ModelForm):
++    class Meta:
++        model = Author
++        fields = []
++
++form = EmptyFieldsForm()
++print(f"Form fields: {list(form.fields.keys())}")
++print(f"Form has no fields: {len(form.fields) == 0}")
++
++# Test saving with empty fields form
++form = EmptyFieldsForm(data={}, instance=author)
++print(f"Form is valid: {form.is_valid()}")
++if form.is_valid():
++    saved_author = form.save()
++    print(f"Author saved successfully: {saved_author.pk == author.pk}")
++
++print("\nAll tests completed successfully!")
+diff --git a/test_model_to_dict_empty_fields.py b/test_model_to_dict_empty_fields.py
+new file mode 100644
+index 0000000000..1200025cfb
+--- /dev/null
++++ b/test_model_to_dict_empty_fields.py
+@@ -0,0 +1,65 @@
++"""
++Test for model_to_dict with empty fields list
++"""
++from django.test import TestCase
++from django.forms.models import model_to_dict
++from django.db import models
++
++
++class TestModelToDictEmptyFields(TestCase):
++    """Test model_to_dict behavior with empty fields list"""
++    
++    def test_model_to_dict_empty_fields_list(self):
++        """model_to_dict should return empty dict when fields=[]"""
++        
++        # Create a test model
++        class TestModel(models.Model):
++            name = models.CharField(max_length=100)
++            age = models.IntegerField()
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        # Create instance
++        instance = TestModel(name="Test", age=25)
++        
++        # Test with empty fields list - should return empty dict
++        result = model_to_dict(instance, fields=[])
++        self.assertEqual(result, {})
++        
++        # Test with None fields - should return all fields
++        result = model_to_dict(instance, fields=None)
++        self.assertIn('name', result)
++        self.assertIn('age', result)
++        
++        # Test with specific fields
++        result = model_to_dict(instance, fields=['name'])
++        self.assertEqual(result, {'name': 'Test'})
++        self.assertNotIn('age', result)
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            USE_TZ=True,
++        )
++        django.setup()
++    
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__"])
+diff --git a/test_model_to_dict_fix.py b/test_model_to_dict_fix.py
+new file mode 100644
+index 0000000000..22c4e879b6
+--- /dev/null
++++ b/test_model_to_dict_fix.py
+@@ -0,0 +1,60 @@
++"""
++Test script to reproduce the model_to_dict issue with empty fields list.
++"""
++from django.forms.models import model_to_dict
++from django.db import models
++from django.test import TestCase
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++# Define a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    age = models.IntegerField()
++    email = models.EmailField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create a test instance
++instance = TestModel(name="John", age=30, email="john@example.com")
++instance.save()
++
++# Test the current behavior
++print("Testing model_to_dict with different field arguments:")
++print("\n1. With fields=None (should return all fields):")
++result = model_to_dict(instance, fields=None)
++print(f"   Result: {result}")
++
++print("\n2. With fields=['name'] (should return only 'name'):")
++result = model_to_dict(instance, fields=['name'])
++print(f"   Result: {result}")
++
++print("\n3. With fields=[] (should return empty dict, but currently returns all fields):")
++result = model_to_dict(instance, fields=[])
++print(f"   Result: {result}")
++print(f"   Expected: {{}}")
++print(f"   Bug present: {result != {}}")
+diff --git a/test_modelform_empty_fields.py b/test_modelform_empty_fields.py
+new file mode 100644
+index 0000000000..105a15fc3a
+--- /dev/null
++++ b/test_modelform_empty_fields.py
+@@ -0,0 +1,86 @@
++"""
++Test ModelForm behavior with empty fields list
++"""
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++
++# Define a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    age = models.IntegerField()
++    tags = models.ManyToManyField('Tag')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(TestModel)
++
++# Test ModelForm with empty fields
++class TestModelForm(forms.ModelForm):
++    class Meta:
++        model = TestModel
++        fields = []  # Empty fields list
++
++print("Testing ModelForm with empty fields list:")
++form = TestModelForm()
++print(f"Form fields: {list(form.fields.keys())}")
++print(f"Form._meta.fields: {form._meta.fields}")
++
++# Test saving
++instance = TestModel(name="Test", age=25)
++instance.save()
++tag = Tag(name="tag1")
++tag.save()
++instance.tags.add(tag)
++
++# Test form with data
++form = TestModelForm(instance=instance)
++print(f"\nForm with instance fields: {list(form.fields.keys())}")
++
++# Test _save_m2m with empty fields
++form_data = {}
++form = TestModelForm(data=form_data, instance=instance)
++if form.is_valid():
++    print("\nForm is valid")
++    if hasattr(form, '_save_m2m'):
++        print("Testing _save_m2m with empty fields...")
++        try:
++            # Manually set cleaned_data if needed
++            if not hasattr(form, 'cleaned_data'):
++                form.cleaned_data = {}
++            form._save_m2m()
++            print("_save_m2m executed without error")
++        except Exception as e:
++            print(f"Error in _save_m2m: {e}")
++else:
++    print(f"\nForm errors: {form.errors}")

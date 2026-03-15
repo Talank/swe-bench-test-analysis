@@ -1,0 +1,672 @@
+diff --git a/debug_args_kwargs.py b/debug_args_kwargs.py
+new file mode 100644
+index 000000000..5c7d57778
+--- /dev/null
++++ b/debug_args_kwargs.py
+@@ -0,0 +1,32 @@
++from sphinx.ext.napoleon import Config
++from sphinx.ext.napoleon.docstring import NumpyDocstring
++
++# Patch to debug
++original_format = NumpyDocstring._format_docutils_params
++
++def debug_format(self, fields, field_role='param', type_role='type'):
++    print("DEBUG: _format_docutils_params called")
++    for name, type_, desc in fields:
++        print(f"  Field: name={repr(name)}, type={repr(type_)}, desc={desc[:50] if desc else 'None'}")
++    return original_format(self, fields, field_role, type_role)
++
++NumpyDocstring._format_docutils_params = debug_format
++
++config = Config(napoleon_use_param=True)
++
++docstring = '''Test function.
++
++Parameters
++----------
++*args, **kwargs : 
++    Variable arguments.
++'''
++
++parsed = NumpyDocstring(docstring, config)
++result = str(parsed)
++print("\nResult:")
++print(result)
++print("\nLines with param:")
++for line in result.split('\n'):
++    if ':param' in line:
++        print(repr(line))
+diff --git a/sphinx/ext/napoleon/docstring.py b/sphinx/ext/napoleon/docstring.py
+index b3daa06f1..4ae1925e2 100644
+--- a/sphinx/ext/napoleon/docstring.py
++++ b/sphinx/ext/napoleon/docstring.py
+@@ -391,16 +391,43 @@ class GoogleDocstring:
+                                 ) -> List[str]:
+         lines = []
+         for _name, _type, _desc in fields:
+-            _desc = self._strip_empty(_desc)
+-            if any(_desc):
+-                _desc = self._fix_field_desc(_desc)
+-                field = ':%s %s: ' % (field_role, _name)
+-                lines.extend(self._format_block(field, _desc))
++            # Check if we have multiple parameters (comma-separated)
++            # But don't split if it's *args, **kwargs pattern (escaped as \*args, \*\*kwargs)
++            if ',' in _name and not (r'\*' in _name):
++                # Split multiple parameters separated by commas
++                # e.g., "x1, x2" -> ["x1", "x2"]
++                param_names = [name.strip() for name in _name.split(',') if name.strip()]
++                
++                _desc = self._strip_empty(_desc)
++                
++                # Handle each parameter separately
++                for param_name in param_names:
++                    # Apply escape for each parameter name
++                    param_name = self._escape_args_and_kwargs(param_name)
++                    
++                    if any(_desc):
++                        _desc_formatted = self._fix_field_desc(_desc)
++                        field = ':%s %s: ' % (field_role, param_name)
++                        lines.extend(self._format_block(field, _desc_formatted))
++                    else:
++                        lines.append(':%s %s:' % (field_role, param_name))
++                    
++                    # Add type information for each parameter
++                    if _type:
++                        lines.append(':%s %s: %s' % (type_role, param_name, _type))
+             else:
+-                lines.append(':%s %s:' % (field_role, _name))
++                # Single parameter or *args, **kwargs - use original logic
++                _desc = self._strip_empty(_desc)
++                if any(_desc):
++                    _desc = self._fix_field_desc(_desc)
++                    field = ':%s %s: ' % (field_role, _name)
++                    lines.extend(self._format_block(field, _desc))
++                else:
++                    lines.append(':%s %s:' % (field_role, _name))
+ 
+-            if _type:
+-                lines.append(':%s %s: %s' % (type_role, _name, _type))
++                if _type:
++                    lines.append(':%s %s: %s' % (type_role, _name, _type))
++                    
+         return lines + ['']
+ 
+     def _format_field(self, _name: str, _type: str, _desc: List[str]) -> List[str]:
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..d2c916222
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,115 @@
++"""Test edge cases for multiple parameters fix."""
++
++from sphinx.ext.napoleon import Config
++from sphinx.ext.napoleon.docstring import NumpyDocstring, GoogleDocstring
++
++
++def test_three_params():
++    """Test with three parameters on same line."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x, y, z : float
++    Three coordinates.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    assert ':param x:' in result
++    assert ':param y:' in result
++    assert ':param z:' in result
++    assert ':type x: :class:`float`' in result
++    assert ':type y: :class:`float`' in result
++    assert ':type z: :class:`float`' in result
++    print("✓ Three params test passed")
++
++
++def test_mixed_params():
++    """Test with mix of single and multiple params."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++a : int
++    Single param.
++b, c : str
++    Two params.
++d : float
++    Another single param.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    # Single params
++    assert ':param a:' in result
++    assert ':param d:' in result
++    
++    # Multiple params
++    assert ':param b:' in result
++    assert ':param c:' in result
++    
++    # No combined params
++    assert ':param b, c:' not in result
++    
++    print("✓ Mixed params test passed")
++
++
++def test_params_with_spaces():
++    """Test parameters with extra spaces."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x1  ,   x2   : array_like
++    Params with spaces.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    assert ':param x1:' in result
++    assert ':param x2:' in result
++    # Should not have extra spaces
++    assert ':param x1  :' not in result
++    assert ':param   x2:' not in result
++    
++    print("✓ Params with spaces test passed")
++
++
++def test_empty_param_name():
++    """Test with empty parameter after comma."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x, : array_like
++    Param with trailing comma.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    # Should only have x, not empty param
++    assert ':param x:' in result
++    assert ':param :' not in result
++    
++    print("✓ Empty param name test passed")
++
++
++if __name__ == '__main__':
++    test_three_params()
++    test_mixed_params()
++    test_params_with_spaces()
++    test_empty_param_name()
++    print("\nAll edge case tests passed!")
+diff --git a/test_html_render.py b/test_html_render.py
+new file mode 100644
+index 000000000..c91af6ecc
+--- /dev/null
++++ b/test_html_render.py
+@@ -0,0 +1,105 @@
++"""Test HTML rendering of multiple parameters."""
++
++import os
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test project
++test_dir = tempfile.mkdtemp()
++print(f"Test directory: {test_dir}")
++
++# Create source directory
++src_dir = Path(test_dir) / "source"
++src_dir.mkdir()
++
++# Create conf.py
++conf_content = f'''
++import sys
++sys.path.insert(0, '{src_dir}')
++
++project = 'Test'
++extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon']
++napoleon_use_param = True
++'''
++(src_dir / "conf.py").write_text(conf_content)
++
++# Create a Python module with our test function
++module_content = '''
++"""Test module."""
++
++def test_function(x1, x2, y1, y2):
++    """Test function with multiple parameters.
++    
++    Parameters
++    ----------
++    x1, x2 : array_like
++        Input arrays, description of x1, x2.
++    y1, y2 : array_like, optional
++        Optional input arrays, description of y1, y2.
++    
++    Returns
++    -------
++    result : array_like
++        The result.
++    """
++    pass
++'''
++(src_dir / "test_module.py").write_text(module_content)
++
++# Create index.rst
++index_content = '''
++Test Documentation
++==================
++
++.. automodule:: test_module
++   :members:
++'''
++(src_dir / "index.rst").write_text(index_content)
++
++# Build the documentation
++build_dir = Path(test_dir) / "build"
++os.system(f"cd {src_dir} && sphinx-build -b html . {build_dir} -q")
++
++# Read the generated HTML
++html_file = build_dir / "index.html"
++if html_file.exists():
++    html_content = html_file.read_text()
++    
++    # Check if parameters are properly rendered
++    print("\nChecking HTML output...")
++    
++    # Look for parameter definitions
++    import re
++    
++    # Find all dt elements (parameter names)
++    dt_pattern = r'<dt[^>]*>([^<]+)</dt>'
++    dt_matches = re.findall(dt_pattern, html_content)
++    
++    print("\nFound parameter definitions:")
++    for match in dt_matches:
++        if 'x1' in match or 'x2' in match or 'y1' in match or 'y2' in match:
++            print(f"  - {match}")
++    
++    # Check if we have individual entries for each parameter
++    has_x1 = any('x1' in match and 'x2' not in match for match in dt_matches)
++    has_x2 = any('x2' in match and 'x1' not in match for match in dt_matches)
++    has_y1 = any('y1' in match and 'y2' not in match for match in dt_matches)
++    has_y2 = any('y2' in match and 'y1' not in match for match in dt_matches)
++    
++    print(f"\nIndividual parameter entries:")
++    print(f"  x1: {has_x1}")
++    print(f"  x2: {has_x2}")
++    print(f"  y1: {has_y1}")
++    print(f"  y2: {has_y2}")
++    
++    # Save a snippet of the HTML for inspection
++    param_section = re.search(r'<dl class="field-list[^"]*">(.*?)</dl>', html_content, re.DOTALL)
++    if param_section:
++        print("\nParameter section HTML snippet:")
++        print(param_section.group(1)[:500] + "...")
++else:
++    print(f"HTML file not found: {html_file}")
++
++# Cleanup
++shutil.rmtree(test_dir)
+diff --git a/test_multiple_params.py b/test_multiple_params.py
+new file mode 100644
+index 000000000..9abd18d58
+--- /dev/null
++++ b/test_multiple_params.py
+@@ -0,0 +1,34 @@
++"""Test script to reproduce the multiple parameter issue in Napoleon."""
++
++def test_function(x1, x2, x3, y1, y2):
++    """Test function with multiple parameters on same line.
++    
++    Parameters
++    ----------
++    x1, x2 : array_like
++        Input arrays, description of `x1`, `x2`.
++    x3 : array_like
++        Another input array.
++    y1, y2 : array_like, optional
++        Optional input arrays, description of `y1`, `y2`.
++    
++    Returns
++    -------
++    result : array_like
++        The result.
++    """
++    pass
++
++
++def test_function_google(x1, x2, x3, y1, y2):
++    """Test function with multiple parameters on same line (Google style).
++    
++    Args:
++        x1, x2 (array_like): Input arrays, description of `x1`, `x2`.
++        x3 (array_like): Another input array.
++        y1, y2 (array_like, optional): Optional input arrays, description of `y1`, `y2`.
++    
++    Returns:
++        array_like: The result.
++    """
++    pass
+diff --git a/test_multiple_params_fix.py b/test_multiple_params_fix.py
+new file mode 100644
+index 000000000..4e7d1098e
+--- /dev/null
++++ b/test_multiple_params_fix.py
+@@ -0,0 +1,123 @@
++"""Test for multiple parameters fix."""
++
++import pytest
++from sphinx.ext.napoleon import Config
++from sphinx.ext.napoleon.docstring import NumpyDocstring, GoogleDocstring
++
++
++def test_numpy_multiple_params_with_use_param():
++    """Test NumPy style with multiple params when napoleon_use_param=True."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x1, x2 : array_like
++    Input arrays.
++y1, y2 : array_like, optional
++    Optional arrays.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    # Each parameter should have its own :param and :type directive
++    assert ':param x1:' in result
++    assert ':param x2:' in result
++    assert ':param y1:' in result
++    assert ':param y2:' in result
++    assert ':type x1:' in result
++    assert ':type x2:' in result
++    assert ':type y1:' in result
++    assert ':type y2:' in result
++    
++    # Should not have combined parameters
++    assert ':param x1, x2:' not in result
++    assert ':param y1, y2:' not in result
++    
++
++def test_google_multiple_params_with_use_param():
++    """Test Google style with multiple params when napoleon_use_param=True."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Args:
++    x1, x2 (array_like): Input arrays.
++    y1, y2 (array_like, optional): Optional arrays.
++'''
++    
++    parsed = GoogleDocstring(docstring, config)
++    result = str(parsed)
++    
++    # Each parameter should have its own :param and :type directive
++    assert ':param x1:' in result
++    assert ':param x2:' in result
++    assert ':param y1:' in result
++    assert ':param y2:' in result
++    assert ':type x1:' in result
++    assert ':type x2:' in result
++    assert ':type y1:' in result
++    assert ':type y2:' in result
++    
++    # Should not have combined parameters
++    assert ':param x1, x2:' not in result
++    assert ':param y1, y2:' not in result
++
++
++def test_single_param_unchanged():
++    """Test that single parameters are not affected."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x : array_like
++    Input array.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    assert ':param x:' in result
++    assert ':type x:' in result
++
++
++def test_args_kwargs_not_split():
++    """Test that *args, **kwargs is not split."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++*args, **kwargs : 
++    Variable arguments.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = str(parsed)
++    
++    # Should keep *args, **kwargs together
++    assert ':param \\*args, \\*\\*kwargs:' in result
++    # Should not split them
++    assert ':param \\*args:' not in result
++    assert ':param \\*\\*kwargs:' not in result
++
++
++if __name__ == '__main__':
++    test_numpy_multiple_params_with_use_param()
++    print("✓ NumPy multiple params test passed")
++    
++    test_google_multiple_params_with_use_param()
++    print("✓ Google multiple params test passed")
++    
++    test_single_param_unchanged()
++    print("✓ Single param test passed")
++    
++    test_args_kwargs_not_split()
++    print("✓ *args, **kwargs test passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_napoleon_format_field.py b/test_napoleon_format_field.py
+new file mode 100644
+index 000000000..7e186dc4b
+--- /dev/null
++++ b/test_napoleon_format_field.py
+@@ -0,0 +1,48 @@
++"""Test Napoleon's field formatting without napoleon_use_param."""
++
++from sphinx.ext.napoleon import Config
++from sphinx.ext.napoleon.docstring import NumpyDocstring, GoogleDocstring
++
++
++def test_numpy_without_param():
++    """Test NumPy style docstring without napoleon_use_param."""
++    config = Config(napoleon_use_param=False)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x1, x2 : array_like
++    Input arrays, description of `x1`, `x2`.
++y1, y2 : array_like, optional
++    Optional input arrays, description of `y1`, `y2`.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = parsed.__str__()
++    print("NumPy style result (napoleon_use_param=False):")
++    print(result)
++    print("\n" + "="*50 + "\n")
++
++
++def test_google_without_param():
++    """Test Google style docstring without napoleon_use_param."""
++    config = Config(napoleon_use_param=False)
++    
++    docstring = '''Test function.
++
++Args:
++    x1, x2 (array_like): Input arrays, description of `x1`, `x2`.
++    y1, y2 (array_like, optional): Optional input arrays, description of `y1`, `y2`.
++'''
++    
++    parsed = GoogleDocstring(docstring, config)
++    result = parsed.__str__()
++    print("Google style result (napoleon_use_param=False):")
++    print(result)
++    print("\n" + "="*50 + "\n")
++
++
++if __name__ == "__main__":
++    test_numpy_without_param()
++    test_google_without_param()
+diff --git a/test_napoleon_multi_params.py b/test_napoleon_multi_params.py
+new file mode 100644
+index 000000000..ac68de78b
+--- /dev/null
++++ b/test_napoleon_multi_params.py
+@@ -0,0 +1,60 @@
++"""Test Napoleon's handling of multiple parameters on the same line."""
++
++from sphinx.ext.napoleon import Config
++from sphinx.ext.napoleon.docstring import NumpyDocstring, GoogleDocstring
++
++
++def test_numpy_multiple_params():
++    """Test NumPy style docstring with multiple parameters on same line."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Parameters
++----------
++x1, x2 : array_like
++    Input arrays, description of `x1`, `x2`.
++y1, y2 : array_like, optional
++    Optional input arrays, description of `y1`, `y2`.
++'''
++    
++    parsed = NumpyDocstring(docstring, config)
++    result = parsed.__str__()
++    print("NumPy style result:")
++    print(result)
++    print("\n" + "="*50 + "\n")
++    
++    # Check the actual output format
++    lines = result.split('\n')
++    for i, line in enumerate(lines):
++        if ':param' in line or ':type' in line:
++            print(f"Line {i}: {repr(line)}")
++
++
++def test_google_multiple_params():
++    """Test Google style docstring with multiple parameters on same line."""
++    config = Config(napoleon_use_param=True)
++    
++    docstring = '''Test function.
++
++Args:
++    x1, x2 (array_like): Input arrays, description of `x1`, `x2`.
++    y1, y2 (array_like, optional): Optional input arrays, description of `y1`, `y2`.
++'''
++    
++    parsed = GoogleDocstring(docstring, config)
++    result = parsed.__str__()
++    print("\nGoogle style result:")
++    print(result)
++    print("\n" + "="*50 + "\n")
++    
++    # Check the actual output format  
++    lines = result.split('\n')
++    for i, line in enumerate(lines):
++        if ':param' in line or ':type' in line:
++            print(f"Line {i}: {repr(line)}")
++
++
++if __name__ == "__main__":
++    test_numpy_multiple_params()
++    test_google_multiple_params()
+diff --git a/test_napoleon_multiple_params.patch b/test_napoleon_multiple_params.patch
+new file mode 100644
+index 000000000..9cdc912e5
+--- /dev/null
++++ b/test_napoleon_multiple_params.patch
+@@ -0,0 +1,51 @@
++"""
++Test case to add to test_ext_napoleon_docstring.py for multiple parameters.
++
++This test should be added to either GoogleDocstringTest or NumpyDocstringTest classes.
++"""
++
++def test_multiple_parameters(self):
++    """Test parsing of multiple parameters on same line."""
++    # Test NumPy style
++    numpy_docstring = '''
++    Test function.
++    
++    Parameters
++    ----------
++    x1, x2 : array_like
++        Input arrays.
++    y1, y2 : array_like, optional
++        Optional input arrays.
++    '''
++    
++    config = Config(napoleon_use_param=True)
++    actual = str(NumpyDocstring(dedent(numpy_docstring), config))
++    
++    # Each parameter should have its own :param and :type  
++    self.assertIn(':param x1:', actual)
++    self.assertIn(':param x2:', actual)
++    self.assertIn(':type x1:', actual)
++    self.assertIn(':type x2:', actual)
++    
++    # Should not have combined parameters
++    self.assertNotIn(':param x1, x2:', actual)
++    
++    # Test Google style
++    google_docstring = '''
++    Test function.
++    
++    Args:
++        x1, x2 (array_like): Input arrays.
++        y1, y2 (array_like, optional): Optional input arrays.
++    '''
++    
++    actual = str(GoogleDocstring(dedent(google_docstring), config))
++    
++    # Each parameter should have its own :param and :type
++    self.assertIn(':param x1:', actual)
++    self.assertIn(':param x2:', actual)
++    self.assertIn(':type x1:', actual)
++    self.assertIn(':type x2:', actual)
++    
++    # Should not have combined parameters
++    self.assertNotIn(':param x1, x2:', actual)

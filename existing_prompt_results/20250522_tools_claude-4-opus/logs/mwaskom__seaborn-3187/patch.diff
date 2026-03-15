@@ -1,0 +1,883 @@
+diff --git a/debug_legend.png b/debug_legend.png
+new file mode 100644
+index 00000000..91bc799f
+Binary files /dev/null and b/debug_legend.png differ
+diff --git a/debug_legend.py b/debug_legend.py
+new file mode 100644
+index 00000000..e66accd7
+--- /dev/null
++++ b/debug_legend.py
+@@ -0,0 +1,55 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn.objects as so
++
++# Test that the legend title includes the offset for large values
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++# Create plot
++fig, ax = plt.subplots(figsize=(8, 6))
++p = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="large_values")
++    .add(so.Dot())
++    .on(ax)
++)
++
++# Plot and get the figure
++p.plot()
++
++# Check all legends
++print(f"Number of legends: {len(fig.legends)}")
++for i, legend in enumerate(fig.legends):
++    print(f"\nLegend {i}:")
++    title = legend.get_title()
++    print(f"  Title: '{title.get_text()}'")
++    
++    # Get all text elements in the legend
++    texts = legend.get_texts()
++    print(f"  Number of text elements: {len(texts)}")
++    for j, text in enumerate(texts):
++        print(f"    Text {j}: '{text.get_text()}'")
++
++# Also check children of the legend
++print("\nChecking legend structure:")
++for i, legend in enumerate(fig.legends):
++    print(f"\nLegend {i} children:")
++    for child in legend.get_children():
++        print(f"  {type(child).__name__}")
++        if hasattr(child, 'get_children'):
++            for subchild in child.get_children():
++                print(f"    {type(subchild).__name__}")
++                if hasattr(subchild, 'get_text'):
++                    try:
++                        print(f"      Text: '{subchild.get_text()}'")
++                    except:
++                        pass
++
++plt.savefig("/testbed/debug_legend.png", dpi=150)
++plt.close()
+diff --git a/matplotlib_offset_test.png b/matplotlib_offset_test.png
+new file mode 100644
+index 00000000..1a341b33
+Binary files /dev/null and b/matplotlib_offset_test.png differ
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..70d2f9b6
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,72 @@
++import matplotlib.pyplot as plt
++import seaborn as sns
++import seaborn.objects as so
++import numpy as np
++
++# Create test data with large values
++penguins = sns.load_dataset("penguins")
++penguins["body_mass_mg"] = penguins["body_mass_g"] * 1000
++
++# Test with seaborn objects API
++fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
++
++# Plot 1: Using seaborn objects
++plt.sca(ax1)
++(
++    so.Plot(
++        penguins, x="bill_length_mm", y="bill_depth_mm",
++        color="species", pointsize="body_mass_mg",
++    )
++    .add(so.Dot())
++    .on(ax1)
++    .plot()
++)
++ax1.set_title("Seaborn Objects API")
++
++# Plot 2: Using scatterplot
++ax2 = plt.subplot(1, 2, 2)
++sns.scatterplot(
++    data=penguins, 
++    x="bill_length_mm", 
++    y="bill_depth_mm",
++    hue="species",
++    size="body_mass_mg",
++    ax=ax2
++)
++ax2.set_title("Seaborn scatterplot")
++
++plt.tight_layout()
++plt.savefig("/testbed/reproduce_issue.png", dpi=150)
++plt.close()
++
++# Let's also check what the formatter is doing
++from matplotlib.ticker import ScalarFormatter
++import matplotlib as mpl
++
++# Create a formatter and test it with large values
++formatter = ScalarFormatter()
++formatter.set_scientific(True)
++formatter.set_powerlimits((-3, 3))
++
++# Create a pseudo axis to test
++class PseudoAxis:
++    def __init__(self):
++        self._data_interval = (3e6, 6e6)
++    
++    def get_data_interval(self):
++        return self._data_interval
++
++axis = PseudoAxis()
++formatter.set_axis(axis)
++
++# Test formatting
++test_values = np.array([3e6, 4e6, 5e6, 6e6])
++labels = formatter.format_ticks(test_values)
++print("Test values:", test_values)
++print("Formatted labels:", labels)
++print("Formatter offset:", formatter.get_offset())
++
++# Check matplotlib rcParams
++print("\nMatplotlib rcParams:")
++print(f"axes.formatter.useoffset: {mpl.rcParams['axes.formatter.useoffset']}")
++print(f"axes.formatter.offset_threshold: {mpl.rcParams['axes.formatter.offset_threshold']}")
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 8915616b..34a3de21 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -1569,6 +1569,9 @@ class Plotter:
+                         break
+                 else:
+                     title = self._resolve_label(p, var, data.names[var])
++                    # Check if the scale has an offset (for large numbers)
++                    if hasattr(scales[var], '_legend_offset') and scales[var]._legend_offset:
++                        title = f"{title} (×{scales[var]._legend_offset})"
+                     entry = (title, data.ids[var]), [var], (values, labels)
+                     schema.append(entry)
+ 
+diff --git a/seaborn/_core/scales.py b/seaborn/_core/scales.py
+index 55874bf2..ff37bde6 100644
+--- a/seaborn/_core/scales.py
++++ b/seaborn/_core/scales.py
+@@ -61,12 +61,14 @@ class Scale:
+     _matplotlib_scale: ScaleBase
+     _spacer: staticmethod
+     _legend: tuple[list[str], list[Any]] | None
++    _legend_offset: str | None
+ 
+     def __post_init__(self):
+ 
+         self._tick_params = None
+         self._label_params = None
+         self._legend = None
++        self._legend_offset = None
+ 
+     def tick(self):
+         raise NotImplementedError()
+@@ -379,7 +381,16 @@ class ContinuousBase(Scale):
+             locs = axis.major.locator()
+             locs = locs[(vmin <= locs) & (locs <= vmax)]
+             labels = axis.major.formatter.format_ticks(locs)
++            
++            # Check if the formatter has an offset (for large numbers)
++            # The offset is used when displaying large numbers in scientific notation
++            offset = ""
++            if hasattr(axis.major.formatter, 'get_offset'):
++                offset = axis.major.formatter.get_offset()
++            
+             new._legend = list(locs), list(labels)
++            # Store the offset separately so it can be used later
++            new._legend_offset = offset
+ 
+         return new
+ 
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 00000000..fd976ee5
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,119 @@
++"""
++Comprehensive test for the legend offset fix.
++This reproduces the exact issue from the problem statement.
++"""
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn as sns
++import seaborn.objects as so
++
++# Create data similar to the problem statement
++np.random.seed(42)
++n = 100
++penguins_like = pd.DataFrame({
++    'bill_length_mm': np.random.normal(44, 5, n),
++    'bill_depth_mm': np.random.normal(17, 2, n),
++    'species': np.random.choice(['Adelie', 'Chinstrap', 'Gentoo'], n),
++    'body_mass_g': np.random.normal(4200, 800, n)
++})
++penguins_like['body_mass_mg'] = penguins_like['body_mass_g'] * 1000
++
++# Create the plot from the problem statement
++print("Creating plot with large values (body_mass_mg)...")
++fig, ax = plt.subplots(figsize=(10, 8))
++(
++    so.Plot(
++        penguins_like, x="bill_length_mm", y="bill_depth_mm",
++        color="species", pointsize="body_mass_mg",
++    )
++    .add(so.Dot())
++    .on(ax)
++    .plot()
++)
++
++# Extract all text from the legend to verify the fix
++def get_all_legend_text(fig):
++    texts = []
++    for legend in fig.legends:
++        def extract_text(obj):
++            if hasattr(obj, 'get_text'):
++                try:
++                    text = obj.get_text()
++                    if text:
++                        texts.append(text)
++                except:
++                    pass
++            if hasattr(obj, 'get_children'):
++                for child in obj.get_children():
++                    extract_text(child)
++        extract_text(legend)
++    return texts
++
++all_texts = get_all_legend_text(fig)
++print("\nAll legend texts:")
++for text in all_texts:
++    print(f"  '{text}'")
++
++# Verify the fix
++has_offset = any("×1e6" in text for text in all_texts)
++has_body_mass_mg = any("body_mass_mg" in text for text in all_texts)
++
++print(f"\nVerification:")
++print(f"  Found 'body_mass_mg' in legend: {has_body_mass_mg}")
++print(f"  Found offset notation (×1e6): {has_offset}")
++
++if has_offset and has_body_mass_mg:
++    print("\n✅ SUCCESS: The legend correctly shows the offset for large values!")
++    print("   The issue from the problem statement has been fixed.")
++else:
++    print("\n❌ FAILED: The offset notation was not found in the legend.")
++
++plt.title("Fixed: Legend now shows 'body_mass_mg (×1e6)'", fontsize=14)
++plt.tight_layout()
++plt.savefig("/testbed/test_comprehensive_result.png", dpi=150)
++plt.close()
++
++# Also test that the offset is computed correctly based on the data range
++print("\n" + "="*50)
++print("Testing offset computation for different magnitudes:")
++print("="*50)
++
++test_cases = [
++    ("hundreds", 100, 500),
++    ("thousands", 1000, 5000),
++    ("ten thousands", 10000, 50000),
++    ("hundred thousands", 100000, 500000),
++    ("millions", 1e6, 5e6),
++    ("ten millions", 1e7, 5e7),
++    ("billions", 1e9, 5e9),
++]
++
++for name, min_val, max_val in test_cases:
++    data = pd.DataFrame({
++        'x': np.random.randn(50),
++        'y': np.random.randn(50),
++        'values': np.random.uniform(min_val, max_val, 50)
++    })
++    
++    fig, ax = plt.subplots()
++    (
++        so.Plot(data, x="x", y="y", pointsize="values")
++        .add(so.Dot())
++        .on(ax)
++        .plot()
++    )
++    
++    texts = get_all_legend_text(fig)
++    offset_text = [t for t in texts if "×" in t]
++    
++    if offset_text:
++        print(f"{name:20s}: {offset_text[0]}")
++    else:
++        values_text = [t for t in texts if "values" in t]
++        if values_text:
++            print(f"{name:20s}: {values_text[0]} (no offset needed)")
++    
++    plt.close()
++
++print("\n✅ All tests completed!")
+diff --git a/test_comprehensive_result.png b/test_comprehensive_result.png
+new file mode 100644
+index 00000000..f127100d
+Binary files /dev/null and b/test_comprehensive_result.png differ
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 00000000..f26d51d0
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,59 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn as sns
++import seaborn.objects as so
++
++# Create test data with large values
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++# Test with seaborn objects API
++fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
++
++# Plot 1: Using seaborn objects with large values
++(
++    so.Plot(data, x="x", y="y", color="category", pointsize="large_values")
++    .add(so.Dot())
++    .on(ax1)
++    .plot()
++)
++ax1.set_title("With large values (millions)")
++
++# Plot 2: Using seaborn objects with small values for comparison
++data['small_values'] = data['large_values'] / 1e6  # Convert to actual millions
++(
++    so.Plot(data, x="x", y="y", color="category", pointsize="small_values")
++    .add(so.Dot())
++    .on(ax2)
++    .plot()
++)
++ax2.set_title("With small values (actual units)")
++
++plt.tight_layout()
++plt.savefig("/testbed/test_fix_result.png", dpi=150)
++plt.close()
++
++print("Test plot saved to /testbed/test_fix_result.png")
++
++# Also test with scatterplot
++fig, ax = plt.subplots(figsize=(8, 6))
++sns.scatterplot(
++    data=data, 
++    x="x", 
++    y="y",
++    hue="category",
++    size="large_values",
++    ax=ax
++)
++ax.set_title("Scatterplot with large values")
++plt.tight_layout()
++plt.savefig("/testbed/test_fix_scatterplot.png", dpi=150)
++plt.close()
++
++print("Scatterplot saved to /testbed/test_fix_scatterplot.png")
+diff --git a/test_fix_result.png b/test_fix_result.png
+new file mode 100644
+index 00000000..346b7cba
+Binary files /dev/null and b/test_fix_result.png differ
+diff --git a/test_fix_scatterplot.png b/test_fix_scatterplot.png
+new file mode 100644
+index 00000000..4a89b745
+Binary files /dev/null and b/test_fix_scatterplot.png differ
+diff --git a/test_formatter_offset.py b/test_formatter_offset.py
+new file mode 100644
+index 00000000..f3cb8349
+--- /dev/null
++++ b/test_formatter_offset.py
+@@ -0,0 +1,92 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++from matplotlib.ticker import ScalarFormatter
++import numpy as np
++import pandas as pd
++import seaborn as sns
++import seaborn.objects as so
++
++# Create test data with large values
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++# Test the formatter behavior directly
++print("=== Testing ScalarFormatter behavior ===")
++formatter = ScalarFormatter()
++formatter.set_scientific(True)
++formatter.set_powerlimits((-3, 3))
++
++# Create a pseudo axis to test
++class PseudoAxis:
++    def __init__(self):
++        self._data_interval = (3e6, 6e6)
++        self._view_interval = (3e6, 6e6)
++    
++    def get_data_interval(self):
++        return self._data_interval
++    
++    def get_view_interval(self):
++        return self._view_interval
++
++axis = PseudoAxis()
++formatter.set_axis(axis)
++
++# Test formatting
++test_values = np.array([3e6, 4e6, 5e6, 6e6])
++labels = formatter.format_ticks(test_values)
++print("Test values:", test_values)
++print("Formatted labels:", labels)
++print("Formatter offset:", formatter.get_offset())
++print("Formatter offset text:", formatter.get_offset())
++
++# Check matplotlib rcParams
++print("\nMatplotlib rcParams:")
++print(f"axes.formatter.useoffset: {mpl.rcParams['axes.formatter.useoffset']}")
++print(f"axes.formatter.offset_threshold: {mpl.rcParams['axes.formatter.offset_threshold']}")
++
++# Now let's trace through seaborn's code
++print("\n=== Testing seaborn's Continuous scale ===")
++from seaborn._core.scales import Continuous
++from seaborn._core.properties import IntervalProperty
++
++# Create a continuous scale
++scale = Continuous()
++
++# Create a property (similar to what pointsize would be)
++prop = IntervalProperty()
++prop.legend = True
++
++# Setup the scale with our data
++scale_setup = scale._setup(data['large_values'], prop, axis=None)
++
++# Check the legend values
++if scale_setup._legend:
++    locs, labels = scale_setup._legend
++    print(f"\nLegend locations: {locs}")
++    print(f"Legend labels: {labels}")
++    
++# Let's also check what happens when we create a plot
++print("\n=== Creating actual plot ===")
++fig, ax = plt.subplots(figsize=(8, 6))
++
++# Use seaborn objects API
++p = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="large_values")
++    .add(so.Dot())
++)
++
++# Get the plot spec to inspect legend data
++plot_spec = p._plot_spec
++print(f"\nPlot spec scales: {plot_spec}")
++
++# Save the plot to see the result
++p.on(ax).plot()
++plt.savefig("/testbed/test_formatter_offset.png", dpi=150)
++plt.close()
++
++print("\nPlot saved to /testbed/test_formatter_offset.png")
+diff --git a/test_legend_offset.py b/test_legend_offset.py
+new file mode 100644
+index 00000000..54763275
+--- /dev/null
++++ b/test_legend_offset.py
+@@ -0,0 +1,63 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn.objects as so
++from unittest.mock import patch
++
++# Test that the legend title includes the offset for large values
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++# Create plot
++fig, ax = plt.subplots(figsize=(8, 6))
++p = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="large_values")
++    .add(so.Dot())
++    .on(ax)
++)
++
++# Plot and get the figure
++p.plot()
++
++# Check the legend
++legends = fig.legends
++assert len(legends) > 0, "No legend found"
++
++# Find the legend for large_values (pointsize)
++found_offset_legend = False
++for legend in legends:
++    title = legend.get_title().get_text()
++    print(f"Legend title: '{title}'")
++    if "large_values" in title and "×1e6" in title:
++        found_offset_legend = True
++        print("✓ Found legend with offset notation!")
++        break
++
++assert found_offset_legend, "Legend with offset notation not found"
++
++# Also test that small values don't get offset notation
++data['small_values'] = np.random.uniform(3, 6, 100)
++fig2, ax2 = plt.subplots(figsize=(8, 6))
++p2 = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="small_values")
++    .add(so.Dot())
++    .on(ax2)
++)
++p2.plot()
++
++# Check that small values don't have offset
++legends2 = fig2.legends
++for legend in legends2:
++    title = legend.get_title().get_text()
++    print(f"Small values legend title: '{title}'")
++    if "small_values" in title:
++        assert "×" not in title, f"Small values should not have offset notation, but got: {title}"
++        print("✓ Small values correctly have no offset notation")
++
++plt.close('all')
++print("\nAll tests passed!")
+diff --git a/test_legend_offset_final.py b/test_legend_offset_final.py
+new file mode 100644
+index 00000000..56a9ef6f
+--- /dev/null
++++ b/test_legend_offset_final.py
+@@ -0,0 +1,111 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn.objects as so
++
++def get_all_text_from_legend(legend):
++    """Recursively extract all text from a legend."""
++    texts = []
++    
++    def extract_text(obj):
++        if hasattr(obj, 'get_text'):
++            try:
++                text = obj.get_text()
++                if text:
++                    texts.append(text)
++            except:
++                pass
++        if hasattr(obj, 'get_children'):
++            for child in obj.get_children():
++                extract_text(child)
++    
++    extract_text(legend)
++    return texts
++
++# Test 1: Large values should have offset notation
++print("=== Test 1: Large values with offset ===")
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++fig, ax = plt.subplots(figsize=(8, 6))
++p = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="large_values")
++    .add(so.Dot())
++    .on(ax)
++)
++p.plot()
++
++# Check all text in legends
++all_texts = []
++for legend in fig.legends:
++    all_texts.extend(get_all_text_from_legend(legend))
++
++print("All texts found in legend:")
++for text in all_texts:
++    print(f"  '{text}'")
++
++# Check for offset notation
++found_offset = any("×1e6" in text for text in all_texts)
++assert found_offset, "Offset notation (×1e6) not found in legend"
++print("✓ Found offset notation for large values!")
++
++plt.close()
++
++# Test 2: Small values should NOT have offset notation
++print("\n=== Test 2: Small values without offset ===")
++data['small_values'] = np.random.uniform(3, 6, 100)
++fig2, ax2 = plt.subplots(figsize=(8, 6))
++p2 = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="small_values")
++    .add(so.Dot())
++    .on(ax2)
++)
++p2.plot()
++
++all_texts2 = []
++for legend in fig2.legends:
++    all_texts2.extend(get_all_text_from_legend(legend))
++
++print("All texts found in legend:")
++for text in all_texts2:
++    print(f"  '{text}'")
++
++# Check that there's no offset notation
++has_offset = any("×" in text for text in all_texts2)
++assert not has_offset, f"Small values should not have offset notation"
++print("✓ Small values correctly have no offset notation")
++
++plt.close()
++
++# Test 3: Test with billions
++print("\n=== Test 3: Billions with offset ===")
++data['billions'] = np.random.uniform(3e9, 6e9, 100)
++fig3, ax3 = plt.subplots(figsize=(8, 6))
++p3 = (
++    so.Plot(data, x="x", y="y", color="category", pointsize="billions")
++    .add(so.Dot())
++    .on(ax3)
++)
++p3.plot()
++
++all_texts3 = []
++for legend in fig3.legends:
++    all_texts3.extend(get_all_text_from_legend(legend))
++
++print("All texts found in legend:")
++for text in all_texts3:
++    print(f"  '{text}'")
++
++# Check for offset notation
++found_offset = any("×1e9" in text for text in all_texts3)
++assert found_offset, "Offset notation (×1e9) not found in legend for billions"
++print("✓ Found offset notation for billions!")
++
++plt.close('all')
++
++print("\n✅ All tests passed!")
+diff --git a/test_matplotlib_offset.py b/test_matplotlib_offset.py
+new file mode 100644
+index 00000000..87ad9751
+--- /dev/null
++++ b/test_matplotlib_offset.py
+@@ -0,0 +1,61 @@
++import matplotlib.pyplot as plt
++import matplotlib.ticker as ticker
++import numpy as np
++
++# Create a simple plot with large values
++fig, ax = plt.subplots()
++x = np.linspace(0, 10, 100)
++y = x * 1e6
++
++ax.plot(x, y)
++ax.set_ylabel('Y values')
++
++# Get the formatter
++formatter = ax.yaxis.get_major_formatter()
++print(f"Formatter type: {type(formatter)}")
++
++# Force a draw to compute the offset
++fig.canvas.draw()
++
++# Get the offset text
++if hasattr(formatter, 'get_offset'):
++    offset = formatter.get_offset()
++    print(f"Offset: {offset}")
++
++# Get tick labels
++locs = ax.yaxis.get_major_locator()()
++labels = formatter.format_ticks(locs)
++print(f"Tick locations: {locs}")
++print(f"Tick labels: {labels}")
++
++plt.savefig('/testbed/matplotlib_offset_test.png')
++plt.close()
++
++# Now let's see how we can incorporate the offset into labels
++print("\n=== Testing offset incorporation ===")
++formatter2 = ticker.ScalarFormatter()
++formatter2.set_scientific(True)
++formatter2.set_powerlimits((-3, 3))
++
++# Create a simple axis-like object
++class SimpleAxis:
++    def get_view_interval(self):
++        return (3e6, 6e6)
++    def get_data_interval(self):
++        return (3e6, 6e6)
++
++axis = SimpleAxis()
++formatter2.set_axis(axis)
++
++# Format some values
++values = [3e6, 4e6, 5e6, 6e6]
++labels = formatter2.format_ticks(values)
++offset = formatter2.get_offset()
++
++print(f"Values: {values}")
++print(f"Labels: {labels}")
++print(f"Offset: {offset}")
++
++# Show how to create proper labels with offset
++if offset:
++    print(f"\nProper display would be: {labels} × {offset}")
+diff --git a/test_scatterplot_offset.png b/test_scatterplot_offset.png
+new file mode 100644
+index 00000000..1d20849d
+Binary files /dev/null and b/test_scatterplot_offset.png differ
+diff --git a/test_scatterplot_offset.py b/test_scatterplot_offset.py
+new file mode 100644
+index 00000000..33876e1f
+--- /dev/null
++++ b/test_scatterplot_offset.py
+@@ -0,0 +1,46 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn as sns
++
++# Test with scatterplot
++np.random.seed(42)
++data = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)  # Values in millions
++})
++
++fig, ax = plt.subplots(figsize=(8, 6))
++sns.scatterplot(
++    data=data, 
++    x="x", 
++    y="y",
++    hue="category",
++    size="large_values",
++    ax=ax
++)
++
++# Check the legend
++legend = ax.get_legend()
++if legend:
++    print("Legend found on axes")
++    for text in legend.get_texts():
++        print(f"  Text: '{text.get_text()}'")
++    
++    # Check title
++    title = legend.get_title()
++    if title:
++        print(f"  Title: '{title.get_text()}'")
++else:
++    print("No legend found on axes")
++
++# The scatterplot function uses a different approach for legends
++# It typically shows the actual values in the legend, not a separate title
++# So the offset issue might manifest differently here
++
++plt.savefig("/testbed/test_scatterplot_offset.png", dpi=150)
++plt.close()
++
++print("\nNote: scatterplot uses matplotlib's legend system directly, which may handle offsets differently than seaborn.objects")
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 00000000..b45192f0
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,67 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++import seaborn as sns
++import seaborn.objects as so
++from seaborn._core.scales import Continuous
++from seaborn._core.properties import IntervalProperty
++
++# Test 1: Direct scale testing
++print("=== Test 1: Direct scale testing ===")
++np.random.seed(42)
++data = pd.Series(np.random.uniform(3e6, 6e6, 100))
++
++# Create a continuous scale
++scale = Continuous()
++prop = IntervalProperty()
++prop.legend = True
++
++# Setup the scale
++scale_setup = scale._setup(data, prop, axis=None)
++
++# Check the legend values and offset
++if scale_setup._legend:
++    locs, labels = scale_setup._legend
++    print(f"Legend locations: {locs}")
++    print(f"Legend labels: {labels}")
++    print(f"Legend offset: {getattr(scale_setup, '_legend_offset', 'None')}")
++
++# Test 2: Full plot test
++print("\n=== Test 2: Full plot with objects API ===")
++df = pd.DataFrame({
++    'x': np.random.randn(100),
++    'y': np.random.randn(100),
++    'category': np.random.choice(['A', 'B', 'C'], 100),
++    'large_values': np.random.uniform(3e6, 6e6, 100)
++})
++
++# Create plot and check if it has the offset in the legend
++p = so.Plot(df, x="x", y="y", color="category", pointsize="large_values")
++p = p.add(so.Dot())
++
++# We can't easily inspect the legend from here, but let's at least make sure it works
++fig, ax = plt.subplots()
++p.on(ax).plot()
++plt.savefig("/testbed/verify_fix_plot.png", dpi=150)
++plt.close()
++
++print("Plot saved successfully")
++
++# Test 3: Check with different magnitude values
++print("\n=== Test 3: Testing different magnitudes ===")
++test_cases = [
++    ("thousands", np.random.uniform(3e3, 6e3, 50)),
++    ("millions", np.random.uniform(3e6, 6e6, 50)),
++    ("billions", np.random.uniform(3e9, 6e9, 50)),
++    ("small", np.random.uniform(3, 6, 50)),
++]
++
++for name, values in test_cases:
++    data = pd.Series(values)
++    scale = Continuous()
++    scale_setup = scale._setup(data, prop, axis=None)
++    
++    if scale_setup._legend:
++        _, labels = scale_setup._legend
++        offset = getattr(scale_setup, '_legend_offset', '')
++        print(f"\n{name}: labels={labels[:3]}..., offset='{offset}'")
+diff --git a/verify_fix_plot.png b/verify_fix_plot.png
+new file mode 100644
+index 00000000..589b8092
+Binary files /dev/null and b/verify_fix_plot.png differ

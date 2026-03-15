@@ -1,0 +1,629 @@
+diff --git a/sklearn/metrics/cluster/supervised.py b/sklearn/metrics/cluster/supervised.py
+index a987778ae..9bcca75a2 100644
+--- a/sklearn/metrics/cluster/supervised.py
++++ b/sklearn/metrics/cluster/supervised.py
+@@ -856,7 +856,7 @@ def fowlkes_mallows_score(labels_true, labels_pred, sparse=False):
+     tk = np.dot(c.data, c.data) - n_samples
+     pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
+     qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
+-    return tk / np.sqrt(pk * qk) if tk != 0. else 0.
++    return np.sqrt(tk / pk) * np.sqrt(tk / qk) if tk != 0. else 0.
+ 
+ 
+ def entropy(labels):
+diff --git a/test_division_safety.py b/test_division_safety.py
+new file mode 100644
+index 000000000..bd3591cd4
+--- /dev/null
++++ b/test_division_safety.py
+@@ -0,0 +1,62 @@
++import numpy as np
++
++def test_division_safety():
++    """Test that our formula np.sqrt(tk / pk) * np.sqrt(tk / qk) is safe"""
++    
++    # When tk = 0, the formula should return 0 (handled by the if condition)
++    # But let's check what happens if pk or qk is 0 when tk != 0
++    
++    # This shouldn't happen in practice because:
++    # tk = sum of squared contingency values - n
++    # pk = sum of squared column sums - n
++    # qk = sum of squared row sums - n
++    
++    # If tk > 0, it means there are at least some pairs in the same cluster
++    # which means pk and qk must also be > 0
++    
++    print("Testing mathematical relationship between tk, pk, and qk...")
++    
++    # Simulate some contingency matrices
++    test_cases = [
++        # All in one cluster
++        np.array([[4]]),
++        # Two clusters, perfect match
++        np.array([[2, 0], [0, 2]]),
++        # Two clusters, some mixing
++        np.array([[1, 1], [1, 1]]),
++        # Many small clusters
++        np.eye(4),
++    ]
++    
++    for i, c in enumerate(test_cases):
++        n = np.sum(c)
++        c_flat = c.flatten()
++        c_flat_nonzero = c_flat[c_flat > 0]
++        
++        tk = np.dot(c_flat_nonzero, c_flat_nonzero) - n
++        pk = np.sum(np.sum(c, axis=0) ** 2) - n
++        qk = np.sum(np.sum(c, axis=1) ** 2) - n
++        
++        print(f"\nCase {i+1}:")
++        print(f"  Contingency matrix:\n{c}")
++        print(f"  tk={tk}, pk={pk}, qk={qk}")
++        
++        # Check the mathematical relationship
++        if tk > 0:
++            assert pk > 0, f"pk should be > 0 when tk > 0"
++            assert qk > 0, f"qk should be > 0 when tk > 0"
++            
++            # Calculate both ways
++            original = tk / np.sqrt(float(pk) * float(qk))
++            new = np.sqrt(tk / pk) * np.sqrt(tk / qk)
++            print(f"  Original formula: {original}")
++            print(f"  New formula: {new}")
++            print(f"  Difference: {abs(original - new)}")
++        else:
++            print("  tk=0, so score should be 0")
++    
++    print("\nConclusion: When tk > 0, both pk and qk are guaranteed to be > 0")
++    print("Therefore, division by zero is not possible in our formula.")
++
++if __name__ == "__main__":
++    test_division_safety()
+diff --git a/test_edge_cases_division.py b/test_edge_cases_division.py
+new file mode 100644
+index 000000000..d72942fa5
+--- /dev/null
++++ b/test_edge_cases_division.py
+@@ -0,0 +1,88 @@
++import numpy as np
++from sklearn.metrics.cluster import fowlkes_mallows_score
++from sklearn.metrics.cluster.supervised import contingency_matrix
++
++def test_edge_cases_division():
++    """Test edge cases where pk or qk could be zero"""
++    
++    # Case 1: All samples in one cluster for both labelings
++    labels1 = [0, 0, 0, 0]
++    labels2 = [0, 0, 0, 0]
++    
++    # Calculate manually
++    c = contingency_matrix(labels1, labels2, sparse=True)
++    n_samples = len(labels1)
++    
++    tk = np.dot(c.data, c.data) - n_samples
++    pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++    qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++    
++    print(f"Case 1: All in one cluster")
++    print(f"  tk={tk}, pk={pk}, qk={qk}")
++    
++    score = fowlkes_mallows_score(labels1, labels2)
++    print(f"  Score: {score}")
++    print(f"  Expected: 1.0 (perfect match)")
++    
++    # Case 2: Each sample in its own cluster
++    labels1 = [0, 1, 2, 3]
++    labels2 = [0, 1, 2, 3]
++    
++    c = contingency_matrix(labels1, labels2, sparse=True)
++    n_samples = len(labels1)
++    
++    tk = np.dot(c.data, c.data) - n_samples
++    pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++    qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++    
++    print(f"\nCase 2: Each in own cluster")
++    print(f"  tk={tk}, pk={pk}, qk={qk}")
++    
++    score = fowlkes_mallows_score(labels1, labels2)
++    print(f"  Score: {score}")
++    print(f"  Expected: 1.0 (perfect match)")
++    
++    # Case 3: tk = 0 (no matching pairs)
++    labels1 = [0, 0, 0, 0]
++    labels2 = [0, 1, 2, 3]
++    
++    c = contingency_matrix(labels1, labels2, sparse=True)
++    n_samples = len(labels1)
++    
++    tk = np.dot(c.data, c.data) - n_samples
++    pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++    qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++    
++    print(f"\nCase 3: No matching pairs")
++    print(f"  tk={tk}, pk={pk}, qk={qk}")
++    
++    score = fowlkes_mallows_score(labels1, labels2)
++    print(f"  Score: {score}")
++    print(f"  Expected: 0.0")
++    
++    # Verify no errors or warnings
++    import warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        
++        # Test various edge cases
++        test_cases = [
++            ([0], [0]),  # Single sample
++            ([0, 0], [0, 0]),  # Two samples, same cluster
++            ([0, 1], [0, 1]),  # Two samples, different clusters
++            ([0, 0, 0], [1, 1, 1]),  # All same but different labels
++        ]
++        
++        for labels1, labels2 in test_cases:
++            score = fowlkes_mallows_score(labels1, labels2)
++            print(f"\nLabels1: {labels1}, Labels2: {labels2}, Score: {score}")
++        
++        if w:
++            print("\nWarnings detected:")
++            for warning in w:
++                print(f"  - {warning.message}")
++        else:
++            print("\nNo warnings detected - all edge cases handled correctly!")
++
++if __name__ == "__main__":
++    test_edge_cases_division()
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 000000000..a41aea7e9
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,82 @@
++import numpy as np
++from sklearn.metrics.cluster import fowlkes_mallows_score
++import warnings
++
++def test_overflow_fixed():
++    """Test that the overflow issue is fixed"""
++    print("Testing overflow fix...")
++    
++    # Create data that previously caused overflow
++    n = 50000
++    labels_true = np.zeros(n, dtype=np.int32)
++    labels_pred = np.zeros(n, dtype=np.int32)
++    
++    labels_true[n//2:] = 1
++    labels_pred[n//4:3*n//4] = 1
++    
++    # Test with warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        
++        print(f"Score: {score}")
++        print(f"Is NaN: {np.isnan(score)}")
++        
++        if w:
++            print("\nWarnings caught:")
++            for warning in w:
++                print(f"  - {warning.category.__name__}: {warning.message}")
++        else:
++            print("\nNo warnings - Fix successful!")
++
++def test_edge_cases():
++    """Test edge cases"""
++    print("\n\nTesting edge cases...")
++    
++    # Test case 1: tk = 0
++    labels1 = [0, 0, 1, 1]
++    labels2 = [0, 1, 0, 1]
++    score = fowlkes_mallows_score(labels1, labels2)
++    print(f"tk=0 case: {score}")
++    
++    # Test case 2: Perfect match
++    labels1 = [0, 0, 1, 1]
++    labels2 = [0, 0, 1, 1]
++    score = fowlkes_mallows_score(labels1, labels2)
++    print(f"Perfect match: {score}")
++    
++    # Test case 3: Large values
++    n = 100000
++    labels1 = np.repeat(np.arange(1000), 100)
++    labels2 = np.repeat(np.arange(1000), 100)
++    np.random.seed(42)
++    np.random.shuffle(labels2)
++    
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        score = fowlkes_mallows_score(labels1, labels2)
++        print(f"Large values case: {score}")
++        if w:
++            print("  Warnings:", [warning.message for warning in w])
++
++def test_mathematical_correctness():
++    """Verify mathematical correctness of the fix"""
++    print("\n\nTesting mathematical correctness...")
++    
++    # Test with known values
++    test_cases = [
++        ([0, 0, 1, 1], [0, 0, 1, 1]),  # Perfect match
++        ([0, 0, 1, 1], [1, 1, 0, 0]),  # Perfect match (swapped)
++        ([0, 0, 0, 0], [0, 1, 2, 3]),  # All different
++        ([0, 1, 2, 3], [0, 0, 0, 0]),  # All same in pred
++    ]
++    
++    for labels_true, labels_pred in test_cases:
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        print(f"Labels true: {labels_true}, Labels pred: {labels_pred}")
++        print(f"  Score: {score}")
++
++if __name__ == "__main__":
++    test_overflow_fixed()
++    test_edge_cases()
++    test_mathematical_correctness()
+diff --git a/test_fowlkes_mallows_overflow.py b/test_fowlkes_mallows_overflow.py
+new file mode 100644
+index 000000000..841ab908b
+--- /dev/null
++++ b/test_fowlkes_mallows_overflow.py
+@@ -0,0 +1,63 @@
++import numpy as np
++from sklearn.metrics.cluster import fowlkes_mallows_score
++import warnings
++
++# Test case 1: Create labels that will cause overflow
++def test_overflow_issue():
++    """Test that reproduces the overflow issue with large pk * qk values"""
++    # Create large labels that will result in large pk and qk values
++    n_samples = 100000
++    n_clusters = 1000
++    
++    # Create labels with many clusters to get large pk and qk
++    labels_true = np.repeat(np.arange(n_clusters), n_samples // n_clusters)
++    labels_pred = np.repeat(np.arange(n_clusters), n_samples // n_clusters)
++    
++    # Shuffle to make it more realistic
++    np.random.seed(42)
++    np.random.shuffle(labels_pred)
++    
++    print(f"Number of samples: {n_samples}")
++    print(f"Number of clusters: {n_clusters}")
++    
++    # Catch warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        
++        if w:
++            print("\nWarnings caught:")
++            for warning in w:
++                print(f"  - {warning.category.__name__}: {warning.message}")
++        else:
++            print("\nNo warnings caught")
++            
++        print(f"\nFowlkes-Mallows score: {score}")
++        print(f"Is NaN: {np.isnan(score)}")
++
++# Test case 2: Verify the mathematical equivalence of the proposed fix
++def test_mathematical_equivalence():
++    """Test that tk / sqrt(pk * qk) == sqrt(tk / pk) * sqrt(tk / qk)"""
++    # Test with various values
++    test_cases = [
++        (100, 50, 75),
++        (1000, 500, 750),
++        (10000, 5000, 7500),
++        (1e10, 5e9, 7.5e9),  # Large values
++    ]
++    
++    print("\nTesting mathematical equivalence:")
++    for tk, pk, qk in test_cases:
++        original = tk / np.sqrt(pk * qk)
++        proposed = np.sqrt(tk / pk) * np.sqrt(tk / qk)
++        
++        print(f"\ntk={tk}, pk={pk}, qk={qk}")
++        print(f"  Original formula: {original}")
++        print(f"  Proposed formula: {proposed}")
++        print(f"  Difference: {abs(original - proposed)}")
++        print(f"  Are equal? {np.allclose(original, proposed)}")
++
++if __name__ == "__main__":
++    print("Testing Fowlkes-Mallows overflow issue...")
++    test_overflow_issue()
++    test_mathematical_equivalence()
+diff --git a/test_fowlkes_mallows_overflow_regression.py b/test_fowlkes_mallows_overflow_regression.py
+new file mode 100644
+index 000000000..8f158feb8
+--- /dev/null
++++ b/test_fowlkes_mallows_overflow_regression.py
+@@ -0,0 +1,83 @@
++"""
++Regression test for fowlkes_mallows_score overflow issue.
++This test ensures that the fix for the overflow issue when pk * qk > 2**32 works correctly.
++"""
++import numpy as np
++from sklearn.metrics.cluster import fowlkes_mallows_score
++import warnings
++
++
++def test_fowlkes_mallows_overflow_regression():
++    """Test that fowlkes_mallows_score doesn't overflow with large pk * qk values."""
++    # Create labels that will produce large pk and qk values
++    n = 50000
++    labels_true = np.zeros(n, dtype=np.int32)
++    labels_pred = np.zeros(n, dtype=np.int32)
++    
++    # Create a pattern that leads to large contingency matrix values
++    labels_true[n//2:] = 1
++    labels_pred[n//4:3*n//4] = 1
++    
++    # This should not produce any warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        
++        # Check no overflow warnings
++        overflow_warnings = [warning for warning in w 
++                           if "overflow" in str(warning.message)]
++        assert len(overflow_warnings) == 0, f"Overflow warning detected: {overflow_warnings}"
++        
++        # Check the score is valid (not NaN)
++        assert not np.isnan(score), "Score is NaN"
++        
++        # Check the score is in valid range [0, 1]
++        assert 0 <= score <= 1, f"Score {score} is outside valid range [0, 1]"
++        
++        # Check approximate expected value
++        # With this pattern, we expect a score around 0.5
++        assert 0.4 < score < 0.6, f"Score {score} is not in expected range"
++        
++    print("✓ Overflow regression test passed".encode('ascii', 'replace').decode('ascii'))
++    print(f"  Score: {score}")
++
++
++def test_fowlkes_mallows_mathematical_equivalence():
++    """Test that the new formula is mathematically equivalent to the original."""
++    # Test various cases
++    test_cases = [
++        ([0, 0, 1, 1], [0, 0, 1, 1]),  # Perfect match
++        ([0, 0, 1, 1], [1, 1, 0, 0]),  # Perfect match (swapped)
++        ([0, 0, 0, 0], [0, 1, 2, 3]),  # All different
++        ([0, 1, 2, 3, 4], [0, 0, 1, 1, 2]),  # Mixed
++    ]
++    
++    for labels_true, labels_pred in test_cases:
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        
++        # Manually compute using both formulas
++        from sklearn.metrics.cluster.supervised import contingency_matrix
++        c = contingency_matrix(labels_true, labels_pred, sparse=True)
++        n_samples = len(labels_true)
++        
++        tk = np.dot(c.data, c.data) - n_samples
++        pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++        qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++        
++        if tk != 0:
++            # Original formula (with float conversion to avoid overflow)
++            original = tk / np.sqrt(float(pk) * float(qk))
++            # New formula
++            new = np.sqrt(tk / pk) * np.sqrt(tk / qk)
++            
++            # They should be very close
++            assert np.allclose(original, new), f"Formulas don't match: {original} vs {new}"
++            assert np.allclose(score, new), f"Score doesn't match new formula: {score} vs {new}"
++    
++    print("✓ Mathematical equivalence test passed".encode('ascii', 'replace').decode('ascii'))
++
++
++if __name__ == "__main__":
++    test_fowlkes_mallows_overflow_regression()
++    test_fowlkes_mallows_mathematical_equivalence()
++    print("\nAll tests passed!")
+diff --git a/test_investigate_case2.py b/test_investigate_case2.py
+new file mode 100644
+index 000000000..0be7944e6
+--- /dev/null
++++ b/test_investigate_case2.py
+@@ -0,0 +1,32 @@
++import numpy as np
++from sklearn.metrics.cluster.supervised import contingency_matrix
++
++# Case where each sample is in its own cluster
++labels1 = [0, 1, 2, 3]
++labels2 = [0, 1, 2, 3]
++
++c = contingency_matrix(labels1, labels2, sparse=True)
++n_samples = len(labels1)
++
++print("Contingency matrix:")
++print(c.toarray())
++print(f"\nc.data: {c.data}")
++
++tk = np.dot(c.data, c.data) - n_samples
++pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++
++print(f"\ntk = np.dot({c.data}, {c.data}) - {n_samples} = {np.dot(c.data, c.data)} - {n_samples} = {tk}")
++
++col_sums = np.asarray(c.sum(axis=0)).ravel()
++row_sums = np.asarray(c.sum(axis=1)).ravel()
++
++print(f"\nColumn sums: {col_sums}")
++print(f"Row sums: {row_sums}")
++
++print(f"\npk = np.sum({col_sums} ** 2) - {n_samples} = {np.sum(col_sums ** 2)} - {n_samples} = {pk}")
++print(f"qk = np.sum({row_sums} ** 2) - {n_samples} = {np.sum(row_sums ** 2)} - {n_samples} = {qk}")
++
++# When each point is in its own cluster and labels match perfectly,
++# tk, pk, and qk should all be 0, which means we have a 0/0 case
++# This should return 0.0 according to the condition tk != 0
+diff --git a/test_overflow_extreme.py b/test_overflow_extreme.py
+new file mode 100644
+index 000000000..7cb9c0c9e
+--- /dev/null
++++ b/test_overflow_extreme.py
+@@ -0,0 +1,85 @@
++import numpy as np
++from sklearn.metrics.cluster import fowlkes_mallows_score
++from sklearn.metrics.cluster.supervised import contingency_matrix
++import warnings
++
++def test_direct_overflow():
++    """Test overflow with direct calculation to understand the issue better"""
++    # Create simple labels that will lead to large values
++    n_samples = 100000
++    
++    # Create labels that will produce large pk and qk
++    labels_true = np.zeros(n_samples, dtype=int)
++    labels_pred = np.zeros(n_samples, dtype=int)
++    
++    # Add some variation
++    labels_true[n_samples//2:] = 1
++    labels_pred[n_samples//4:3*n_samples//4] = 1
++    
++    # Calculate the values manually to see what's happening
++    c = contingency_matrix(labels_true, labels_pred, sparse=True)
++    tk = np.dot(c.data, c.data) - n_samples
++    pk = np.sum(np.asarray(c.sum(axis=0)).ravel() ** 2) - n_samples
++    qk = np.sum(np.asarray(c.sum(axis=1)).ravel() ** 2) - n_samples
++    
++    print(f"tk = {tk}, type: {type(tk)}")
++    print(f"pk = {pk}, type: {type(pk)}")
++    print(f"qk = {qk}, type: {type(qk)}")
++    print(f"pk * qk = {pk * qk}")
++    
++    # Check if pk * qk exceeds int32 limit
++    int32_max = 2**31 - 1
++    print(f"\nint32 max: {int32_max}")
++    print(f"pk * qk > int32_max: {pk * qk > int32_max}")
++    
++    # Try the calculation with warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        
++        # Original formula
++        if tk != 0:
++            result_original = tk / np.sqrt(pk * qk)
++        else:
++            result_original = 0.0
++            
++        # Proposed formula
++        if tk != 0:
++            result_proposed = np.sqrt(tk / pk) * np.sqrt(tk / qk)
++        else:
++            result_proposed = 0.0
++        
++        print(f"\nOriginal result: {result_original}")
++        print(f"Proposed result: {result_proposed}")
++        
++        if w:
++            print("\nWarnings:")
++            for warning in w:
++                print(f"  - {warning.category.__name__}: {warning.message}")
++
++def test_with_int32_arrays():
++    """Force int32 arrays to trigger the overflow"""
++    n = 50000
++    
++    # Create arrays that will produce large contingency values
++    labels_true = np.zeros(n, dtype=np.int32)
++    labels_pred = np.zeros(n, dtype=np.int32) 
++    
++    # Make half of each array have value 1
++    labels_true[n//2:] = 1
++    labels_pred[n//4:3*n//4] = 1
++    
++    print("\nTesting with int32 arrays...")
++    
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        score = fowlkes_mallows_score(labels_true, labels_pred)
++        
++        print(f"Score: {score}")
++        if w:
++            print("Warnings:")
++            for warning in w:
++                print(f"  - {warning.category.__name__}: {warning.message}")
++
++if __name__ == "__main__":
++    test_direct_overflow()
++    test_with_int32_arrays()
+diff --git a/test_type_investigation.py b/test_type_investigation.py
+new file mode 100644
+index 000000000..ab35ff616
+--- /dev/null
++++ b/test_type_investigation.py
+@@ -0,0 +1,73 @@
++import numpy as np
++from sklearn.metrics.cluster.supervised import contingency_matrix
++import warnings
++
++def investigate_types():
++    """Investigate the actual types causing the overflow"""
++    # Create data that will cause overflow
++    n = 50000
++    labels_true = np.zeros(n, dtype=np.int32)
++    labels_pred = np.zeros(n, dtype=np.int32)
++    
++    labels_true[n//2:] = 1
++    labels_pred[n//4:3*n//4] = 1
++    
++    # Get contingency matrix
++    c = contingency_matrix(labels_true, labels_pred, sparse=True)
++    
++    # Check types at each step
++    print("Contingency matrix data type:", c.data.dtype)
++    print("Contingency matrix data:", c.data)
++    
++    tk = np.dot(c.data, c.data) - n
++    print(f"\ntk = {tk}, dtype: {tk.dtype if hasattr(tk, 'dtype') else type(tk)}")
++    
++    # Check sum types
++    col_sums = np.asarray(c.sum(axis=0)).ravel()
++    row_sums = np.asarray(c.sum(axis=1)).ravel()
++    
++    print(f"\nColumn sums: {col_sums}, dtype: {col_sums.dtype}")
++    print(f"Row sums: {row_sums}, dtype: {row_sums.dtype}")
++    
++    col_sums_sq = col_sums ** 2
++    row_sums_sq = row_sums ** 2
++    
++    print(f"\nColumn sums squared: {col_sums_sq}, dtype: {col_sums_sq.dtype}")
++    print(f"Row sums squared: {row_sums_sq}, dtype: {row_sums_sq.dtype}")
++    
++    pk = np.sum(col_sums_sq) - n
++    qk = np.sum(row_sums_sq) - n
++    
++    print(f"\npk = {pk}, dtype: {pk.dtype if hasattr(pk, 'dtype') else type(pk)}")
++    print(f"qk = {qk}, dtype: {qk.dtype if hasattr(qk, 'dtype') else type(qk)}")
++    
++    # Test multiplication with different approaches
++    print("\n--- Testing multiplication ---")
++    
++    # Direct multiplication (may overflow)
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        product = pk * qk
++        print(f"pk * qk = {product}")
++        if w:
++            print("Warnings in multiplication:")
++            for warning in w:
++                print(f"  - {warning.message}")
++    
++    # Convert to float first
++    pk_float = float(pk)
++    qk_float = float(qk)
++    product_float = pk_float * qk_float
++    print(f"\nfloat(pk) * float(qk) = {product_float}")
++    
++    # Test sqrt
++    print(f"\nnp.sqrt(pk * qk) with overflow = {np.sqrt(product)}")
++    print(f"np.sqrt(float(pk) * float(qk)) = {np.sqrt(product_float)}")
++    
++    # Test proposed solution
++    if tk != 0:
++        proposed = np.sqrt(tk / pk) * np.sqrt(tk / qk)
++        print(f"\nProposed formula result: {proposed}")
++
++if __name__ == "__main__":
++    investigate_types()

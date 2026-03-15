@@ -1,0 +1,484 @@
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 2ff8b0ee26..bc71437b8a 100644
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -277,6 +277,12 @@ class BoundWidget:
+ 
+     @property
+     def id_for_label(self):
++        # Use the actual id from attrs if present, otherwise fall back to
++        # constructing one for backward compatibility
++        id_from_attrs = self.data['attrs'].get('id')
++        if id_from_attrs:
++            return id_from_attrs
++        # Fallback for backward compatibility when no id is present
+         return 'id_%s_%s' % (self.data['name'], self.data['index'])
+ 
+     @property
+diff --git a/test_boundwidget_id.py b/test_boundwidget_id.py
+new file mode 100644
+index 0000000000..31fafb82f1
+--- /dev/null
++++ b/test_boundwidget_id.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python
++"""Test script to reproduce the BoundWidget.id_for_label issue"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import CheckboxSelectMultiple
++
++# Test case 1: Default auto_id behavior
++class TestForm1(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B'), ('c', 'Option C')],
++        widget=CheckboxSelectMultiple()
++    )
++
++form1 = TestForm1()
++bound_field = form1['choices']
++subwidgets = list(bound_field.subwidgets)
++
++print("Test 1: Default auto_id")
++print(f"Field auto_id: {bound_field.auto_id}")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data['attrs']['id']: {widget.data['attrs'].get('id')}")
++    print(f"    id_for_label: {widget.id_for_label}")
++
++# Test case 2: Custom auto_id format
++class TestForm2(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B'), ('c', 'Option C')],
++        widget=CheckboxSelectMultiple()
++    )
++
++form2 = TestForm2(auto_id='custom_%s')
++bound_field = form2['choices']
++subwidgets = list(bound_field.subwidgets)
++
++print("\nTest 2: Custom auto_id='custom_%s'")
++print(f"Field auto_id: {bound_field.auto_id}")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data['attrs']['id']: {widget.data['attrs'].get('id')}")
++    print(f"    id_for_label: {widget.id_for_label}")
++
++# Test case 3: Widget with explicit id attribute
++class TestForm3(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B'), ('c', 'Option C')],
++        widget=CheckboxSelectMultiple(attrs={'id': 'my_custom_id'})
++    )
++
++form3 = TestForm3()
++bound_field = form3['choices']
++subwidgets = list(bound_field.subwidgets)
++
++print("\nTest 3: Widget with attrs={'id': 'my_custom_id'}")
++print(f"Field auto_id: {bound_field.auto_id}")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data['attrs']['id']: {widget.data['attrs'].get('id')}")
++    print(f"    id_for_label: {widget.id_for_label}")
++
++# Test the actual rendering to see the issue
++print("\nTest 4: Actual rendering comparison")
++form4 = TestForm2(auto_id='myform_%s')
++bound_field = form4['choices']
++print("Full field HTML:")
++for widget in bound_field:
++    print(f"  Label tag: {widget.parent_widget.label_tag(widget.data['label'], attrs={'for': widget.id_for_label})}")
++    print(f"  Widget tag: {widget.tag()}")
+diff --git a/test_boundwidget_rendering.py b/test_boundwidget_rendering.py
+new file mode 100644
+index 0000000000..850ea4de97
+--- /dev/null
++++ b/test_boundwidget_rendering.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python
++"""Test script to show the rendering impact of the BoundWidget.id_for_label issue"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    }]
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import CheckboxSelectMultiple
++from django.template import Template, Context
++
++# Create a form with custom auto_id
++class TestForm(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B')],
++        widget=CheckboxSelectMultiple()
++    )
++
++# Test with custom auto_id
++form = TestForm(auto_id='myform_%s')
++bound_field = form['choices']
++
++# Show the issue when using BoundWidget.id_for_label in templates
++template_str = """
++{% for widget in field %}
++<div>
++  <label for="{{ widget.id_for_label }}">{{ widget.choice_label }}</label>
++  {{ widget.tag }}
++</div>
++{% endfor %}
++"""
++
++template = Template(template_str)
++context = Context({'field': bound_field})
++rendered = template.render(context)
++
++print("Rendered output using widget.id_for_label:")
++print(rendered)
++
++# Show what the actual widget attrs contain
++print("\nActual widget data:")
++for widget in bound_field:
++    print(f"  Widget for '{widget.choice_label}':")
++    print(f"    attrs['id']: {widget.data['attrs'].get('id')}")
++    print(f"    id_for_label: {widget.id_for_label}")
++
++# Show the default rendering (which works correctly)
++print("\nDefault rendering (str(bound_field)):")
++print(str(bound_field))
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..5231a247af
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++"""Test edge cases for BoundWidget.id_for_label"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import CheckboxSelectMultiple, RadioSelect
++
++# Test case 1: Form with auto_id=False (no IDs)
++class TestForm1(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B')],
++        widget=CheckboxSelectMultiple()
++    )
++
++form1 = TestForm1(auto_id=False)
++bound_field = form1['choices']
++subwidgets = list(bound_field.subwidgets)
++
++print("Test 1: auto_id=False (no IDs)")
++print(f"Field auto_id: '{bound_field.auto_id}'")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data['attrs']: {widget.data['attrs']}")
++    print(f"    'id' in data['attrs']: {'id' in widget.data['attrs']}")
++    try:
++        print(f"    id_for_label: {widget.id_for_label}")
++    except KeyError as e:
++        print(f"    id_for_label raised KeyError: {e}")
++
++# Test case 2: RadioSelect (another widget that uses subwidgets)
++class TestForm2(forms.Form):
++    choice = forms.ChoiceField(
++        choices=[('a', 'Option A'), ('b', 'Option B')],
++        widget=RadioSelect()
++    )
++
++form2 = TestForm2(auto_id='radio_%s')
++bound_field = form2['choice']
++subwidgets = list(bound_field.subwidgets)
++
++print("\nTest 2: RadioSelect with auto_id='radio_%s'")
++print(f"Field auto_id: '{bound_field.auto_id}'")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data['attrs']['id']: {widget.data['attrs'].get('id')}")
++    print(f"    id_for_label: {widget.id_for_label}")
++
++# Test case 3: Empty attrs
++print("\nTest 3: Checking widget data structure")
++form3 = TestForm1()
++widget = list(form3['choices'].subwidgets)[0]
++print(f"Widget data keys: {list(widget.data.keys())}")
++print(f"Widget data['attrs'] keys: {list(widget.data['attrs'].keys())}")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..6604bfc7b7
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,109 @@
++#!/usr/bin/env python
++"""Final verification of BoundWidget.id_for_label fix"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    }]
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import CheckboxSelectMultiple, RadioSelect
++from django.template import Template, Context
++
++print("=== BoundWidget.id_for_label Fix Verification ===\n")
++
++# Test 1: CheckboxSelectMultiple with custom auto_id (the main issue)
++print("1. CheckboxSelectMultiple with custom auto_id:")
++class Form1(forms.Form):
++    choices = forms.MultipleChoiceField(
++        choices=[('a', 'A'), ('b', 'B')],
++        widget=CheckboxSelectMultiple()
++    )
++
++form1 = Form1(auto_id='custom_%s')
++for widget in form1['choices']:
++    print(f"  - Choice '{widget.choice_label}': id_for_label='{widget.id_for_label}', attrs['id']='{widget.data['attrs']['id']}'")
++    assert widget.id_for_label == widget.data['attrs']['id'], "id_for_label should match attrs['id']"
++print("  ✓ PASS: id_for_label correctly uses attrs['id']\n")
++
++# Test 2: RadioSelect with custom widget id
++print("2. RadioSelect with custom widget id:")
++class Form2(forms.Form):
++    choice = forms.ChoiceField(
++        choices=[('x', 'X'), ('y', 'Y')],
++        widget=RadioSelect(attrs={'id': 'my_radio'})
++    )
++
++form2 = Form2()
++for widget in form2['choice']:
++    print(f"  - Choice '{widget.choice_label}': id_for_label='{widget.id_for_label}', attrs['id']='{widget.data['attrs']['id']}'")
++    assert widget.id_for_label == widget.data['attrs']['id'], "id_for_label should match attrs['id']"
++print("  ✓ PASS: id_for_label correctly uses custom widget id\n")
++
++# Test 3: Backward compatibility - no ID case
++print("3. Backward compatibility with auto_id=False:")
++class Form3(forms.Form):
++    name = forms.ChoiceField(
++        choices=[('john', 'John'), ('paul', 'Paul')],
++    )
++
++form3 = Form3(auto_id=False)
++widget = list(form3['name'])[0]
++print(f"  - First choice: id_for_label='{widget.id_for_label}', attrs={widget.data['attrs']}")
++assert widget.id_for_label == 'id_name_0', "Should fall back to old behavior when no id in attrs"
++print("  ✓ PASS: Falls back to constructed id for backward compatibility\n")
++
++# Test 4: Template rendering verification
++print("4. Template rendering verification:")
++template_str = """
++{% for widget in field %}
++<label for="{{ widget.id_for_label }}">{{ widget.choice_label }}</label>
++{{ widget.tag }}
++{% endfor %}
++"""
++
++form4 = Form1(auto_id='test_%s')
++template = Template(template_str)
++context = Context({'field': form4['choices']})
++rendered = template.render(context)
++
++# Check that label 'for' matches input 'id'
++import re
++label_fors = re.findall(r'<label for="([^"]+)">', rendered)
++input_ids = re.findall(r'<input[^>]+id="([^"]+)"', rendered)
++
++print(f"  - Label 'for' attributes: {label_fors}")
++print(f"  - Input 'id' attributes: {input_ids}")
++assert label_fors == input_ids, "Label 'for' should match input 'id'"
++print("  ✓ PASS: Labels correctly reference input IDs\n")
++
++print("=== All tests passed! ===")
+diff --git a/test_select_rendering.py b/test_select_rendering.py
+new file mode 100644
+index 0000000000..e492a9ef81
+--- /dev/null
++++ b/test_select_rendering.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python
++"""Test Select widget rendering with auto_id=False"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++from django import forms
++
++# Test Select widget with auto_id=False
++class TestForm(forms.Form):
++    name = forms.ChoiceField(
++        choices=[('john', 'John'), ('paul', 'Paul')],
++    )
++
++form = TestForm(auto_id=False)
++print("Rendered form with auto_id=False:")
++print(form['name'])
++print("\nChecking if 'id_name' appears in the output:")
++print("'id_name' in output:", 'id_name' in str(form['name']))
+diff --git a/test_select_widget.py b/test_select_widget.py
+new file mode 100644
+index 0000000000..d5468fc118
+--- /dev/null
++++ b/test_select_widget.py
+@@ -0,0 +1,44 @@
++#!/usr/bin/env python
++"""Test Select widget behavior"""
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import Select
++
++# Test Select widget with auto_id=False
++class TestForm(forms.Form):
++    name = forms.ChoiceField(
++        choices=[('john', 'John'), ('paul', 'Paul')],
++        widget=Select()
++    )
++
++form = TestForm(auto_id=False)
++bound_field = form['name']
++subwidgets = list(bound_field.subwidgets)
++
++print("Select widget with auto_id=False:")
++print(f"Field auto_id: '{bound_field.auto_id}'")
++for i, widget in enumerate(subwidgets):
++    print(f"  Widget {i}:")
++    print(f"    data: {widget.data}")
++    print(f"    id_for_label: '{widget.id_for_label}'")

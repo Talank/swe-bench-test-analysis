@@ -1,0 +1,583 @@
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index 1cecb1f79..d300abdfa 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -2665,6 +2665,26 @@ class PropertyDocumenter(DocstringStripSignatureMixin, ClassLevelDocumenter):  #
+ 
+     def document_members(self, all_members: bool = False) -> None:
+         pass
++    
++    def import_object(self, raiseerror: bool = False) -> bool:
++        """Import the object given by *self.modname* and *self.objpath* and set
++        it as *self.object*.
++        
++        This method handles the special case of classmethod properties.
++        """
++        ret = super().import_object(raiseerror)
++        if ret:
++            # Check if this is actually a classmethod property by looking at the parent's __dict__
++            if self.parent and hasattr(self.parent, '__dict__'):
++                obj_dict = safe_getattr(self.parent, '__dict__', {})
++                if self.object_name in obj_dict:
++                    obj = obj_dict[self.object_name]
++                    # Check if it's a classmethod that wraps a property
++                    if isinstance(obj, classmethod) and hasattr(obj, '__func__') and inspect.isproperty(obj.__func__):
++                        # Use the property object instead of the evaluated value
++                        self.object = obj.__func__
++                        self.isclassmethod = True
++        return ret
+ 
+     def get_real_modname(self) -> str:
+         real_modname = self.get_attr(self.parent or self.object, '__module__', None)
+diff --git a/sphinx/ext/autodoc/importer.py b/sphinx/ext/autodoc/importer.py
+index 1a8ea0973..7e7c30274 100644
+--- a/sphinx/ext/autodoc/importer.py
++++ b/sphinx/ext/autodoc/importer.py
+@@ -274,7 +274,18 @@ def get_class_members(subject: Any, objpath: List[str], attrgetter: Callable
+     # other members
+     for name in dir(subject):
+         try:
+-            value = attrgetter(subject, name)
++            # First check if this is a classmethod property by looking in __dict__
++            if name in obj_dict:
++                obj = obj_dict[name]
++                # Check if it's a classmethod that wraps a property
++                if isinstance(obj, classmethod) and hasattr(obj, '__func__') and isinstance(obj.__func__, property):
++                    # Use the property object instead of the evaluated value
++                    value = obj.__func__
++                else:
++                    value = attrgetter(subject, name)
++            else:
++                value = attrgetter(subject, name)
++                
+             if ismock(value):
+                 value = undecorate(value)
+ 
+diff --git a/test_abstract_classmethod_property.py b/test_abstract_classmethod_property.py
+new file mode 100644
+index 000000000..75e0f969c
+--- /dev/null
++++ b/test_abstract_classmethod_property.py
+@@ -0,0 +1,41 @@
++"""Test abstract classmethod properties."""
++
++from abc import ABC, abstractmethod
++
++class BaseClass(ABC):
++    """Base class with abstract classmethod property."""
++    
++    @classmethod
++    @property
++    @abstractmethod
++    def abstract_class_prop(cls) -> str:
++        """Abstract classmethod property docstring."""
++        pass
++
++
++class ConcreteClass(BaseClass):
++    """Concrete implementation."""
++    
++    @classmethod
++    @property
++    def abstract_class_prop(cls) -> str:
++        """Concrete implementation of abstract classmethod property."""
++        return "concrete"
++
++
++# Test
++if __name__ == "__main__":
++    print(f"ConcreteClass.abstract_class_prop: {ConcreteClass.abstract_class_prop}")
++    
++    # Check if autodoc can handle it
++    from sphinx.ext.autodoc.importer import get_class_members
++    from sphinx.util.inspect import safe_getattr, isproperty
++    
++    members = get_class_members(BaseClass, [], safe_getattr)
++    for name, member in members.items():
++        if name == 'abstract_class_prop':
++            print(f"\nBaseClass.{name}:")
++            print(f"  Type: {type(member.object)}")
++            print(f"  isproperty: {isproperty(member.object)}")
++            if hasattr(member.object, '__doc__'):
++                print(f"  __doc__: {member.object.__doc__}")
+diff --git a/test_autodoc_classmethod_property.py b/test_autodoc_classmethod_property.py
+new file mode 100644
+index 000000000..e747f4025
+--- /dev/null
++++ b/test_autodoc_classmethod_property.py
+@@ -0,0 +1,111 @@
++"""Test autodoc with classmethod properties."""
++
++import pytest
++from sphinx.testing.util import SphinxTestApp
++from sphinx.testing.path import path
++
++# Create a test module
++test_module_content = '''
++"""Test module for classmethod properties."""
++
++class TestClass:
++    """Test class with various property types."""
++    
++    @property
++    def regular_property(self):
++        """A regular property."""
++        return "regular"
++    
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property."""
++        return "classmethod property"
++    
++    @classmethod
++    def regular_classmethod(cls):
++        """A regular classmethod."""
++        return "classmethod"
++'''
++
++def test_classmethod_property_autodoc(tmp_path):
++    """Test that classmethod properties are documented."""
++    # Create test module
++    test_module_path = tmp_path / "test_module.py"
++    test_module_path.write_text(test_module_content)
++    
++    # Add debugging
++    import logging
++    logging.basicConfig(level=logging.DEBUG)
++    
++    # Create conf.py
++    conf_py = tmp_path / "conf.py"
++    conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{tmp_path}')
++
++extensions = ['sphinx.ext.autodoc']
++''')
++    
++    # Create index.rst
++    index_rst = tmp_path / "index.rst"
++    index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++   :undoc-members:
++   :show-inheritance:
++
++.. autoclass:: test_module.TestClass
++   :members:
++   :undoc-members:
++   :show-inheritance:
++''')
++    
++    # Build the docs
++    app = SphinxTestApp('html', srcdir=tmp_path, freshenv=True)
++    app.build()
++    
++    # Check for warnings
++    print("=== Build warnings ===")
++    print(app._warning.getvalue())
++    
++    # Let's check the doctree instead
++    import pickle
++    doctree_file = tmp_path / "_build" / "doctrees" / "index.doctree"
++    if doctree_file.exists():
++        with open(doctree_file, 'rb') as f:
++            doctree = pickle.load(f)
++            print("=== Doctree content ===")
++            print(doctree.asdom().toprettyxml()[:2000])
++    
++    # Check the output
++    output_file = tmp_path / "_build" / "html" / "index.html"
++    content = output_file.read_text()
++    
++    # Look for specific content in the HTML
++    import re
++    # Find all text content, removing HTML tags
++    text_content = re.sub(r'<[^>]+>', ' ', content)
++    text_content = ' '.join(text_content.split())
++    
++    print("=== Text content (no HTML tags) ===")
++    print(text_content[:1000])
++    
++    # These should all be present
++    assert "regular_property" in content, "regular_property not found"
++    assert "A regular property" in content, "regular_property docstring not found"
++    assert "regular_classmethod" in content, "regular_classmethod not found"
++    assert "A regular classmethod" in content, "regular_classmethod docstring not found"
++    
++    # This is the bug - these should be present but aren't
++    assert "classmethod_property" in content, "classmethod_property not found"
++    assert "A classmethod property" in content, "classmethod_property docstring not found"
++
++if __name__ == "__main__":
++    import tempfile
++    with tempfile.TemporaryDirectory() as tmp_dir:
++        test_classmethod_property_autodoc(path(tmp_dir))
++        print("Test completed!")
+diff --git a/test_classmethod_property.py b/test_classmethod_property.py
+new file mode 100644
+index 000000000..46ddf1b61
+--- /dev/null
++++ b/test_classmethod_property.py
+@@ -0,0 +1,40 @@
++"""Test file to reproduce the @classmethod @property issue"""
++
++class BaseClass:
++    """Base class with various property types."""
++    
++    @property
++    def regular_property(self):
++        """A regular property - this should be documented."""
++        return "regular"
++    
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property - this should be documented but isn't."""
++        return "classmethod property"
++    
++    @staticmethod
++    def regular_staticmethod():
++        """A regular static method - this should be documented."""
++        return "static"
++    
++    @classmethod
++    def regular_classmethod(cls):
++        """A regular class method - this should be documented."""
++        return "classmethod"
++
++
++if __name__ == "__main__":
++    # Test that these work
++    obj = BaseClass()
++    print(f"regular_property: {obj.regular_property}")
++    print(f"classmethod_property from instance: {obj.classmethod_property}")
++    print(f"classmethod_property from class: {BaseClass.classmethod_property}")
++    print(f"regular_staticmethod: {BaseClass.regular_staticmethod()}")
++    print(f"regular_classmethod: {BaseClass.regular_classmethod()}")
++    
++    # Check types
++    print(f"\nType of regular_property: {type(BaseClass.regular_property)}")
++    print(f"Type of classmethod_property: {type(BaseClass.classmethod_property)}")
++    print(f"Type of regular_classmethod: {type(BaseClass.regular_classmethod)}")
+diff --git a/test_classmethod_property_inspect.py b/test_classmethod_property_inspect.py
+new file mode 100644
+index 000000000..57d80e1b9
+--- /dev/null
++++ b/test_classmethod_property_inspect.py
+@@ -0,0 +1,57 @@
++"""Test to understand how classmethod properties work."""
++
++import inspect
++from sphinx.util.inspect import isproperty, safe_getattr
++
++class TestClass:
++    """Test class with various property types."""
++    
++    @property
++    def regular_property(self):
++        """A regular property."""
++        return "regular"
++    
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property."""
++        return "classmethod property"
++    
++    @classmethod
++    def regular_classmethod(cls):
++        """A regular classmethod."""
++        return "classmethod"
++
++
++# Direct access to __dict__
++print("=== Direct __dict__ access ===")
++for name, value in TestClass.__dict__.items():
++    if not name.startswith('_'):
++        print(f"{name}: {type(value)} - {value}")
++
++print("\n=== Using getattr ===")
++for name in ['regular_property', 'classmethod_property', 'regular_classmethod']:
++    value = getattr(TestClass, name)
++    print(f"{name}: {type(value)} - {value}")
++
++print("\n=== Using safe_getattr ===")
++for name in ['regular_property', 'classmethod_property', 'regular_classmethod']:
++    value = safe_getattr(TestClass, name)
++    print(f"{name}: {type(value)} - {value}")
++
++print("\n=== Checking with isproperty ===")
++for name in ['regular_property', 'classmethod_property', 'regular_classmethod']:
++    obj_from_dict = TestClass.__dict__.get(name)
++    obj_from_getattr = getattr(TestClass, name)
++    print(f"{name}:")
++    print(f"  from __dict__: {type(obj_from_dict)} - isproperty: {isproperty(obj_from_dict)}")
++    print(f"  from getattr: {type(obj_from_getattr)} - isproperty: {isproperty(obj_from_getattr)}")
++
++# Check if we can access the underlying property
++print("\n=== Accessing underlying property ===")
++cp = TestClass.__dict__['classmethod_property']
++print(f"Type of classmethod_property from __dict__: {type(cp)}")
++print(f"Has fget? {hasattr(cp, 'fget')}")
++if hasattr(cp, 'fget'):
++    print(f"fget type: {type(cp.fget)}")
++    print(f"fget __doc__: {cp.fget.__doc__}")
+diff --git a/test_classmethod_property_inspect2.py b/test_classmethod_property_inspect2.py
+new file mode 100644
+index 000000000..08403d626
+--- /dev/null
++++ b/test_classmethod_property_inspect2.py
+@@ -0,0 +1,49 @@
++"""Test to understand how classmethod properties work - deeper inspection."""
++
++import inspect
++from sphinx.util.inspect import isproperty, safe_getattr
++
++class TestClass:
++    """Test class with various property types."""
++    
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property."""
++        return "classmethod property"
++
++
++# Check the classmethod object
++cm = TestClass.__dict__['classmethod_property']
++print(f"Type: {type(cm)}")
++print(f"Dir: {[x for x in dir(cm) if not x.startswith('_')]}")
++
++# Check for __func__ or __wrapped__
++if hasattr(cm, '__func__'):
++    print(f"\n__func__ type: {type(cm.__func__)}")
++    print(f"__func__ is property: {isproperty(cm.__func__)}")
++    if isproperty(cm.__func__):
++        print(f"__func__.__doc__: {cm.__func__.__doc__}")
++        print(f"__func__.fget: {cm.__func__.fget}")
++        print(f"__func__.fget.__doc__: {cm.__func__.fget.__doc__}")
++
++if hasattr(cm, '__wrapped__'):
++    print(f"\n__wrapped__ type: {type(cm.__wrapped__)}")
++    print(f"__wrapped__ is property: {isproperty(cm.__wrapped__)}")
++
++# Let's also check the reverse order
++print("\n=== Testing reverse order: @property @classmethod ===")
++
++class TestClass2:
++    @property
++    @classmethod
++    def property_classmethod(cls):
++        """A property classmethod (reverse order)."""
++        return "property classmethod"
++
++pc = TestClass2.__dict__['property_classmethod']
++print(f"Type: {type(pc)}")
++print(f"Is property: {isproperty(pc)}")
++if isproperty(pc):
++    print(f"fget type: {type(pc.fget)}")
++    print(f"fget: {pc.fget}")
+diff --git a/test_debug_autodoc.py b/test_debug_autodoc.py
+new file mode 100644
+index 000000000..c3ee26af3
+--- /dev/null
++++ b/test_debug_autodoc.py
+@@ -0,0 +1,25 @@
++"""Debug autodoc property handling."""
++
++import sys
++sys.path.insert(0, '/testbed/tests/roots/test-ext-autodoc')
++
++from target.properties import Foo
++from sphinx.ext.autodoc.importer import get_class_members
++from sphinx.util.inspect import safe_getattr, getdoc
++
++# Get members
++members = get_class_members(Foo, [], safe_getattr)
++
++print("=== Class members ===")
++for name, member in members.items():
++    if name in ['prop', 'class_prop']:
++        print(f"\n{name}:")
++        print(f"  Type: {type(member.object)}")
++        print(f"  Value: {member.object}")
++        print(f"  Has __doc__: {hasattr(member.object, '__doc__')}")
++        if hasattr(member.object, '__doc__'):
++            print(f"  __doc__: {member.object.__doc__}")
++        
++        # Test getdoc
++        doc = getdoc(member.object, safe_getattr, True, Foo, name)
++        print(f"  getdoc result: {doc}")
+diff --git a/test_property_doc.py b/test_property_doc.py
+new file mode 100644
+index 000000000..4ae4fa83e
+--- /dev/null
++++ b/test_property_doc.py
+@@ -0,0 +1,22 @@
++"""Test property docstring access."""
++
++class TestClass:
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property."""
++        return "classmethod property"
++
++# Get the property from __dict__
++cm = TestClass.__dict__['classmethod_property']
++prop = cm.__func__
++
++print(f"Property type: {type(prop)}")
++print(f"Property __doc__: {prop.__doc__}")
++print(f"Property fget: {prop.fget}")
++print(f"Property fget.__doc__: {prop.fget.__doc__}")
++
++# Test with inspect.getdoc
++import inspect
++print(f"\ninspect.getdoc(prop): {inspect.getdoc(prop)}")
++print(f"inspect.getdoc(prop.fget): {inspect.getdoc(prop.fget)}")
+diff --git a/test_simple_autodoc.py b/test_simple_autodoc.py
+new file mode 100644
+index 000000000..43576833f
+--- /dev/null
++++ b/test_simple_autodoc.py
+@@ -0,0 +1,50 @@
++"""Simple test for autodoc with classmethod properties."""
++
++import sys
++import os
++sys.path.insert(0, os.path.dirname(__file__))
++
++from sphinx.ext.autodoc import PropertyDocumenter, ClassDocumenter
++from sphinx.testing.fixtures import make_app, app_params
++from sphinx.util.inspect import isproperty
++
++# Create test class
++class TestClass:
++    """Test class with various property types."""
++    
++    @property
++    def regular_property(self):
++        """A regular property."""
++        return "regular"
++    
++    @classmethod
++    @property
++    def classmethod_property(cls):
++        """A classmethod property."""
++        return "classmethod property"
++
++# Test the importer
++from sphinx.ext.autodoc.importer import get_class_members
++
++from sphinx.util.inspect import safe_getattr
++members = get_class_members(TestClass, [], safe_getattr)
++print("=== Class members ===")
++for name, member in members.items():
++    if not name.startswith('_'):
++        print(f"{name}: {type(member.object)} - isproperty: {isproperty(member.object)}")
++        if hasattr(member.object, '__doc__'):
++            print(f"  __doc__: {member.object.__doc__}")
++
++# Check if PropertyDocumenter can document it
++print("\n=== PropertyDocumenter.can_document_member ===")
++# Create a mock parent
++class MockParent:
++    pass
++
++mock_parent = MockParent()
++mock_parent.__class__ = ClassDocumenter
++
++for name, member in members.items():
++    if not name.startswith('_'):
++        can_doc = PropertyDocumenter.can_document_member(member.object, name, False, mock_parent)
++        print(f"{name}: {can_doc}")
+diff --git a/test_staticmethod_property.py b/test_staticmethod_property.py
+new file mode 100644
+index 000000000..d4ba75974
+--- /dev/null
++++ b/test_staticmethod_property.py
+@@ -0,0 +1,25 @@
++"""Test staticmethod properties."""
++
++class TestClass:
++    """Test class with staticmethod property."""
++    
++    @staticmethod
++    @property
++    def static_prop() -> str:
++        """Staticmethod property docstring."""
++        return "static"
++
++
++# Test - note that staticmethod+property doesn't work the same way as classmethod+property
++if __name__ == "__main__":
++    try:
++        print(f"TestClass.static_prop: {TestClass.static_prop}")
++    except Exception as e:
++        print(f"Error accessing staticmethod property: {e}")
++    
++    # Check what's in __dict__
++    sm = TestClass.__dict__['static_prop']
++    print(f"\nType in __dict__: {type(sm)}")
++    print(f"Has __func__? {hasattr(sm, '__func__')}")
++    if hasattr(sm, '__func__'):
++        print(f"__func__ type: {type(sm.__func__)}")
+diff --git a/tests/roots/test-ext-autodoc/target/properties.py b/tests/roots/test-ext-autodoc/target/properties.py
+index 409fc2b5d..8fe0c1dda 100644
+--- a/tests/roots/test-ext-autodoc/target/properties.py
++++ b/tests/roots/test-ext-autodoc/target/properties.py
+@@ -4,3 +4,9 @@ class Foo:
+     @property
+     def prop(self) -> int:
+         """docstring"""
++    
++    @classmethod
++    @property
++    def class_prop(cls) -> str:
++        """classmethod property docstring"""
++        return "classmethod property"
+diff --git a/tests/test_ext_autodoc_autoclass.py b/tests/test_ext_autodoc_autoclass.py
+index 59ee1a948..659fc42f1 100644
+--- a/tests/test_ext_autodoc_autoclass.py
++++ b/tests/test_ext_autodoc_autoclass.py
+@@ -212,6 +212,13 @@ def test_properties(app):
+         '   docstring',
+         '',
+         '',
++        '   .. py:property:: Foo.class_prop',
++        '      :module: target.properties',
++        '      :type: str',
++        '',
++        '      classmethod property docstring',
++        '',
++        '',
+         '   .. py:property:: Foo.prop',
+         '      :module: target.properties',
+         '      :type: int',
+diff --git a/tests/test_ext_autodoc_autoproperty.py b/tests/test_ext_autodoc_autoproperty.py
+index ee25aa8b7..2f3b85f2f 100644
+--- a/tests/test_ext_autodoc_autoproperty.py
++++ b/tests/test_ext_autodoc_autoproperty.py
+@@ -26,3 +26,17 @@ def test_properties(app):
+         '   docstring',
+         '',
+     ]
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_classmethod_properties(app):
++    actual = do_autodoc(app, 'property', 'target.properties.Foo.class_prop')
++    assert list(actual) == [
++        '',
++        '.. py:property:: Foo.class_prop',
++        '   :module: target.properties',
++        '   :type: str',
++        '',
++        '   classmethod property docstring',
++        '',
++    ]

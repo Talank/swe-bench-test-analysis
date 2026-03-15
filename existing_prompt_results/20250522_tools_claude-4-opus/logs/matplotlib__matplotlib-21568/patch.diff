@@ -1,0 +1,579 @@
+diff --git a/analyze_issue.py b/analyze_issue.py
+new file mode 100644
+index 0000000000..1afe8b3aa1
+--- /dev/null
++++ b/analyze_issue.py
+@@ -0,0 +1,36 @@
++import matplotlib
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++from matplotlib.dates import DateFormatter, ConciseDateFormatter
++import matplotlib.dates as mdates
++
++# First, let's see what's happening with the date formatting
++np.random.seed(1)
++
++dates = pd.date_range("2020-01-01 00:00:00", end="2020-01-01 00:10:00", periods=100)
++data = np.random.rand(100)
++
++fig, ax = plt.subplots(constrained_layout=True)
++ax.plot(dates.to_numpy(), data)
++
++# Get the formatter being used
++formatter = ax.xaxis.get_major_formatter()
++print(f"Formatter type: {type(formatter)}")
++print(f"Formatter: {formatter}")
++
++# Get the tick locations and labels
++locs = ax.xaxis.get_majorticklocs()
++print(f"\nTick locations: {locs}")
++
++# Manually format the tick labels to see what they should be
++for loc in locs:
++    label = formatter(loc)
++    print(f"Location {loc}: '{label}'")
++
++# Let's also check what the ConciseDateFormatter does
++if isinstance(formatter, ConciseDateFormatter):
++    print("\nConciseDateFormatter attributes:")
++    for attr in ['formats', 'offset_formats', 'show_offset', 'usetex']:
++        if hasattr(formatter, attr):
++            print(f"  {attr}: {getattr(formatter, attr)}")
+diff --git a/analyze_tex_issue.py b/analyze_tex_issue.py
+new file mode 100644
+index 0000000000..bf0fe52947
+--- /dev/null
++++ b/analyze_tex_issue.py
+@@ -0,0 +1,57 @@
++import re
++
++# The issue is that when we have something like "01 00:05", 
++# the current implementation doesn't handle it well
++
++def _wrap_in_tex_current(text):
++    """Current implementation"""
++    p = r'([a-zA-Z]+)'
++    ret_text = re.sub(p, r'}$\1$\\mathdefault{', text)
++    ret_text = '$\\mathdefault{'+ret_text.replace('-', '{-}')+'}$'
++    ret_text = ret_text.replace('$\\mathdefault{}$', '')
++    return ret_text
++
++def _wrap_in_tex_fixed(text):
++    """Fixed implementation that properly handles spacing"""
++    # Split text into alphabetic and non-alphabetic parts
++    parts = re.split(r'([a-zA-Z]+)', text)
++    result = []
++    
++    for i, part in enumerate(parts):
++        if not part:  # Skip empty parts
++            continue
++            
++        if re.match(r'^[a-zA-Z]+$', part):
++            # Alphabetic part - keep outside math mode
++            result.append(part)
++        else:
++            # Non-alphabetic part - wrap in math mode
++            # Replace dashes with {-} to prevent spacing as binary operators
++            math_part = part.replace('-', '{-}')
++            result.append(f'$\\mathdefault{{{math_part}}}$')
++    
++    return ''.join(result)
++
++# Test cases
++test_cases = [
++    "01 00:00",
++    "01 00:05",
++    "Jan 01",
++    "Jan-01", 
++    "2020-01-01",
++    "Jan",
++    "00:05:30",
++    "Dec 2005 Feb",  # Multiple text parts
++]
++
++print("Testing implementations:")
++print("-" * 80)
++for test in test_cases:
++    current = _wrap_in_tex_current(test)
++    fixed = _wrap_in_tex_fixed(test)
++    print(f"Input: '{test}'")
++    print(f"  Current: '{current}'")
++    print(f"  Fixed:   '{fixed}'")
++    if current != fixed:
++        print("  DIFFERENT!")
++    print()
+diff --git a/datetime_axis_usetex_False.png b/datetime_axis_usetex_False.png
+new file mode 100644
+index 0000000000..a08450e2e3
+Binary files /dev/null and b/datetime_axis_usetex_False.png differ
+diff --git a/lib/matplotlib/dates.py b/lib/matplotlib/dates.py
+index 0766156d64..47102a1caa 100644
+--- a/lib/matplotlib/dates.py
++++ b/lib/matplotlib/dates.py
+@@ -592,13 +592,25 @@ def drange(dstart, dend, delta):
+ 
+ 
+ def _wrap_in_tex(text):
+-    p = r'([a-zA-Z]+)'
+-    ret_text = re.sub(p, r'}$\1$\\mathdefault{', text)
+-
+-    # Braces ensure dashes are not spaced like binary operators.
+-    ret_text = '$\\mathdefault{'+ret_text.replace('-', '{-}')+'}$'
+-    ret_text = ret_text.replace('$\\mathdefault{}$', '')
+-    return ret_text
++    # Split text into alphabetic and non-alphabetic parts
++    parts = re.split(r'([a-zA-Z]+)', text)
++    result = []
++    
++    for part in parts:
++        if not part:  # Skip empty parts
++            continue
++            
++        if re.match(r'^[a-zA-Z]+$', part):
++            # Alphabetic part - keep outside math mode
++            result.append(part)
++        else:
++            # Non-alphabetic part - wrap in math mode
++            # Replace dashes with {-} to prevent spacing as binary operators
++            # Replace spaces with \  to preserve them in math mode
++            math_part = part.replace('-', '{-}').replace(' ', '\\ ')
++            result.append(f'$\\mathdefault{{{math_part}}}$')
++    
++    return ''.join(result)
+ 
+ 
+ ## date tickers and formatters ###
+diff --git a/lib/matplotlib/tests/test_dates.py b/lib/matplotlib/tests/test_dates.py
+index 96a3db1730..e3ff50bfd0 100644
+--- a/lib/matplotlib/tests/test_dates.py
++++ b/lib/matplotlib/tests/test_dates.py
+@@ -325,7 +325,7 @@ def test_date_formatter_callable():
+     (datetime.timedelta(weeks=52 * 200),
+      [r'$\mathdefault{%d}$' % (year,) for year in range(1990, 2171, 20)]),
+     (datetime.timedelta(days=30),
+-     [r'Jan$\mathdefault{ %02d 1990}$' % (day,) for day in range(1, 32, 3)]),
++     [r'Jan$\mathdefault{\ %02d\ 1990}$' % (day,) for day in range(1, 32, 3)]),
+     (datetime.timedelta(hours=20),
+      [r'$\mathdefault{%02d:00:00}$' % (hour,) for hour in range(0, 21, 2)]),
+ ])
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..e8b5bb816b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,25 @@
++import matplotlib
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++
++# Test both with and without usetex
++for use_tex in [False, True]:
++    np.random.seed(1)
++    matplotlib.rcParams["text.usetex"] = use_tex
++
++    dates = pd.date_range("2020-01-01 00:00:00", end="2020-01-01 00:10:00", periods=100)
++    data = np.random.rand(100)
++
++    fig, ax = plt.subplots(constrained_layout=True)
++    ax.plot(dates.to_numpy(), data)
++    
++    # Get the x-axis tick labels to inspect them
++    labels = ax.get_xticklabels()
++    print(f"\nUsing usetex={use_tex}:")
++    print(f"Matplotlib version: {matplotlib.__version__}")
++    for i, label in enumerate(labels):
++        print(f"Label {i}: '{label.get_text()}'")
++    
++    plt.savefig(f"datetime_axis_usetex_{use_tex}.png", dpi=150)
++    plt.close()
+diff --git a/spacing_test.png b/spacing_test.png
+new file mode 100644
+index 0000000000..d538c3d11a
+Binary files /dev/null and b/spacing_test.png differ
+diff --git a/test_datetime_formatting.py b/test_datetime_formatting.py
+new file mode 100644
+index 0000000000..9064a9bae3
+--- /dev/null
++++ b/test_datetime_formatting.py
+@@ -0,0 +1,61 @@
++import matplotlib
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++import numpy as np
++import datetime
++
++# Create datetime data
++base = datetime.datetime(2020, 1, 1, 0, 0, 0)
++dates = [base + datetime.timedelta(minutes=i) for i in range(0, 11)]
++values = np.random.rand(len(dates))
++
++# Test the formatter directly
++fig, ax = plt.subplots()
++ax.plot(dates, values)
++
++# Get the formatter and test it
++locator = mdates.AutoDateLocator()
++formatter = mdates.AutoDateFormatter(locator, usetex=False)
++ax.xaxis.set_major_locator(locator)
++ax.xaxis.set_major_formatter(formatter)
++
++# Force a draw to populate the tick labels
++fig.canvas.draw()
++
++# Get the tick labels
++labels = [label.get_text() for label in ax.get_xticklabels()]
++print("Labels without usetex:")
++for i, label in enumerate(labels):
++    if label:
++        print(f"  Label {i}: '{label}'")
++
++# Now test with usetex formatter
++formatter_tex = mdates.AutoDateFormatter(locator, usetex=True)
++ax.xaxis.set_major_formatter(formatter_tex)
++fig.canvas.draw()
++
++labels_tex = [label.get_text() for label in ax.get_xticklabels()]
++print("\nLabels with usetex:")
++for i, label in enumerate(labels_tex):
++    if label:
++        print(f"  Label {i}: '{label}'")
++
++plt.close()
++
++# Also test the _wrap_in_tex function directly on typical date formats
++from matplotlib.dates import _wrap_in_tex
++print("\nDirect _wrap_in_tex tests on typical date formats:")
++typical_formats = [
++    "01 00:00",
++    "01 00:05",
++    "01 00:10",
++    "00:00:00",
++    "00:05:00",
++    "Jan 01",
++    "2020-01-01",
++    "01-01 00:00"
++]
++
++for fmt in typical_formats:
++    wrapped = _wrap_in_tex(fmt)
++    print(f"  '{fmt}' -> '{wrapped}'")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..4030bf595c
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,18 @@
++from matplotlib.dates import _wrap_in_tex
++
++# Test the fixed _wrap_in_tex function
++test_strings = [
++    "01 00:00",
++    "01 00:05", 
++    "01 00:10",
++    "2020-01-01",
++    "Jan 01",
++    "00:05:30",
++    "Jan-01",
++    "Dec 2005 Feb"
++]
++
++print("Testing fixed _wrap_in_tex function:")
++for s in test_strings:
++    wrapped = _wrap_in_tex(s)
++    print(f"'{s}' -> '{wrapped}'")
+diff --git a/test_new_wrap.py b/test_new_wrap.py
+new file mode 100644
+index 0000000000..ee20788a12
+--- /dev/null
++++ b/test_new_wrap.py
+@@ -0,0 +1,54 @@
++import re
++
++def _wrap_in_tex_old(text):
++    # Old implementation
++    p = re.compile("[a-zA-Z]+")
++    m = p.finditer(text)
++    cursor = 0
++    ret_text = ''
++
++    for i in m:
++        start = i.start()
++        end = i.end()
++
++        ret_text += '$\\mathdefault{'+text[cursor:start].replace('-', '{-}')
++        ret_text += '}$'+text[start:end]
++        cursor = end
++
++    ret_text += '$\\mathdefault{'+text[cursor:].replace('-', '{-}')+'}$'
++    return ret_text
++
++def _wrap_in_tex_current(text):
++    # Current implementation
++    p = r'([a-zA-Z]+)'
++    ret_text = re.sub(p, r'}$\1$\\mathdefault{', text)
++
++    # Braces ensure dashes are not spaced like binary operators.
++    ret_text = '$\\mathdefault{'+ret_text.replace('-', '{-}')+'}$'
++    ret_text = ret_text.replace('$\\mathdefault{}$', '')
++    return ret_text
++
++# Test strings
++test_strings = [
++    "01 00:00",
++    "01 00:05", 
++    "01 00:10",
++    "2020-01-01",
++    "Jan 01",
++    "00:05:30",
++    "Jan-01",
++    "2020",
++    "Jan"
++]
++
++print("Comparing implementations:")
++print("-" * 80)
++for s in test_strings:
++    old = _wrap_in_tex_old(s)
++    current = _wrap_in_tex_current(s)
++    print(f"Input: '{s}'")
++    print(f"  Old:     '{old}'")
++    print(f"  Current: '{current}'")
++    if old != current:
++        print("  DIFFERENT!")
++    print()
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 0000000000..056874fa3b
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,57 @@
++"""
++This script demonstrates that the fix resolves the original issue where
++datetime axis labels with usetex=True had unclear spacing.
++
++The problem was that spaces in math mode are ignored by TeX, so labels
++like "01 00:05" would render with no space between "01" and "00:05".
++
++The fix ensures spaces are escaped as '\\ ' in math mode, preserving
++the visual spacing.
++"""
++
++import matplotlib
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++from matplotlib.dates import _wrap_in_tex
++
++print("Demonstrating the fix for datetime axis spacing with usetex")
++print("=" * 60)
++
++# Show what the old behavior would produce vs the new behavior
++test_label = "01 00:05"
++
++# Simulate old behavior (spaces not escaped in math mode)
++old_behavior = '$\\mathdefault{01 00:05}$'
++print(f"\nOld behavior (spaces ignored in math mode):")
++print(f"  Input: '{test_label}'")
++print(f"  Output: '{old_behavior}'")
++print(f"  Issue: In TeX, the space between '01' and '00:05' would be ignored")
++
++# Show new behavior (spaces properly escaped)
++new_behavior = _wrap_in_tex(test_label)
++print(f"\nNew behavior (spaces escaped):")
++print(f"  Input: '{test_label}'")
++print(f"  Output: '{new_behavior}'")
++print(f"  Fixed: The '\\ ' ensures the space is rendered in TeX")
++
++# Test with various datetime formats
++print("\nTesting various datetime formats:")
++formats = [
++    "01 00:00",
++    "01 00:05",
++    "01 00:10",
++    "Jan 01 2020",
++    "2020-01-01 00:00",
++    "12:30:45"
++]
++
++for fmt in formats:
++    wrapped = _wrap_in_tex(fmt)
++    # Count escaped spaces
++    escaped_spaces = wrapped.count('\\ ')
++    original_spaces = fmt.count(' ')
++    print(f"  '{fmt}' -> {escaped_spaces}/{original_spaces} spaces properly escaped")
++
++print("\nConclusion: The fix ensures that datetime labels render clearly with")
++print("proper spacing when using usetex=True, resolving the reported issue.")
+diff --git a/test_space_handling.py b/test_space_handling.py
+new file mode 100644
+index 0000000000..9735314111
+--- /dev/null
++++ b/test_space_handling.py
+@@ -0,0 +1,40 @@
++import re
++
++def _wrap_in_tex_with_space_fix(text):
++    """
++    Fixed implementation that properly handles spaces in math mode.
++    In TeX math mode, spaces are ignored, so we need to handle them specially.
++    """
++    # Split text into alphabetic and non-alphabetic parts
++    parts = re.split(r'([a-zA-Z]+)', text)
++    result = []
++    
++    for i, part in enumerate(parts):
++        if not part:  # Skip empty parts
++            continue
++            
++        if re.match(r'^[a-zA-Z]+$', part):
++            # Alphabetic part - keep outside math mode
++            result.append(part)
++        else:
++            # Non-alphabetic part - wrap in math mode
++            # Replace dashes with {-} to prevent spacing as binary operators
++            math_part = part.replace('-', '{-}')
++            # Replace spaces with explicit space command in math mode
++            math_part = math_part.replace(' ', '\\ ')
++            result.append(f'$\\mathdefault{{{math_part}}}$')
++    
++    return ''.join(result)
++
++# Test the space handling
++test_cases = [
++    "01 00:00",
++    "01 00:05",
++    "Jan 01",
++    "2020-01-01",
++]
++
++print("Testing space handling:")
++for test in test_cases:
++    result = _wrap_in_tex_with_space_fix(test)
++    print(f"'{test}' -> '{result}'")
+diff --git a/test_spacing.py b/test_spacing.py
+new file mode 100644
+index 0000000000..2bebf32a98
+--- /dev/null
++++ b/test_spacing.py
+@@ -0,0 +1,35 @@
++import matplotlib
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++from matplotlib.dates import DateFormatter
++
++# Create a simple test to see the spacing issue
++fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
++
++dates = pd.date_range("2020-01-01 00:00:00", end="2020-01-01 00:10:00", periods=100)
++data = np.random.rand(100)
++
++# Without usetex
++matplotlib.rcParams["text.usetex"] = False
++ax1.plot(dates.to_numpy(), data)
++ax1.set_title("Without usetex")
++
++# With usetex - but we'll manually format to see the issue
++matplotlib.rcParams["text.usetex"] = False  # Keep False for now to avoid TeX errors
++ax2.plot(dates.to_numpy(), data)
++ax2.set_title("Simulated usetex formatting")
++
++# Get the tick labels and simulate what usetex would do
++from matplotlib.dates import _wrap_in_tex
++labels = ax2.get_xticklabels()
++for label in labels:
++    text = label.get_text()
++    if text:
++        wrapped = _wrap_in_tex(text)
++        # Show what the wrapped text looks like
++        print(f"Original: '{text}' -> Wrapped: '{wrapped}'")
++
++plt.tight_layout()
++plt.savefig("spacing_test.png", dpi=150)
++plt.close()
+diff --git a/test_without_usetex.png b/test_without_usetex.png
+new file mode 100644
+index 0000000000..d9014d2b8a
+Binary files /dev/null and b/test_without_usetex.png differ
+diff --git a/test_wrap_in_tex.py b/test_wrap_in_tex.py
+new file mode 100644
+index 0000000000..483bf0a4d6
+--- /dev/null
++++ b/test_wrap_in_tex.py
+@@ -0,0 +1,16 @@
++from matplotlib.dates import _wrap_in_tex
++
++# Test the _wrap_in_tex function with typical date formats
++test_strings = [
++    "01 00:00",
++    "01 00:05", 
++    "01 00:10",
++    "2020-01-01",
++    "Jan 01",
++    "00:05:30"
++]
++
++print("Testing _wrap_in_tex function:")
++for s in test_strings:
++    wrapped = _wrap_in_tex(s)
++    print(f"'{s}' -> '{wrapped}'")
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 0000000000..ab0f7b58f2
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,52 @@
++import matplotlib
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++from matplotlib.dates import _wrap_in_tex
++
++# First, let's verify the _wrap_in_tex function works correctly
++print("Testing _wrap_in_tex function:")
++test_cases = [
++    "01 00:00",
++    "01 00:05",
++    "01 00:10",
++    "Jan 01",
++    "2020-01-01"
++]
++
++for test in test_cases:
++    wrapped = _wrap_in_tex(test)
++    print(f"  '{test}' -> '{wrapped}'")
++
++print("\nThe key improvement is that spaces are now escaped as '\\ ' in math mode,")
++print("which ensures they are rendered properly in TeX, fixing the unclear spacing issue.")
++
++# Now let's test with actual plotting
++np.random.seed(1)
++dates = pd.date_range("2020-01-01 00:00:00", end="2020-01-01 00:10:00", periods=100)
++data = np.random.rand(100)
++
++# Test without usetex
++matplotlib.rcParams["text.usetex"] = False
++fig, ax = plt.subplots(constrained_layout=True)
++ax.plot(dates.to_numpy(), data)
++ax.set_title("Without usetex")
++plt.savefig("test_without_usetex.png", dpi=150)
++plt.close()
++
++# Get the tick labels to see what they look like
++fig, ax = plt.subplots(constrained_layout=True)
++ax.plot(dates.to_numpy(), data)
++labels = [label.get_text() for label in ax.get_xticklabels()]
++print(f"\nTick labels without usetex: {labels}")
++plt.close()
++
++# Simulate what happens with usetex
++print("\nSimulating usetex formatting:")
++for label in labels:
++    if label:
++        wrapped = _wrap_in_tex(label)
++        print(f"  '{label}' -> '{wrapped}'")
++
++print("\nThe fix ensures that datetime labels with spaces (like '01 00:05') are")
++print("properly rendered in TeX mode with visible spaces.")

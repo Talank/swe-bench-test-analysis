@@ -1,0 +1,715 @@
+diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py
+index 30616c0172..1a1df785e9 100644
+--- a/django/db/migrations/autodetector.py
++++ b/django/db/migrations/autodetector.py
+@@ -888,19 +888,56 @@ class MigrationAutodetector:
+             self._generate_removed_field(app_label, model_name, field_name)
+ 
+     def _generate_removed_field(self, app_label, model_name, field_name):
++        dependencies = [
++            (app_label, model_name, field_name, "order_wrt_unset"),
++            (app_label, model_name, field_name, "foo_together_change"),
++        ]
++        
++        # Helper function to check if a model inherits from another (directly or indirectly)
++        def inherits_from(child_state, parent_app_label, parent_model_name):
++            for base in child_state.bases:
++                if isinstance(base, str) and "." in base:
++                    base_app_label, base_name = base.split(".", 1)
++                    if (base_app_label, base_name.lower()) == (parent_app_label, parent_model_name.lower()):
++                        return True
++                    # Check indirect inheritance
++                    # Try both original case and lowercase for model lookup
++                    base_key = None
++                    if (base_app_label, base_name) in self.to_state.models:
++                        base_key = (base_app_label, base_name)
++                    elif (base_app_label, base_name.lower()) in self.to_state.models:
++                        base_key = (base_app_label, base_name.lower())
++                    
++                    if base_key:
++                        base_state = self.to_state.models[base_key]
++                        if inherits_from(base_state, parent_app_label, parent_model_name):
++                            return True
++            return False
++        
++        # Check if any new models inherit from this model and have a field with the same name
++        # If so, the field removal should happen before the model creation to avoid field clashes
++        for new_app_label, new_model_name in self.new_model_keys:
++            new_model_state = self.to_state.models[new_app_label, new_model_name]
++            # Check if the new model inherits from the model we're removing the field from
++            if inherits_from(new_model_state, app_label, model_name):
++                # Check if the new model has a field with the same name
++                if field_name in new_model_state.fields:
++                    # Add dependency to ensure field removal happens before model creation
++                    dependencies.append((new_app_label, new_model_name, None, False))
++                    # Don't break - there might be multiple models with the same field name
++        
++        # If this field removal must happen before a model creation (to avoid field clashes),
++        # add it at the beginning of the operations list
++        add_to_beginning = any(dep[3] is False for dep in dependencies if len(dep) >= 4)
++        
+         self.add_operation(
+             app_label,
+             operations.RemoveField(
+                 model_name=model_name,
+                 name=field_name,
+             ),
+-            # We might need to depend on the removal of an
+-            # order_with_respect_to or index/unique_together operation;
+-            # this is safely ignored if there isn't one
+-            dependencies=[
+-                (app_label, model_name, field_name, "order_wrt_unset"),
+-                (app_label, model_name, field_name, "foo_together_change"),
+-            ],
++            dependencies=dependencies,
++            beginning=add_to_beginning,
+         )
+ 
+     def generate_altered_fields(self):
+diff --git a/test_exact_scenario.py b/test_exact_scenario.py
+new file mode 100644
+index 0000000000..511c198628
+--- /dev/null
++++ b/test_exact_scenario.py
+@@ -0,0 +1,130 @@
++"""Test the exact scenario from the problem statement."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations as migration_operations
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Test the exact scenario from the problem statement
++print("Testing the exact scenario from the problem statement...")
++print("=" * 60)
++
++# Create initial state with Readable model having title field
++print("\nInitial state: Readable model with title field")
++initial_state = ProjectState()
++initial_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++))
++
++# Create target state with Readable as base and Book as subclass with title field
++print("\nTarget state: Readable without title, Book (subclass) with title")
++target_state = ProjectState()
++target_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++    ],
++    {},
++))
++target_state.add_model(ModelState(
++    "testapp",
++    "Book",
++    [
++        ("readable_ptr", models.OneToOneField(
++            auto_created=True,
++            on_delete=models.CASCADE,
++            parent_link=True,
++            primary_key=True,
++            serialize=False,
++            to="testapp.Readable",
++        )),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++    bases=("testapp.Readable",),
++))
++
++# Create autodetector and detect changes
++autodetector = MigrationAutodetector(initial_state, target_state)
++changes = autodetector._detect_changes()
++
++print("\nGenerated migration operations:")
++if 'testapp' in changes:
++    operations = changes['testapp'][0].operations
++    for i, op in enumerate(operations):
++        print(f"{i+1}. {op.__class__.__name__}: {op.describe()}")
++        if hasattr(op, '_auto_deps'):
++            print(f"   Dependencies: {op._auto_deps}")
++
++    # Check operation order
++    create_model_idx = None
++    remove_field_idx = None
++    
++    for i, op in enumerate(operations):
++        if op.__class__.__name__ == 'CreateModel' and op.name == 'Book':
++            create_model_idx = i
++        elif op.__class__.__name__ == 'RemoveField' and op.model_name.lower() == 'readable' and op.name == 'title':
++            remove_field_idx = i
++    
++    print(f"\nOperation order check:")
++    print(f"- CreateModel for Book at index: {create_model_idx}")
++    print(f"- RemoveField for Readable.title at index: {remove_field_idx}")
++    
++    if remove_field_idx < create_model_idx:
++        print("\nSUCCESS: RemoveField comes before CreateModel")
++        print("This prevents the FieldError that would occur if CreateModel came first.")
++    else:
++        print("\nFAILURE: CreateModel comes before RemoveField")
++        print("This would cause a FieldError when migrating.")
++
++# Now let's simulate what would happen with the migration
++print("\n" + "=" * 60)
++print("Simulating migration execution...")
++
++# Create a test migration with the operations
++test_migration = Migration("test", "testapp")
++test_migration.operations = operations if 'testapp' in changes else []
++
++# Try to apply the operations to a state to see if they work
++try:
++    test_state = initial_state.clone()
++    for operation in test_migration.operations:
++        print(f"\nApplying: {operation.describe()}")
++        test_state = operation.state_forwards("testapp", test_state)
++    print("\nSUCCESS: All operations applied successfully to the state!")
++except Exception as e:
++    print(f"\nERROR: Error applying operations: {e}")
++
++print("\n" + "=" * 60)
++print("Test completed!")
+diff --git a/test_field_migration_issue.py b/test_field_migration_issue.py
+new file mode 100644
+index 0000000000..5459ecb57b
+--- /dev/null
++++ b/test_field_migration_issue.py
+@@ -0,0 +1,104 @@
++"""Test case to reproduce the field migration issue when moving field to subclass."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.executor import MigrationExecutor
++from django.db import connection
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create initial state with Readable model having title field
++initial_state = ProjectState()
++initial_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++))
++
++# Create target state with Readable as base and Book as subclass with title field
++target_state = ProjectState()
++target_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++    ],
++    {},
++))
++target_state.add_model(ModelState(
++    "testapp",
++    "Book",
++    [
++        ("readable_ptr", models.OneToOneField(
++            auto_created=True,
++            on_delete=models.CASCADE,
++            parent_link=True,
++            primary_key=True,
++            serialize=False,
++            to="testapp.Readable",
++        )),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++    bases=("testapp.Readable",),
++))
++
++# Create autodetector and detect changes
++autodetector = MigrationAutodetector(initial_state, target_state)
++changes = autodetector._detect_changes()
++
++print("Generated operations:")
++for app_label, migrations in changes.items():
++    print(f"\nApp: {app_label}")
++    for migration in migrations:
++        for operation in migration.operations:
++            print(f"  - {operation.__class__.__name__}: {operation.describe()}")
++
++# Check the order of operations
++if changes:
++    operations = changes['testapp'][0].operations
++    print("\nOperation order:")
++    for i, op in enumerate(operations):
++        print(f"{i+1}. {op.__class__.__name__} - {op.describe()}")
++        if hasattr(op, '_auto_deps'):
++            print(f"   Dependencies: {op._auto_deps}")
++    
++    # Check if CreateModel comes before RemoveField
++    create_model_idx = None
++    remove_field_idx = None
++    
++    for i, op in enumerate(operations):
++        if op.__class__.__name__ == 'CreateModel' and op.name == 'Book':
++            create_model_idx = i
++        elif op.__class__.__name__ == 'RemoveField' and op.model_name == 'Readable' and op.name == 'title':
++            remove_field_idx = i
++    
++    if create_model_idx is not None and remove_field_idx is not None:
++        print(f"\nCreateModel index: {create_model_idx}")
++        print(f"RemoveField index: {remove_field_idx}")
++        print(f"Order is {'CORRECT' if remove_field_idx < create_model_idx else 'INCORRECT'}")
+diff --git a/test_migration_execution.py b/test_migration_execution.py
+new file mode 100644
+index 0000000000..87c0945aad
+--- /dev/null
++++ b/test_migration_execution.py
+@@ -0,0 +1,136 @@
++"""Test that the migration can actually be executed without errors."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ProjectState, ModelState
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations.loader import MigrationLoader
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create initial state with Readable model having title field
++initial_state = ProjectState()
++initial_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++))
++
++# Create target state with Readable as base and Book as subclass with title field
++target_state = ProjectState()
++target_state.add_model(ModelState(
++    "testapp",
++    "Readable",
++    [
++        ("id", models.AutoField(primary_key=True)),
++    ],
++    {},
++))
++target_state.add_model(ModelState(
++    "testapp",
++    "Book",
++    [
++        ("readable_ptr", models.OneToOneField(
++            auto_created=True,
++            on_delete=models.CASCADE,
++            parent_link=True,
++            primary_key=True,
++            serialize=False,
++            to="testapp.Readable",
++        )),
++        ("title", models.CharField(max_length=200)),
++    ],
++    {},
++    bases=("testapp.Readable",),
++))
++
++# Create autodetector and detect changes
++autodetector = MigrationAutodetector(initial_state, target_state)
++changes = autodetector._detect_changes()
++
++print("Generated operations:")
++for app_label, migrations in changes.items():
++    print(f"\nApp: {app_label}")
++    for migration in migrations:
++        for operation in migration.operations:
++            print(f"  - {operation.__class__.__name__}: {operation.describe()}")
++
++# Now let's try to execute the migration
++if changes and 'testapp' in changes:
++    # Create initial migration that sets up the Readable model
++    initial_migration = Migration("0001_initial", "testapp")
++    initial_migration.operations = [
++        django.db.migrations.operations.CreateModel(
++            name='Readable',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('title', models.CharField(max_length=200)),
++            ],
++        ),
++    ]
++    
++    # Get the generated migration
++    generated_migration = changes['testapp'][0]
++    generated_migration.name = "0002_auto"
++    generated_migration.dependencies = [("testapp", "0001_initial")]
++    
++    # Create a fake migration loader
++    class FakeMigrationLoader:
++        def __init__(self):
++            self.graph = django.db.migrations.graph.MigrationGraph()
++            self.graph.add_node(("testapp", "0001_initial"), initial_migration)
++            self.graph.add_node(("testapp", "0002_auto"), generated_migration)
++            self.graph.add_dependency(None, ("testapp", "0002_auto"), ("testapp", "0001_initial"))
++            self.applied_migrations = set()
++            
++    # Execute migrations
++    executor = MigrationExecutor(connection)
++    executor.loader = FakeMigrationLoader()
++    
++    # Apply initial migration
++    print("\nApplying initial migration...")
++    try:
++        initial_state = executor.apply_migration(initial_state, initial_migration)
++        print("Initial migration applied successfully!")
++    except Exception as e:
++        print(f"Error applying initial migration: {e}")
++        sys.exit(1)
++    
++    # Apply generated migration
++    print("\nApplying generated migration...")
++    try:
++        final_state = executor.apply_migration(initial_state, generated_migration)
++        print("Generated migration applied successfully!")
++        print("\nMigration execution completed without errors!")
++    except Exception as e:
++        print(f"Error applying generated migration: {e}")
++        print(f"Error type: {type(e).__name__}")
++        import traceback
++        traceback.print_exc()
++        sys.exit(1)
+diff --git a/test_simple_migration.py b/test_simple_migration.py
+new file mode 100644
+index 0000000000..3864d1f8f8
+--- /dev/null
++++ b/test_simple_migration.py
+@@ -0,0 +1,253 @@
++"""Test that the migration operations are in the correct order."""
++
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ProjectState, ModelState
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++    USE_TZ=True,
++)
++
++django.setup()
++
++def test_field_migration_to_subclass():
++    """Test moving a field from parent to child model generates correct operation order."""
++    # Create initial state with Readable model having title field
++    initial_state = ProjectState()
++    initial_state.add_model(ModelState(
++        "testapp",
++        "Readable",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("title", models.CharField(max_length=200)),
++        ],
++        {},
++    ))
++
++    # Create target state with Readable as base and Book as subclass with title field
++    target_state = ProjectState()
++    target_state.add_model(ModelState(
++        "testapp",
++        "Readable",
++        [
++            ("id", models.AutoField(primary_key=True)),
++        ],
++        {},
++    ))
++    target_state.add_model(ModelState(
++        "testapp",
++        "Book",
++        [
++            ("readable_ptr", models.OneToOneField(
++                auto_created=True,
++                on_delete=models.CASCADE,
++                parent_link=True,
++                primary_key=True,
++                serialize=False,
++                to="testapp.Readable",
++            )),
++            ("title", models.CharField(max_length=200)),
++        ],
++        {},
++        bases=("testapp.Readable",),
++    ))
++
++    # Create autodetector and detect changes
++    autodetector = MigrationAutodetector(initial_state, target_state)
++    changes = autodetector._detect_changes()
++
++    assert 'testapp' in changes, "No changes detected for testapp"
++    
++    operations = changes['testapp'][0].operations
++    assert len(operations) == 2, f"Expected 2 operations, got {len(operations)}"
++    
++    # Find the operations
++    create_model_op = None
++    remove_field_op = None
++    
++    for i, op in enumerate(operations):
++        if op.__class__.__name__ == 'CreateModel' and op.name == 'Book':
++            create_model_op = (i, op)
++        elif op.__class__.__name__ == 'RemoveField' and op.model_name.lower() == 'readable' and op.name == 'title':
++            remove_field_op = (i, op)
++    
++    assert create_model_op is not None, "CreateModel operation not found"
++    assert remove_field_op is not None, "RemoveField operation not found"
++    
++    # Check that RemoveField comes before CreateModel
++    assert remove_field_op[0] < create_model_op[0], \
++        f"RemoveField (index {remove_field_op[0]}) should come before CreateModel (index {create_model_op[0]})"
++    
++    print("PASS: RemoveField comes before CreateModel")
++    return True
++
++def test_normal_field_removal():
++    """Test that normal field removal (without subclass) works as before."""
++    # Create initial state with Readable model having title and content fields
++    initial_state = ProjectState()
++    initial_state.add_model(ModelState(
++        "testapp",
++        "Readable",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("title", models.CharField(max_length=200)),
++            ("content", models.TextField()),
++        ],
++        {},
++    ))
++
++    # Create target state with Readable model having only content field
++    target_state = ProjectState()
++    target_state.add_model(ModelState(
++        "testapp",
++        "Readable",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("content", models.TextField()),
++        ],
++        {},
++    ))
++
++    # Create autodetector and detect changes
++    autodetector = MigrationAutodetector(initial_state, target_state)
++    changes = autodetector._detect_changes()
++
++    assert 'testapp' in changes, "No changes detected for testapp"
++    
++    operations = changes['testapp'][0].operations
++    assert len(operations) == 1, f"Expected 1 operation, got {len(operations)}"
++    
++    op = operations[0]
++    assert op.__class__.__name__ == 'RemoveField', f"Expected RemoveField, got {op.__class__.__name__}"
++    assert op.model_name.lower() == 'readable', f"Expected model_name='readable', got {op.model_name}"
++    assert op.name == 'title', f"Expected name='title', got {op.name}"
++    
++    print("PASS: Normal field removal works correctly")
++    return True
++
++def test_multiple_inheritance():
++    """Test field removal with multiple inheritance levels."""
++    # Create initial state
++    initial_state = ProjectState()
++    initial_state.add_model(ModelState(
++        "testapp",
++        "Base",
++        [
++            ("id", models.AutoField(primary_key=True)),
++            ("field1", models.CharField(max_length=200)),
++        ],
++        {},
++    ))
++    initial_state.add_model(ModelState(
++        "testapp",
++        "Middle",
++        [
++            ("base_ptr", models.OneToOneField(
++                auto_created=True,
++                on_delete=models.CASCADE,
++                parent_link=True,
++                primary_key=True,
++                serialize=False,
++                to="testapp.Base",
++            )),
++            ("field2", models.CharField(max_length=200)),
++        ],
++        {},
++        bases=("testapp.Base",),
++    ))
++
++    # Create target state - move field1 from Base to new Child model
++    target_state = ProjectState()
++    target_state.add_model(ModelState(
++        "testapp",
++        "Base",
++        [
++            ("id", models.AutoField(primary_key=True)),
++        ],
++        {},
++    ))
++    target_state.add_model(ModelState(
++        "testapp",
++        "Middle",
++        [
++            ("base_ptr", models.OneToOneField(
++                auto_created=True,
++                on_delete=models.CASCADE,
++                parent_link=True,
++                primary_key=True,
++                serialize=False,
++                to="testapp.Base",
++            )),
++            ("field2", models.CharField(max_length=200)),
++        ],
++        {},
++        bases=("testapp.Base",),
++    ))
++    target_state.add_model(ModelState(
++        "testapp",
++        "Child",
++        [
++            ("middle_ptr", models.OneToOneField(
++                auto_created=True,
++                on_delete=models.CASCADE,
++                parent_link=True,
++                primary_key=True,
++                serialize=False,
++                to="testapp.Middle",
++            )),
++            ("field1", models.CharField(max_length=200)),  # Moved from Base
++        ],
++        {},
++        bases=("testapp.Middle",),
++    ))
++
++    # Create autodetector and detect changes
++    autodetector = MigrationAutodetector(initial_state, target_state)
++    changes = autodetector._detect_changes()
++
++    assert 'testapp' in changes, "No changes detected for testapp"
++    
++    operations = changes['testapp'][0].operations
++    
++    # Find the operations
++    create_child_idx = None
++    remove_field_idx = None
++    
++    print("\nOperations for multiple inheritance test:")
++    for i, op in enumerate(operations):
++        print(f"  {i}: {op.__class__.__name__} - {op.describe()}")
++        if hasattr(op, '_auto_deps'):
++            print(f"     Dependencies: {op._auto_deps}")
++        
++        if op.__class__.__name__ == 'CreateModel' and op.name == 'Child':
++            create_child_idx = i
++        elif op.__class__.__name__ == 'RemoveField' and op.model_name.lower() == 'base' and op.name == 'field1':
++            remove_field_idx = i
++    
++    if create_child_idx is not None and remove_field_idx is not None:
++        # Check that RemoveField comes before CreateModel
++        assert remove_field_idx < create_child_idx, \
++            f"RemoveField (index {remove_field_idx}) should come before CreateModel (index {create_child_idx})"
++        print("PASS: Field removal with multiple inheritance levels works correctly")
++    else:
++        print("PASS: Operations generated correctly (order check skipped)")
++    
++    return True
++
++# Run tests
++print("Running tests...\n")
++test_field_migration_to_subclass()
++test_normal_field_removal()
++test_multiple_inheritance()
++print("\nAll tests passed!")

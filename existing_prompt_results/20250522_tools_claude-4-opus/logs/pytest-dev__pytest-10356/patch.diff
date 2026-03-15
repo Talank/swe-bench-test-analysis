@@ -1,0 +1,92 @@
+diff --git a/changelog/7767.bugfix.rst b/changelog/7767.bugfix.rst
+new file mode 100644
+index 000000000..d21384cf9
+--- /dev/null
++++ b/changelog/7767.bugfix.rst
+@@ -0,0 +1,2 @@
++Fixed an issue where pytest markers were not collected from all base classes when using multiple inheritance.
++Previously, only markers from the first base class in the MRO were collected. Now, markers from all base classes are properly collected and accessible.
+diff --git a/pyproject.toml b/pyproject.toml
+index fc9a119f6..54b9d0f28 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -57,6 +57,12 @@ markers = [
+     "foo",
+     "bar",
+     "baz",
++    "base",
++    "left",
++    "right",
++    "own",
++    "child",
++    "shared",
+     # conftest.py reorders tests moving slow ones to the end of the list
+     "slow",
+     # experimental mark for all tests using pexpect
+diff --git a/src/_pytest/mark/structures.py b/src/_pytest/mark/structures.py
+index 800a25c92..85630b01c 100644
+--- a/src/_pytest/mark/structures.py
++++ b/src/_pytest/mark/structures.py
+@@ -356,10 +356,28 @@ class MarkDecorator:
+ 
+ 
+ def get_unpacked_marks(obj: object) -> Iterable[Mark]:
+-    """Obtain the unpacked marks that are stored on an object."""
+-    mark_list = getattr(obj, "pytestmark", [])
+-    if not isinstance(mark_list, list):
+-        mark_list = [mark_list]
++    """Obtain the unpacked marks that are stored on an object.
++    
++    If obj is a class, this function will collect marks from all classes
++    in the MRO (Method Resolution Order), following the inheritance chain.
++    """
++    mark_list = []
++    
++    # If obj is a class, collect marks from all classes in MRO
++    if inspect.isclass(obj):
++        for cls in inspect.getmro(obj):
++            # Get marks from each class in MRO
++            cls_marks = getattr(cls, "pytestmark", [])
++            if not isinstance(cls_marks, list):
++                cls_marks = [cls_marks]
++            mark_list.extend(cls_marks)
++    else:
++        # For non-class objects, just get direct marks
++        obj_marks = getattr(obj, "pytestmark", [])
++        if not isinstance(obj_marks, list):
++            obj_marks = [obj_marks]
++        mark_list = obj_marks
++    
+     return normalize_mark_list(mark_list)
+ 
+ 
+diff --git a/testing/test_mark.py b/testing/test_mark.py
+index 65f2581bd..779b37dcb 100644
+--- a/testing/test_mark.py
++++ b/testing/test_mark.py
+@@ -561,6 +561,25 @@ class TestFunctional:
+         items, rec = pytester.inline_genitems(p)
+         self.assert_markers(items, test_foo=("a", "b", "c"), test_bar=("a", "b", "d"))
+ 
++    def test_mark_decorator_multiple_inheritance(self, pytester: Pytester) -> None:
++        """Test that markers from multiple base classes are collected (#7767)."""
++        p = pytester.makepyfile(
++            """
++            import pytest
++
++            @pytest.mark.foo
++            class Foo: pass
++
++            @pytest.mark.bar
++            class Bar: pass
++
++            class TestMultiple(Foo, Bar):
++                def test_it(self): pass
++        """
++        )
++        items, rec = pytester.inline_genitems(p)
++        self.assert_markers(items, test_it=("foo", "bar"))
++
+     def test_mark_closest(self, pytester: Pytester) -> None:
+         p = pytester.makepyfile(
+             """

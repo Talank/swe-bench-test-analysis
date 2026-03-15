@@ -1,0 +1,436 @@
+diff --git a/debug_annotation_select.py b/debug_annotation_select.py
+new file mode 100644
+index 0000000000..301fe3837b
+--- /dev/null
++++ b/debug_annotation_select.py
+@@ -0,0 +1,26 @@
++import os
++import django
++from django.db.models import Value
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++# Create a simple test
++from django.db import models
++from django.db.models import Value
++
++# Use the annotations app models
++from django.apps import apps
++apps.populate(('annotations',))
++
++from annotations.models import Book
++
++# Test query
++qs = Book.objects.filter(pages__gt=400).annotate(book_annotate=Value(1)).alias(book_alias=Value(1))
++
++print("Query annotations:", qs.query.annotations)
++print("Query annotation_select_mask:", qs.query.annotation_select_mask)
++print("Query annotation_select:", qs.query.annotation_select)
++print("Query select:", qs.query.select)
++print("Query has_select_fields:", qs.query.has_select_fields)
++print("Query values_select:", qs.query.values_select)
+diff --git a/debug_subquery.py b/debug_subquery.py
+new file mode 100644
+index 0000000000..8e0d96ce7a
+--- /dev/null
++++ b/debug_subquery.py
+@@ -0,0 +1,27 @@
++import os
++import django
++from django.db.models import F, Value
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++from tests.queries.models import DumbCategory
++
++# Create test data
++DumbCategory.objects.all().delete()
++for i in range(1, 5):
++    DumbCategory.objects.create(id=i)
++
++# Test the subquery
++subquery = DumbCategory.objects.annotate(double_id=F("id") * 2).order_by("id").distinct().values("double_id")[0:2]
++print("Subquery SQL:")
++print(subquery.query)
++print("\nSubquery results:")
++print(list(subquery))
++
++# Test the full query
++full_query = DumbCategory.objects.filter(id__in=subquery).order_by("id")
++print("\nFull query SQL:")
++print(full_query.query)
++print("\nFull query results (ids):")
++print(list(full_query.values_list("id", flat=True)))
+diff --git a/debug_test.py b/debug_test.py
+new file mode 100644
+index 0000000000..5cd85aec01
+--- /dev/null
++++ b/debug_test.py
+@@ -0,0 +1,45 @@
++import os
++import django
++from django.db.models import Value
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++from tests.annotations.models import Book, Publisher
++
++# Check existing data
++print("Publishers:")
++for p in Publisher.objects.all():
++    print(f"  {p.id}: {p.name}")
++
++print("\nBooks:")
++for b in Book.objects.all():
++    print(f"  {b.id}: {b.name} - Pages: {b.pages} - Publisher: {b.publisher.name}")
++
++print("\nBooks with > 400 pages:")
++for b in Book.objects.filter(pages__gt=400):
++    print(f"  {b.id}: {b.name} - Pages: {b.pages} - Publisher: {b.publisher.name}")
++
++# Test the query
++long_books_qs = (
++    Book.objects.filter(
++        pages__gt=400,
++    )
++    .annotate(book_annotate=Value(1))
++    .alias(book_alias=Value(1))
++)
++
++print("\nLong books query SQL:")
++print(long_books_qs.query)
++
++print("\nPublishers with books > 400 pages:")
++publisher_books_qs = (
++    Publisher.objects.filter(
++        book__in=long_books_qs
++    )
++    .values("name")
++)
++print(publisher_books_qs.query)
++print("\nResult:")
++for p in publisher_books_qs:
++    print(f"  {p}")
+diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py
+index 866e38df83..e3bc670c8e 100644
+--- a/django/db/models/lookups.py
++++ b/django/db/models/lookups.py
+@@ -420,7 +420,16 @@ class In(FieldGetDbPrepValueIterableMixin, BuiltinLookup):
+ 
+         if isinstance(self.rhs, Query):
+             self.rhs.clear_ordering(clear_default=True)
+-            if not self.rhs.has_select_fields:
++            # For __in lookups, we only need the primary key in the subquery
++            # unless values() or values_list() has been called to explicitly
++            # select certain fields or annotations.
++            if self.rhs.default_cols:
++                # values() hasn't been called, so we can clear any extra fields
++                # and annotations, and select only the pk
++                self.rhs.clear_select_clause()
++                self.rhs.add_fields(["pk"])
++            elif not self.rhs.has_select_fields:
++                # Original behavior - no select fields at all
+                 self.rhs.clear_select_clause()
+                 self.rhs.add_fields(["pk"])
+         return super().get_prep_lookup()
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..ba30aad4ae
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,105 @@
++import os
++import django
++from django.db.models import Value
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++from tests.annotations.models import Book, Publisher
++
++# Create test data
++publishers = [
++    Publisher.objects.create(name='Apress', num_awards=3),
++    Publisher.objects.create(name='Sams', num_awards=1),
++    Publisher.objects.create(name='Prentice Hall', num_awards=7),
++    Publisher.objects.create(name='Morgan Kaufmann', num_awards=9),
++    Publisher.objects.create(name='Other Publisher', num_awards=2),
++]
++
++books = [
++    Book.objects.create(
++        isbn='1234567890',
++        name='Book 1',
++        pages=450,
++        rating=4.5,
++        price=50.00,
++        publisher=publishers[0],
++        pubdate='2023-01-01',
++        contact_id=1
++    ),
++    Book.objects.create(
++        isbn='1234567891',
++        name='Book 2',
++        pages=500,
++        rating=4.0,
++        price=60.00,
++        publisher=publishers[1],
++        pubdate='2023-01-02',
++        contact_id=1
++    ),
++    Book.objects.create(
++        isbn='1234567892',
++        name='Book 3',
++        pages=600,
++        rating=4.8,
++        price=70.00,
++        publisher=publishers[2],
++        pubdate='2023-01-03',
++        contact_id=1
++    ),
++    Book.objects.create(
++        isbn='1234567893',
++        name='Book 4',
++        pages=700,
++        rating=4.2,
++        price=80.00,
++        publisher=publishers[3],
++        pubdate='2023-01-04',
++        contact_id=1
++    ),
++    Book.objects.create(
++        isbn='1234567894',
++        name='Book 5',
++        pages=300,
++        rating=3.5,
++        price=40.00,
++        publisher=publishers[4],
++        pubdate='2023-01-05',
++        contact_id=1
++    ),
++]
++
++# Test the issue
++try:
++    long_books_qs = (
++        Book.objects.filter(
++            pages__gt=400,
++        )
++        .annotate(book_annotate=Value(1))
++        .alias(book_alias=Value(1))
++    )
++    
++    # Print the SQL to see what's happening
++    print("Long books query SQL:")
++    print(long_books_qs.query)
++    print("\nLong books values:")
++    print(list(long_books_qs.values()))
++    
++    publisher_books_qs = (
++        Publisher.objects.filter(
++            book__in=long_books_qs
++        )
++        .values("name")
++    )
++    
++    print("\nPublisher books query SQL:")
++    print(publisher_books_qs.query)
++    
++    print("\nResult:")
++    result = list(publisher_books_qs)
++    print(result)
++    
++except Exception as e:
++    print(f"\nError: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..ebf1414a6a
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import get_runner
++
++if __name__ == "__main__":
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++    django.setup()
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    
++    # Run our specific test
++    failures = test_runner.run_tests(["annotations.tests.AliasTests.test_annotation_and_alias_filter_in_subquery"])
++    
++    if failures:
++        print("\nTest failed! Let's debug...")
++        # Import after setup
++        from tests.annotations.models import Book
++        from django.db.models import Value
++        
++        # Create the problematic query
++        qs = Book.objects.filter(pages__gt=400).annotate(book_annotate=Value(1)).alias(book_alias=Value(1))
++        
++        print("\nQuery details:")
++        print(f"annotations: {qs.query.annotations}")
++        print(f"annotation_select_mask: {qs.query.annotation_select_mask}")
++        print(f"annotation_select: {qs.query.annotation_select}")
++        print(f"select: {qs.query.select}")
++        print(f"has_select_fields: {qs.query.has_select_fields}")
++        print(f"values_select: {qs.query.values_select}")
++        
++    sys.exit(bool(failures))
+diff --git a/test_values_annotation.py b/test_values_annotation.py
+new file mode 100644
+index 0000000000..6e96b6f589
+--- /dev/null
++++ b/test_values_annotation.py
+@@ -0,0 +1,19 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++if __name__ == "__main__":
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++    django.setup()
++    
++    # Run the specific failing test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    
++    # Run just the failing test
++    failures = test_runner.run_tests(["queries.tests.SubqueryTests.test_distinct_ordered_sliced_subquery"])
++    
++    sys.exit(bool(failures))
+diff --git a/tests/annotations/tests.py b/tests/annotations/tests.py
+index 8de2bf1998..cf8c59a80d 100644
+--- a/tests/annotations/tests.py
++++ b/tests/annotations/tests.py
+@@ -1382,3 +1382,29 @@ class AliasTests(TestCase):
+         )
+         with self.assertRaisesMessage(ValueError, msg):
+             Book.objects.alias(**{crafted_alias: Value(1)})
++
++    def test_annotation_and_alias_filter_in_subquery(self):
++        # Test that __in works correctly with annotate() and alias()
++        # The existing test data has books with pages > 400 (b1=447, b3=1132, b4=946)
++        # all published by Apress
++        long_books_qs = (
++            Book.objects.filter(
++                pages__gt=400,
++            )
++            .annotate(book_annotate=Value(1))
++            .alias(book_alias=Value(1))
++        )
++        publisher_books_qs = (
++            Publisher.objects.filter(
++                book__in=long_books_qs
++            )
++            .values("name")
++            .distinct()
++        )
++        # Should only return Apress since all books with > 400 pages are from Apress
++        self.assertCountEqual(
++            publisher_books_qs,
++            [
++                {'name': 'Apress'},
++            ]
++        )
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 0000000000..2588b66837
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Value
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Define test models
++class Publisher(models.Model):
++    name = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test'
++
++class Book(models.Model):
++    name = models.CharField(max_length=255)
++    pages = models.IntegerField()
++    publisher = models.ForeignKey(Publisher, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Publisher)
++    schema_editor.create_model(Book)
++
++# Create test data
++pub1 = Publisher.objects.create(name='Apress')
++pub2 = Publisher.objects.create(name='Sams')
++
++Book.objects.create(name='Book 1', pages=450, publisher=pub1)
++Book.objects.create(name='Book 2', pages=300, publisher=pub2)
++
++# Test the fix
++print("Testing the fix for __in with annotate() and alias()...")
++
++try:
++    # This was causing "sub-select returns 10 columns - expected 1" error before the fix
++    long_books_qs = (
++        Book.objects.filter(pages__gt=400)
++        .annotate(book_annotate=Value(1))
++        .alias(book_alias=Value(1))
++    )
++    
++    # The key test: using the queryset with annotations in an __in lookup
++    # This should only select the pk, not all the annotations
++    books_in_subquery = Book.objects.filter(id__in=long_books_qs)
++    
++    result = list(books_in_subquery.values_list('name', flat=True))
++    print(f"Books found: {result}")
++    print("✓ Fix is working! No error occurred.")
++    
++    # Verify the result is correct
++    assert result == ['Book 1'], f"Expected ['Book 1'], got {result}"
++    print("✓ Result is correct!")
++    
++except Exception as e:
++    print(f"✗ Error: {type(e).__name__}: {e}")
++    sys.exit(1)
++
++print("\nAll tests passed!")

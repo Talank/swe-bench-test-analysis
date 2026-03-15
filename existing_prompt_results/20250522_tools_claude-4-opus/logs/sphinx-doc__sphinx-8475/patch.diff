@@ -1,0 +1,359 @@
+diff --git a/sphinx/builders/linkcheck.py b/sphinx/builders/linkcheck.py
+index 1dc0337c3..d46bfeb43 100644
+--- a/sphinx/builders/linkcheck.py
++++ b/sphinx/builders/linkcheck.py
+@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlparse
+ 
+ from docutils import nodes
+ from docutils.nodes import Node
+-from requests.exceptions import HTTPError
++from requests.exceptions import HTTPError, TooManyRedirects
+ 
+ from sphinx.application import Sphinx
+ from sphinx.builders import Builder
+@@ -172,9 +172,9 @@ class CheckExternalLinksBuilder(Builder):
+                                                  config=self.app.config, auth=auth_info,
+                                                  **kwargs)
+                         response.raise_for_status()
+-                    except HTTPError:
++                    except (HTTPError, TooManyRedirects):
+                         # retry with GET request if that fails, some servers
+-                        # don't like HEAD requests.
++                        # don't like HEAD requests or have redirect loops on HEAD.
+                         response = requests.get(req_url, stream=True, config=self.app.config,
+                                                 auth=auth_info, **kwargs)
+                         response.raise_for_status()
+diff --git a/test_idr_url.py b/test_idr_url.py
+new file mode 100644
+index 000000000..f66f7d887
+--- /dev/null
++++ b/test_idr_url.py
+@@ -0,0 +1,31 @@
++"""Test that the IDR URL from the problem statement works with our fix"""
++import requests
++from requests.exceptions import TooManyRedirects
++
++url = "https://idr.openmicroscopy.org/webclient/?show=well-119093"
++
++print("Testing URL:", url)
++print()
++
++# Test HEAD request
++print("Testing HEAD request...")
++try:
++    response = requests.head(url, allow_redirects=True, timeout=10)
++    print(f"HEAD request succeeded: {response.status_code}")
++except TooManyRedirects as e:
++    print(f"HEAD request failed with TooManyRedirects: {e}")
++except Exception as e:
++    print(f"HEAD request failed with: {type(e).__name__}: {e}")
++
++print()
++
++# Test GET request
++print("Testing GET request...")
++try:
++    response = requests.get(url, stream=True, timeout=10)
++    print(f"GET request succeeded: {response.status_code}")
++    print(f"Final URL: {response.url}")
++except TooManyRedirects as e:
++    print(f"GET request failed with TooManyRedirects: {e}")
++except Exception as e:
++    print(f"GET request failed with: {type(e).__name__}: {e}")
+diff --git a/test_linkcheck_redirects.py b/test_linkcheck_redirects.py
+new file mode 100644
+index 000000000..b1b69fb98
+--- /dev/null
++++ b/test_linkcheck_redirects.py
+@@ -0,0 +1,79 @@
++"""Test to verify TooManyRedirects fix"""
++import http.server
++import threading
++import time
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from sphinx.builders.linkcheck import CheckExternalLinksBuilder
++import tempfile
++import os
++
++# Create a simple HTTP server that causes infinite redirects on HEAD but works on GET
++class InfiniteRedirectHandler(http.server.BaseHTTPRequestHandler):
++    def do_HEAD(self):
++        # Always redirect HEAD requests to create an infinite loop
++        self.send_response(302)
++        self.send_header('Location', self.path)
++        self.end_headers()
++    
++    def do_GET(self):
++        # GET requests work fine
++        self.send_response(200)
++        self.send_header('Content-Type', 'text/html')
++        self.end_headers()
++        self.wfile.write(b'<html><body>Success!</body></html>')
++    
++    def log_message(self, format, *args):
++        # Suppress log messages
++        pass
++
++def test_too_many_redirects_fallback():
++    # Start a test server
++    server = http.server.HTTPServer(('localhost', 0), InfiniteRedirectHandler)
++    port = server.server_address[1]
++    server_thread = threading.Thread(target=server.serve_forever)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    try:
++        # Create a test document
++        with tempfile.TemporaryDirectory() as tmpdir:
++            srcdir = os.path.join(tmpdir, 'src')
++            os.makedirs(srcdir)
++            
++            # Create conf.py
++            with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++                f.write('extensions = []\n')
++            
++            # Create index.rst with a link to our test server
++            with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++                f.write(f'Test\n====\n\nLink to `test server <http://localhost:{port}/test>`_.\n')
++            
++            # Build with linkcheck
++            outdir = os.path.join(tmpdir, 'out')
++            app = SphinxTestApp(
++                buildername='linkcheck',
++                srcdir=srcdir,
++                builddir=outdir,
++                freshenv=True
++            )
++            app.build()
++            
++            # Check the output
++            output_file = os.path.join(outdir, 'output.txt')
++            if os.path.exists(output_file):
++                with open(output_file, 'r') as f:
++                    output = f.read()
++                    print("Linkcheck output:")
++                    print(output)
++                    # The link should work (not be broken)
++                    assert '[broken]' not in output
++                    print("SUCCESS: Link was not marked as broken!")
++            else:
++                print("ERROR: No output.txt file created")
++                
++    finally:
++        server.shutdown()
++
++if __name__ == '__main__':
++    test_too_many_redirects_fallback()
+diff --git a/test_simple_redirects.py b/test_simple_redirects.py
+new file mode 100644
+index 000000000..b0883ab38
+--- /dev/null
++++ b/test_simple_redirects.py
+@@ -0,0 +1,16 @@
++"""Simple test to show the TooManyRedirects issue"""
++from requests.exceptions import TooManyRedirects, HTTPError
++
++# Show that TooManyRedirects is not caught by HTTPError
++try:
++    raise TooManyRedirects("Too many redirects")
++except HTTPError as e:
++    print("Caught as HTTPError:", e)
++except TooManyRedirects as e:
++    print("TooManyRedirects is NOT a subclass of HTTPError!")
++    print("This is why the GET fallback doesn't work in the current code")
++    
++# Show the inheritance hierarchy
++print("\nInheritance hierarchy:")
++print("HTTPError:", HTTPError.__bases__)
++print("TooManyRedirects:", TooManyRedirects.__bases__)
+diff --git a/test_too_many_redirects.py b/test_too_many_redirects.py
+new file mode 100644
+index 000000000..292e1a56d
+--- /dev/null
++++ b/test_too_many_redirects.py
+@@ -0,0 +1,100 @@
++"""Test script to reproduce the TooManyRedirects issue"""
++import sys
++from unittest.mock import Mock, patch
++from requests.exceptions import TooManyRedirects
++from sphinx.builders.linkcheck import CheckExternalLinksBuilder
++from sphinx.application import Sphinx
++import tempfile
++import os
++
++# Create a mock Sphinx app
++app = Mock()
++app.srcdir = '/fake/src'
++app.confdir = '/fake/conf'
++app.outdir = '/fake/out'
++app.doctreedir = '/fake/doctree'
++app.config = Mock()
++app.config.linkcheck_ignore = []
++app.config.linkcheck_anchors_ignore = []
++app.config.linkcheck_auth = []
++app.config.linkcheck_workers = 1
++app.config.linkcheck_timeout = None
++app.config.linkcheck_retries = 1
++app.config.linkcheck_anchors = True
++app.config.linkcheck_request_headers = {}
++app.events = Mock()
++app.events.emit = Mock()
++
++# Create a temporary directory for output
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Create the builder
++    builder = CheckExternalLinksBuilder(app)
++    builder.outdir = tmpdir
++    builder.env = Mock()
++    builder.env.doc2path = Mock(return_value='/fake/path')
++    
++    # Initialize the builder
++    builder.init()
++    
++    # Mock the requests module to simulate TooManyRedirects on HEAD request
++    with patch('sphinx.builders.linkcheck.requests') as mock_requests:
++        # Configure HEAD request to raise TooManyRedirects
++        mock_requests.head.side_effect = TooManyRedirects("Too many redirects")
++        
++        # Configure GET request to succeed
++        mock_response = Mock()
++        mock_response.status_code = 200
++        mock_response.url = 'https://example.com'
++        mock_response.history = []
++        mock_requests.get.return_value = mock_response
++        
++        # Test the check_uri function
++        # We need to access the check_uri function from within check_thread
++        # Let's simulate what happens in check_thread
++        
++        uri = 'https://example.com'
++        
++        # Execute the check logic
++        kwargs = {}
++        
++        def get_request_headers():
++            return {}
++        
++        def check_uri():
++            req_url = uri
++            anchor = None
++            auth_info = None
++            kwargs['headers'] = get_request_headers()
++            
++            try:
++                if anchor and app.config.linkcheck_anchors:
++                    response = mock_requests.get(req_url, stream=True, config=app.config,
++                                                auth=auth_info, **kwargs)
++                    response.raise_for_status()
++                else:
++                    try:
++                        # try a HEAD request first
++                        response = mock_requests.head(req_url, allow_redirects=True,
++                                                     config=app.config, auth=auth_info,
++                                                     **kwargs)
++                        response.raise_for_status()
++                    except Exception as e:
++                        print(f"HEAD request failed with: {type(e).__name__}: {e}")
++                        # This is where the bug is - TooManyRedirects is not caught here
++                        # because it's not an HTTPError
++                        raise
++            except Exception as err:
++                return 'broken', str(err), 0
++            
++            if response.url.rstrip('/') == req_url.rstrip('/'):
++                return 'working', '', 0
++            else:
++                return 'redirected', response.url, 0
++        
++        # Run the check
++        try:
++            status, info, code = check_uri()
++            print(f"Result: status={status}, info={info}, code={code}")
++        except TooManyRedirects as e:
++            print(f"TooManyRedirects was not caught! {e}")
++            print("This demonstrates the bug - TooManyRedirects should trigger GET fallback")
+diff --git a/tests/test_build_linkcheck.py b/tests/test_build_linkcheck.py
+index c09c81fe0..fb2daa65a 100644
+--- a/tests/test_build_linkcheck.py
++++ b/tests/test_build_linkcheck.py
+@@ -382,3 +382,79 @@ def test_connect_to_selfsigned_nonexistent_cert_file(app):
+         "uri": "https://localhost:7777/",
+         "info": "Could not find a suitable TLS CA certificate bundle, invalid path: does/not/exist",
+     }
++
++
++def make_too_many_redirects_handler(*, support_head):
++    """Handler that creates infinite redirect loop on HEAD but works on GET"""
++    class TooManyRedirectsHandler(http.server.BaseHTTPRequestHandler):
++        def do_HEAD(self):
++            if support_head:
++                # For HEAD requests, always redirect to create infinite loop
++                self.send_response(302, "Found")
++                self.send_header("Location", self.path)
++                self.end_headers()
++            else:
++                self.send_response(405, "Method Not Allowed")
++                self.end_headers()
++
++        def do_GET(self):
++            # GET requests work fine
++            self.send_response(200, "OK")
++            self.send_header("Content-Type", "text/html")
++            self.end_headers()
++            self.wfile.write(b"<html><body>Success!</body></html>")
++
++        def log_date_time_string(self):
++            """Strip date and time from logged messages for assertions."""
++            return ""
++
++    return TooManyRedirectsHandler
++
++
++@pytest.mark.sphinx('linkcheck', testroot='linkcheck-localserver', freshenv=True)
++def test_too_many_redirects_fallback_to_GET(app):
++    """Test that TooManyRedirects on HEAD falls back to GET request."""
++    with http_server(make_too_many_redirects_handler(support_head=True)):
++        app.builder.build_all()
++    
++    # Check output.json to verify the link is working
++    with open(app.outdir / 'output.json') as fp:
++        content = json.load(fp)
++    assert content['status'] == 'working'
++    assert content['uri'] == 'http://localhost:7777/'
++
++
++def make_both_fail_redirects_handler():
++    """Handler that creates infinite redirect loop on both HEAD and GET"""
++    class BothFailRedirectsHandler(http.server.BaseHTTPRequestHandler):
++        def do_HEAD(self):
++            # Always redirect to create infinite loop
++            self.send_response(302, "Found")
++            self.send_header("Location", self.path)
++            self.end_headers()
++
++        def do_GET(self):
++            # Also redirect on GET to create infinite loop
++            self.send_response(302, "Found")
++            self.send_header("Location", self.path)
++            self.end_headers()
++
++        def log_date_time_string(self):
++            """Strip date and time from logged messages for assertions."""
++            return ""
++
++    return BothFailRedirectsHandler
++
++
++@pytest.mark.sphinx('linkcheck', testroot='linkcheck-localserver', freshenv=True)
++def test_too_many_redirects_on_both_HEAD_and_GET(app):
++    """Test that TooManyRedirects on both HEAD and GET marks link as broken."""
++    with http_server(make_both_fail_redirects_handler()):
++        app.builder.build_all()
++    
++    # Check output.json to verify the link is broken
++    with open(app.outdir / 'output.json') as fp:
++        content = json.load(fp)
++    assert content['status'] == 'broken'
++    assert 'redirect' in content['info'].lower()
++    assert content['uri'] == 'http://localhost:7777/'

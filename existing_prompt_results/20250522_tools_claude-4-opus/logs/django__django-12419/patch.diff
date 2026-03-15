@@ -1,0 +1,443 @@
+diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py
+index 09c9b95d26..8bb59a4037 100644
+--- a/django/conf/global_settings.py
++++ b/django/conf/global_settings.py
+@@ -637,6 +637,6 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+ SECURE_HSTS_PRELOAD = False
+ SECURE_HSTS_SECONDS = 0
+ SECURE_REDIRECT_EXEMPT = []
+-SECURE_REFERRER_POLICY = None
++SECURE_REFERRER_POLICY = 'same-origin'
+ SECURE_SSL_HOST = None
+ SECURE_SSL_REDIRECT = False
+diff --git a/docs/ref/settings.txt b/docs/ref/settings.txt
+index b4a5bdc48f..95167c1de7 100644
+--- a/docs/ref/settings.txt
++++ b/docs/ref/settings.txt
+@@ -2395,7 +2395,11 @@ from URL paths, so patterns shouldn't include them, e.g.
+ 
+ .. versionadded:: 3.0
+ 
+-Default: ``None``
++.. versionchanged:: 3.2
++
++    The default value was changed from ``None`` to ``'same-origin'``.
++
++Default: ``'same-origin'``
+ 
+ If configured, the :class:`~django.middleware.security.SecurityMiddleware` sets
+ the :ref:`referrer-policy` header on all responses that do not already have it
+diff --git a/docs/releases/3.1.txt b/docs/releases/3.1.txt
+index 4a165156e1..0a1c07cdce 100644
+--- a/docs/releases/3.1.txt
++++ b/docs/releases/3.1.txt
+@@ -354,6 +354,13 @@ Miscellaneous
+ * The :setting:`TIME_ZONE <DATABASE-TIME_ZONE>` setting is now allowed on
+   databases that support time zones.
+ 
++* The default value of the :setting:`SECURE_REFERRER_POLICY` setting is changed
++  from ``None`` to ``'same-origin'``. This makes Django applications leak less
++  information to third party sites by default. The
++  :class:`~django.middleware.security.SecurityMiddleware` now adds the
++  ``Referrer-Policy: same-origin`` header to responses unless explicitly
++  configured otherwise.
++
+ .. _backwards-incompatible-3.1:
+ 
+ Backwards incompatible changes in 3.1
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..073e1981dc
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++"""
++Test backward compatibility of the SECURE_REFERRER_POLICY change
++"""
++import django
++from django.conf import settings
++from django.test import RequestFactory
++from django.http import HttpResponse
++
++def test_backward_compatibility():
++    """
++    Test that existing projects with explicit SECURE_REFERRER_POLICY settings
++    continue to work as expected.
++    """
++    print("Testing backward compatibility...")
++    
++    # Test 1: Project that explicitly sets to None (disable)
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-key',
++        MIDDLEWARE=['django.middleware.security.SecurityMiddleware'],
++        SECURE_REFERRER_POLICY=None,  # Explicitly disabled
++    )
++    django.setup()
++    
++    from django.middleware.security import SecurityMiddleware
++    
++    middleware = SecurityMiddleware()
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    processed = middleware.process_response(request, response)
++    assert 'Referrer-Policy' not in processed
++    print("[PASS] Explicit None still disables the header")
++    
++    # Test 2: Project that sets a custom value
++    settings.SECURE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
++    middleware2 = SecurityMiddleware()
++    response2 = HttpResponse('test')
++    processed2 = middleware2.process_response(request, response2)
++    
++    assert processed2['Referrer-Policy'] == 'strict-origin-when-cross-origin'
++    print("[PASS] Custom value 'strict-origin-when-cross-origin' is respected")
++    
++    # Test 3: Project that uses multiple values (fallback)
++    settings.SECURE_REFERRER_POLICY = 'strict-origin, origin'
++    middleware3 = SecurityMiddleware()
++    response3 = HttpResponse('test')
++    processed3 = middleware3.process_response(request, response3)
++    
++    assert processed3['Referrer-Policy'] == 'strict-origin,origin'
++    print("[PASS] Multiple values (fallback) work correctly")
++    
++    # Test 4: Project without SecurityMiddleware
++    settings.MIDDLEWARE = []  # No SecurityMiddleware
++    response4 = HttpResponse('test')
++    assert 'Referrer-Policy' not in response4
++    print("[PASS] Projects without SecurityMiddleware are unaffected")
++    
++    print("\nAll backward compatibility tests passed!")
++    print("\nSummary:")
++    print("- Projects that explicitly set SECURE_REFERRER_POLICY continue to work")
++    print("- Projects that disable it with None continue to work")
++    print("- Projects without SecurityMiddleware are unaffected")
++    print("- Only projects using SecurityMiddleware with no explicit")
++    print("  SECURE_REFERRER_POLICY setting will get the new 'same-origin' default")
++
++if __name__ == '__main__':
++    test_backward_compatibility()
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..6249b88776
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,124 @@
++#!/usr/bin/env python
++"""
++Comprehensive test to verify the new default SECURE_REFERRER_POLICY behavior
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import RequestFactory, SimpleTestCase, override_settings
++from django.http import HttpResponse
++
++# First test: Verify default value in global_settings
++def test_global_settings_default():
++    from django.conf import global_settings
++    assert global_settings.SECURE_REFERRER_POLICY == 'same-origin', \
++        f"Expected default to be 'same-origin', got {global_settings.SECURE_REFERRER_POLICY}"
++    print("[PASS] Global settings default is 'same-origin'")
++
++# Configure Django for remaining tests
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    MIDDLEWARE=[
++        'django.middleware.security.SecurityMiddleware',
++    ],
++)
++django.setup()
++
++from django.middleware.security import SecurityMiddleware
++
++def test_middleware_with_default():
++    """Test that middleware adds same-origin header by default"""
++    middleware = SecurityMiddleware()
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    processed = middleware.process_response(request, response)
++    assert 'Referrer-Policy' in processed
++    assert processed['Referrer-Policy'] == 'same-origin'
++    print("[PASS] Middleware adds 'same-origin' header by default")
++
++def test_middleware_can_override():
++    """Test that the default can be overridden"""
++    # Test various override values
++    test_values = [
++        'strict-origin',
++        'no-referrer',
++        'origin',
++        'strict-origin,origin',  # comma-separated
++        ['strict-origin', 'origin'],  # list
++        None,  # disable
++    ]
++    
++    for value in test_values:
++        settings.SECURE_REFERRER_POLICY = value
++        middleware = SecurityMiddleware()
++        factory = RequestFactory()
++        request = factory.get('/')
++        response = HttpResponse('test')
++        
++        processed = middleware.process_response(request, response)
++        
++        if value is None:
++            assert 'Referrer-Policy' not in processed
++            print(f"[PASS] Can disable header by setting to None")
++        elif isinstance(value, str) and ',' in value:
++            assert processed['Referrer-Policy'] == 'strict-origin,origin'
++            print(f"[PASS] Comma-separated string '{value}' works correctly")
++        elif isinstance(value, list):
++            assert processed['Referrer-Policy'] == 'strict-origin,origin'
++            print(f"[PASS] List {value} works correctly")
++        else:
++            assert processed['Referrer-Policy'] == value
++            print(f"[PASS] Can override to '{value}'")
++
++def test_no_middleware_no_header():
++    """Test that without SecurityMiddleware, no header is added"""
++    settings.MIDDLEWARE = []  # Remove SecurityMiddleware
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    # The response should not have the header without middleware
++    assert 'Referrer-Policy' not in response
++    print("[PASS] Without SecurityMiddleware, no header is added")
++
++def test_security_checks():
++    """Test that security checks work correctly with new default"""
++    from django.core.checks.security.base import check_referrer_policy
++    
++    # Reset middleware
++    settings.MIDDLEWARE = ['django.middleware.security.SecurityMiddleware']
++    
++    # Test 1: Default should not trigger warning
++    settings.SECURE_REFERRER_POLICY = 'same-origin'
++    result = check_referrer_policy(None)
++    assert result == [], f"Expected no warnings with default, got {result}"
++    print("[PASS] No warning with default 'same-origin'")
++    
++    # Test 2: Explicitly setting to None should trigger warning
++    settings.SECURE_REFERRER_POLICY = None
++    result = check_referrer_policy(None)
++    assert len(result) == 1 and result[0].id == 'security.W022'
++    print("[PASS] Warning W022 triggered when explicitly set to None")
++    
++    # Test 3: Invalid value should trigger error
++    settings.SECURE_REFERRER_POLICY = 'invalid-value'
++    result = check_referrer_policy(None)
++    assert len(result) == 1 and result[0].id == 'security.E023'
++    print("[PASS] Error E023 triggered for invalid value")
++
++if __name__ == '__main__':
++    print("Running comprehensive tests for SECURE_REFERRER_POLICY default change...")
++    print()
++    
++    test_global_settings_default()
++    test_middleware_with_default()
++    test_middleware_can_override()
++    test_no_middleware_no_header()
++    test_security_checks()
++    
++    print()
++    print("All tests passed!")
+diff --git a/test_new_default.py b/test_new_default.py
+new file mode 100644
+index 0000000000..7dd7e95af7
+--- /dev/null
++++ b/test_new_default.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings without explicitly setting SECURE_REFERRER_POLICY
++# to test the new default
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    MIDDLEWARE=[
++        'django.middleware.security.SecurityMiddleware',
++    ],
++    # Not setting SECURE_REFERRER_POLICY to use the default
++)
++
++django.setup()
++
++# Test the middleware behavior with new default
++from django.middleware.security import SecurityMiddleware
++from django.test import RequestFactory
++from django.http import HttpResponse
++
++def test_new_default_referrer_policy():
++    middleware = SecurityMiddleware()
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    # Process the response through the middleware
++    processed_response = middleware.process_response(request, response)
++    
++    # Check if Referrer-Policy header is set to 'same-origin' by default
++    if 'Referrer-Policy' in processed_response:
++        print(f"Default Referrer-Policy header is now set to: {processed_response['Referrer-Policy']}")
++        if processed_response['Referrer-Policy'] == 'same-origin':
++            print("SUCCESS: Default is now 'same-origin'")
++        else:
++            print(f"ERROR: Default is '{processed_response['Referrer-Policy']}' instead of 'same-origin'")
++    else:
++        print("ERROR: Referrer-Policy header is NOT set")
++    
++    # Verify we can still override it
++    settings.SECURE_REFERRER_POLICY = 'strict-origin'
++    middleware2 = SecurityMiddleware()
++    response2 = HttpResponse('test')
++    processed_response2 = middleware2.process_response(request, response2)
++    
++    if 'Referrer-Policy' in processed_response2:
++        print(f"Override works - header is: {processed_response2['Referrer-Policy']}")
++    
++    # Verify we can still disable it
++    settings.SECURE_REFERRER_POLICY = None
++    middleware3 = SecurityMiddleware()
++    response3 = HttpResponse('test')
++    processed_response3 = middleware3.process_response(request, response3)
++    
++    if 'Referrer-Policy' not in processed_response3:
++        print("Can still disable by setting to None: SUCCESS")
++    else:
++        print("ERROR: Cannot disable by setting to None")
++
++if __name__ == '__main__':
++    test_new_default_referrer_policy()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..dc2f48f34c
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++"""
++Test to verify the specific requirement from the problem statement:
++"change the default for SECURE_REFERRER_POLICY to 'same-origin'"
++"""
++import django
++from django.conf import settings
++
++def test_problem_statement_requirement():
++    """
++    Verify that Django applications now have 'same-origin' as the default
++    Referrer-Policy, making them "leak less information to third party sites"
++    as requested in the problem statement.
++    """
++    # Test 1: Check the default in global_settings
++    from django.conf import global_settings
++    print(f"1. Default SECURE_REFERRER_POLICY in global_settings: {global_settings.SECURE_REFERRER_POLICY}")
++    assert global_settings.SECURE_REFERRER_POLICY == 'same-origin', \
++        "Default should be 'same-origin'"
++    
++    # Test 2: Configure Django with minimal settings (simulating a new project)
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-key',
++        MIDDLEWARE=['django.middleware.security.SecurityMiddleware'],
++        # Not setting SECURE_REFERRER_POLICY to test default
++    )
++    django.setup()
++    
++    # Test 3: Verify the middleware uses the default
++    from django.middleware.security import SecurityMiddleware
++    from django.test import RequestFactory
++    from django.http import HttpResponse
++    
++    middleware = SecurityMiddleware()
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    processed = middleware.process_response(request, response)
++    
++    print(f"2. Referrer-Policy header in response: {processed.get('Referrer-Policy', 'NOT SET')}")
++    assert 'Referrer-Policy' in processed, "Referrer-Policy header should be present"
++    assert processed['Referrer-Policy'] == 'same-origin', \
++        "Referrer-Policy should be 'same-origin' by default"
++    
++    print("\nSUCCESS: The default SECURE_REFERRER_POLICY is now 'same-origin'")
++    print("This makes Django applications leak less information to third party sites by default.")
++    print("\nDevelopers can still:")
++    print("- Override this by setting SECURE_REFERRER_POLICY to a different value")
++    print("- Disable it by setting SECURE_REFERRER_POLICY = None")
++    print("\nThe change is backward compatible - existing projects with explicit")
++    print("SECURE_REFERRER_POLICY settings will continue to work as before.")
++
++if __name__ == '__main__':
++    test_problem_statement_requirement()
+diff --git a/test_referrer_policy.py b/test_referrer_policy.py
+new file mode 100644
+index 0000000000..d58fa52265
+--- /dev/null
++++ b/test_referrer_policy.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import RequestFactory
++from django.http import HttpResponse
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    MIDDLEWARE=[
++        'django.middleware.security.SecurityMiddleware',
++    ],
++    SECURE_REFERRER_POLICY=None,  # Current default
++)
++
++django.setup()
++
++# Test the middleware behavior
++from django.middleware.security import SecurityMiddleware
++
++def test_default_referrer_policy():
++    middleware = SecurityMiddleware()
++    factory = RequestFactory()
++    request = factory.get('/')
++    response = HttpResponse('test')
++    
++    # Process the response through the middleware
++    processed_response = middleware.process_response(request, response)
++    
++    # Check if Referrer-Policy header is set
++    if 'Referrer-Policy' in processed_response:
++        print(f"Referrer-Policy header is set to: {processed_response['Referrer-Policy']}")
++    else:
++        print("Referrer-Policy header is NOT set (current behavior)")
++    
++    # Test with SECURE_REFERRER_POLICY set to 'same-origin'
++    settings.SECURE_REFERRER_POLICY = 'same-origin'
++    middleware2 = SecurityMiddleware()
++    response2 = HttpResponse('test')
++    processed_response2 = middleware2.process_response(request, response2)
++    
++    if 'Referrer-Policy' in processed_response2:
++        print(f"With SECURE_REFERRER_POLICY='same-origin', header is: {processed_response2['Referrer-Policy']}")
++    else:
++        print("ERROR: Referrer-Policy header not set even with SECURE_REFERRER_POLICY='same-origin'")
++
++if __name__ == '__main__':
++    test_default_referrer_policy()

@@ -1,0 +1,439 @@
+diff --git a/check_iso_year.py b/check_iso_year.py
+new file mode 100644
+index 0000000000..c10ef84873
+--- /dev/null
++++ b/check_iso_year.py
+@@ -0,0 +1,19 @@
++from datetime import date, datetime
++
++# Check ISO year for specific dates
++test_dates = [
++    date(2020, 12, 27),  # Sunday
++    date(2020, 12, 28),  # Monday  
++    date(2020, 12, 29),  # Tuesday
++    date(2020, 12, 30),  # Wednesday
++    date(2020, 12, 31),  # Thursday
++    date(2021, 1, 1),    # Friday
++    date(2021, 1, 2),    # Saturday
++    date(2021, 1, 3),    # Sunday
++    date(2021, 1, 4),    # Monday
++]
++
++print("Date -> ISO Year (using isocalendar):")
++for d in test_dates:
++    iso_year, iso_week, iso_weekday = d.isocalendar()
++    print(f"{d} ({d.strftime('%A')}) -> ISO year: {iso_year}, ISO week: {iso_week}")
+diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py
+index 916478d075..0bfd80e078 100644
+--- a/django/db/models/lookups.py
++++ b/django/db/models/lookups.py
+@@ -549,7 +549,9 @@ class YearLookup(Lookup):
+     def as_sql(self, compiler, connection):
+         # Avoid the extract operation if the rhs is a direct value to allow
+         # indexes to be used.
+-        if self.rhs_is_direct_value():
++        # However, don't do this optimization for ExtractIsoYear because
++        # ISO year boundaries don't align with calendar year boundaries.
++        if self.rhs_is_direct_value() and getattr(self.lhs, 'lookup_name', None) != 'iso_year':
+             # Skip the extract part by directly using the originating field,
+             # that is self.lhs.lhs.
+             lhs_sql, params = self.process_lhs(compiler, connection, self.lhs.lhs)
+diff --git a/test_iso_year_comprehensive.py b/test_iso_year_comprehensive.py
+new file mode 100644
+index 0000000000..90c183f002
+--- /dev/null
++++ b/test_iso_year_comprehensive.py
+@@ -0,0 +1,137 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from datetime import date
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    date_field = models.DateField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue with comprehensive edge cases
++from django.db.models.functions import ExtractIsoYear
++
++# Create test data for various edge cases
++test_dates = [
++    # ISO year 2019
++    (date(2018, 12, 31), 2019),  # Monday - ISO year 2019, regular year 2018
++    (date(2019, 1, 1), 2019),     # Tuesday - ISO year 2019, regular year 2019
++    (date(2019, 12, 29), 2019),   # Sunday - ISO year 2019, regular year 2019
++    
++    # ISO year 2020
++    (date(2019, 12, 30), 2020),   # Monday - ISO year 2020, regular year 2019
++    (date(2020, 1, 1), 2020),     # Wednesday - ISO year 2020, regular year 2020
++    (date(2020, 12, 27), 2020),   # Sunday - ISO year 2020, regular year 2020
++    
++    # ISO year 2021
++    (date(2020, 12, 28), 2021),   # Monday - ISO year 2021, regular year 2020
++    (date(2021, 1, 4), 2021),     # Monday - ISO year 2021, regular year 2021
++    (date(2021, 12, 31), 2021),   # Friday - ISO year 2021, regular year 2021
++    
++    # ISO year 2022
++    (date(2022, 1, 3), 2022),     # Monday - ISO year 2022, regular year 2022
++    (date(2022, 12, 31), 2022),   # Saturday - ISO year 2022, regular year 2022
++    
++    # ISO year 2023
++    (date(2023, 1, 2), 2023),     # Monday - ISO year 2023, regular year 2023
++]
++
++for date_val, expected_iso_year in test_dates:
++    TestModel.objects.create(date_field=date_val)
++
++print("Testing ISO year edge cases:")
++print("=" * 60)
++
++# Test each ISO year
++for test_year in [2019, 2020, 2021, 2022, 2023]:
++    print(f"\nTesting ISO year {test_year}:")
++    
++    # Using annotation
++    qs_annotated = TestModel.objects.annotate(
++        iso_year=ExtractIsoYear('date_field')
++    ).filter(iso_year=test_year).order_by('date_field')
++    
++    # Using lookup
++    qs_lookup = TestModel.objects.filter(
++        date_field__iso_year=test_year
++    ).order_by('date_field')
++    
++    # Both should return the same results
++    annotated_dates = list(qs_annotated.values_list('date_field', flat=True))
++    lookup_dates = list(qs_lookup.values_list('date_field', flat=True))
++    
++    print(f"  Annotated query count: {len(annotated_dates)}")
++    print(f"  Lookup query count: {len(lookup_dates)}")
++    print(f"  Dates match: {annotated_dates == lookup_dates}")
++    
++    if annotated_dates != lookup_dates:
++        print(f"  ERROR: Results don't match!")
++        print(f"  Annotated: {annotated_dates}")
++        print(f"  Lookup: {lookup_dates}")
++    else:
++        print(f"  Dates found: {annotated_dates}")
++
++# Test comparison operators
++print("\n\nTesting comparison operators:")
++print("=" * 60)
++
++# Test __gt
++print("\nTesting date_field__iso_year__gt=2020:")
++qs = TestModel.objects.filter(date_field__iso_year__gt=2020).order_by('date_field')
++dates = list(qs.values_list('date_field', flat=True))
++print(f"  Found {len(dates)} dates: {dates}")
++
++# Test __gte  
++print("\nTesting date_field__iso_year__gte=2020:")
++qs = TestModel.objects.filter(date_field__iso_year__gte=2020).order_by('date_field')
++dates = list(qs.values_list('date_field', flat=True))
++print(f"  Found {len(dates)} dates: {dates}")
++
++# Test __lt
++print("\nTesting date_field__iso_year__lt=2021:")
++qs = TestModel.objects.filter(date_field__iso_year__lt=2021).order_by('date_field')
++dates = list(qs.values_list('date_field', flat=True))
++print(f"  Found {len(dates)} dates: {dates}")
++
++# Test __lte
++print("\nTesting date_field__iso_year__lte=2021:")
++qs = TestModel.objects.filter(date_field__iso_year__lte=2021).order_by('date_field')
++dates = list(qs.values_list('date_field', flat=True))
++print(f"  Found {len(dates)} dates: {dates}")
++
++# Verify SQL doesn't use BETWEEN for iso_year
++print("\n\nVerifying SQL queries:")
++print("=" * 60)
++qs = TestModel.objects.filter(date_field__iso_year=2020)
++sql = str(qs.query)
++print(f"ISO year lookup SQL: {sql}")
++print(f"Uses BETWEEN: {'BETWEEN' in sql}")
++print(f"Uses extract: {'extract' in sql.lower() or 'django_date_extract' in sql}")
+diff --git a/test_iso_year_datetime.py b/test_iso_year_datetime.py
+new file mode 100644
+index 0000000000..c6e0b84714
+--- /dev/null
++++ b/test_iso_year_datetime.py
+@@ -0,0 +1,68 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from datetime import datetime
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    datetime_field = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test with datetime fields
++from django.db.models.functions import ExtractIsoYear
++
++# Create test data
++TestModel.objects.create(datetime_field=datetime(2019, 12, 30, 10, 30))  # ISO year 2020
++TestModel.objects.create(datetime_field=datetime(2020, 1, 1, 15, 45))    # ISO year 2020
++TestModel.objects.create(datetime_field=datetime(2020, 12, 28, 9, 0))   # ISO year 2020
++TestModel.objects.create(datetime_field=datetime(2021, 1, 4, 14, 0))    # ISO year 2021
++
++print("Testing ISO year with datetime fields:")
++print("=" * 60)
++
++# Test with lookup
++qs = TestModel.objects.filter(datetime_field__iso_year=2020).order_by('datetime_field')
++print(f"\nUsing __iso_year=2020 lookup:")
++print(f"Count: {qs.count()}")
++for obj in qs:
++    print(f"  DateTime: {obj.datetime_field}")
++
++print(f"\nSQL: {str(qs.query)}")
++sql = str(qs.query)
++print(f"Uses BETWEEN: {'BETWEEN' in sql}")
++print(f"Uses extract: {'extract' in sql.lower() or 'django_datetime_extract' in sql}")
++
++# Test comparison operators
++print("\n\nTesting __iso_year__gte=2020:")
++qs = TestModel.objects.filter(datetime_field__iso_year__gte=2020).order_by('datetime_field')
++print(f"Count: {qs.count()}")
++for obj in qs:
++    print(f"  DateTime: {obj.datetime_field}")
+diff --git a/test_iso_year_issue.py b/test_iso_year_issue.py
+new file mode 100644
+index 0000000000..5d99d23696
+--- /dev/null
++++ b/test_iso_year_issue.py
+@@ -0,0 +1,81 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from datetime import date
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    date_field = models.DateField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue
++from django.db.models.functions import ExtractIsoYear
++
++# Create test data
++# Date: 2019-12-30 (Monday) - ISO year 2020, regular year 2019
++# Date: 2020-01-01 (Wednesday) - ISO year 2020, regular year 2020
++# Date: 2020-12-28 (Monday) - ISO year 2020, regular year 2020
++# Date: 2021-01-03 (Sunday) - ISO year 2020, regular year 2021
++# Date: 2021-01-04 (Monday) - ISO year 2021, regular year 2021
++
++TestModel.objects.create(date_field=date(2019, 12, 30))  # ISO year 2020
++TestModel.objects.create(date_field=date(2020, 1, 1))    # ISO year 2020
++TestModel.objects.create(date_field=date(2020, 12, 28))  # ISO year 2020
++TestModel.objects.create(date_field=date(2021, 1, 3))    # ISO year 2020
++TestModel.objects.create(date_field=date(2021, 1, 4))    # ISO year 2021
++
++# Test annotation
++print("Testing annotation with ExtractIsoYear:")
++qs = TestModel.objects.annotate(iso_year=ExtractIsoYear('date_field')).order_by('date_field')
++for obj in qs:
++    print(f"Date: {obj.date_field}, ISO Year: {obj.iso_year}")
++
++print("\nSQL for annotation:")
++print(qs.query)
++
++# Test filter with explicit annotation
++print("\n\nTesting filter with explicit annotation (iso_year=2020):")
++qs_filtered = qs.filter(iso_year=2020)
++print(f"Count: {qs_filtered.count()}")
++print("SQL for filtered query:")
++print(qs_filtered.query)
++
++# Test filter with lookup
++print("\n\nTesting filter with __iso_year lookup (date_field__iso_year=2020):")
++qs_lookup = TestModel.objects.filter(date_field__iso_year=2020).order_by('date_field')
++print(f"Count: {qs_lookup.count()}")
++for obj in qs_lookup:
++    print(f"Date: {obj.date_field}")
++print("SQL for lookup query:")
++print(qs_lookup.query)
++
++# Expected: 4 records (2019-12-30, 2020-01-01, 2020-12-28, 2021-01-03)
++# If using BETWEEN 2020-01-01 AND 2020-12-31, we'll only get 2 records (2020-01-01, 2020-12-28)
+diff --git a/tests/db_functions/datetime/test_extract_trunc.py b/tests/db_functions/datetime/test_extract_trunc.py
+index 258600127f..9b165c8c77 100644
+--- a/tests/db_functions/datetime/test_extract_trunc.py
++++ b/tests/db_functions/datetime/test_extract_trunc.py
+@@ -108,20 +108,38 @@ class DateFunctionTests(TestCase):
+                 qs = DTModel.objects.filter(**{'start_datetime__%s__exact' % lookup: 2015})
+                 self.assertEqual(qs.count(), 1)
+                 query_string = str(qs.query).lower()
+-                self.assertEqual(query_string.count(' between '), 1)
+-                self.assertEqual(query_string.count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 0)
++                    self.assertEqual(query_string.count('extract'), 1)
++                else:
++                    # regular year should use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 1)
++                    self.assertEqual(query_string.count('extract'), 0)
+                 # exact is implied and should be the same
+                 qs = DTModel.objects.filter(**{'start_datetime__%s' % lookup: 2015})
+                 self.assertEqual(qs.count(), 1)
+                 query_string = str(qs.query).lower()
+-                self.assertEqual(query_string.count(' between '), 1)
+-                self.assertEqual(query_string.count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 0)
++                    self.assertEqual(query_string.count('extract'), 1)
++                else:
++                    # regular year should use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 1)
++                    self.assertEqual(query_string.count('extract'), 0)
+                 # date and datetime fields should behave the same
+                 qs = DTModel.objects.filter(**{'start_date__%s' % lookup: 2015})
+                 self.assertEqual(qs.count(), 1)
+                 query_string = str(qs.query).lower()
+-                self.assertEqual(query_string.count(' between '), 1)
+-                self.assertEqual(query_string.count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 0)
++                    self.assertEqual(query_string.count('extract'), 1)
++                else:
++                    # regular year should use BETWEEN optimization
++                    self.assertEqual(query_string.count(' between '), 1)
++                    self.assertEqual(query_string.count('extract'), 0)
+                 # an expression rhs cannot use the between optimization.
+                 qs = DTModel.objects.annotate(
+                     start_year=ExtractYear('start_datetime'),
+@@ -144,10 +162,20 @@ class DateFunctionTests(TestCase):
+             with self.subTest(lookup):
+                 qs = DTModel.objects.filter(**{'start_datetime__%s__gt' % lookup: 2015})
+                 self.assertEqual(qs.count(), 1)
+-                self.assertEqual(str(qs.query).lower().count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use optimization
++                    self.assertEqual(str(qs.query).lower().count('extract'), 1)
++                else:
++                    # regular year should use optimization
++                    self.assertEqual(str(qs.query).lower().count('extract'), 0)
+                 qs = DTModel.objects.filter(**{'start_datetime__%s__gte' % lookup: 2015})
+                 self.assertEqual(qs.count(), 2)
+-                self.assertEqual(str(qs.query).lower().count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use optimization
++                    self.assertEqual(str(qs.query).lower().count('extract'), 1)
++                else:
++                    # regular year should use optimization
++                    self.assertEqual(str(qs.query).lower().count('extract'), 0)
+                 qs = DTModel.objects.annotate(
+                     start_year=ExtractYear('start_datetime'),
+                 ).filter(**{'end_datetime__%s__gte' % lookup: F('start_year')})
+@@ -167,10 +195,20 @@ class DateFunctionTests(TestCase):
+             with self.subTest(lookup):
+                 qs = DTModel.objects.filter(**{'start_datetime__%s__lt' % lookup: 2016})
+                 self.assertEqual(qs.count(), 1)
+-                self.assertEqual(str(qs.query).count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use optimization
++                    self.assertEqual(str(qs.query).count('extract'), 1)
++                else:
++                    # regular year should use optimization
++                    self.assertEqual(str(qs.query).count('extract'), 0)
+                 qs = DTModel.objects.filter(**{'start_datetime__%s__lte' % lookup: 2016})
+                 self.assertEqual(qs.count(), 2)
+-                self.assertEqual(str(qs.query).count('extract'), 0)
++                if lookup == 'iso_year':
++                    # iso_year should not use optimization
++                    self.assertEqual(str(qs.query).count('extract'), 1)
++                else:
++                    # regular year should use optimization
++                    self.assertEqual(str(qs.query).count('extract'), 0)
+                 qs = DTModel.objects.annotate(
+                     end_year=ExtractYear('end_datetime'),
+                 ).filter(**{'start_datetime__%s__lte' % lookup: F('end_year')})

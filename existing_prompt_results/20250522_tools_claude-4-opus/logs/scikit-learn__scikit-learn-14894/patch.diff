@@ -1,0 +1,305 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..6cedf1deb
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,32 @@
++import numpy as np
++import scipy
++import sklearn
++from sklearn.svm import SVR
++
++x_train = np.array([[0, 1, 0, 0],
++                    [0, 0, 0, 1],
++                    [0, 0, 1, 0],
++                    [0, 0, 0, 1]])
++y_train = np.array([0.04, 0.04, 0.10, 0.16])
++
++model = SVR(C=316.227766017, cache_size=200, coef0=0.0, degree=3, epsilon=0.1,
++            gamma=1.0, kernel='linear', max_iter=15000,
++            shrinking=True, tol=0.001, verbose=False)
++
++# dense x_train has no error
++print("Testing with dense data...")
++model.fit(x_train, y_train)
++print(f"Dense fit successful. Number of support vectors: {len(model.support_)}")
++print(f"Support vectors shape: {model.support_vectors_.shape}")
++print(f"Dual coef shape: {model.dual_coef_.shape}")
++
++# convert to sparse
++print("\nTesting with sparse data...")
++xtrain = scipy.sparse.csr_matrix(x_train)
++try:
++    model.fit(xtrain, y_train)
++    print("Sparse fit successful!")
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/sklearn/svm/base.py b/sklearn/svm/base.py
+index 64cebe837..871ea4a64 100644
+--- a/sklearn/svm/base.py
++++ b/sklearn/svm/base.py
+@@ -287,11 +287,16 @@ class BaseLibSVM(BaseEstimator, metaclass=ABCMeta):
+         n_SV = self.support_vectors_.shape[0]
+ 
+         dual_coef_indices = np.tile(np.arange(n_SV), n_class)
+-        dual_coef_indptr = np.arange(0, dual_coef_indices.size + 1,
+-                                     dual_coef_indices.size / n_class)
+-        self.dual_coef_ = sp.csr_matrix(
+-            (dual_coef_data, dual_coef_indices, dual_coef_indptr),
+-            (n_class, n_SV))
++        if n_SV == 0:
++            # When there are no support vectors, create an empty sparse matrix
++            # with the appropriate shape
++            self.dual_coef_ = sp.csr_matrix((n_class, 0))
++        else:
++            dual_coef_indptr = np.arange(0, dual_coef_indices.size + 1,
++                                         dual_coef_indices.size / n_class)
++            self.dual_coef_ = sp.csr_matrix(
++                (dual_coef_data, dual_coef_indices, dual_coef_indptr),
++                (n_class, n_SV))
+ 
+     def predict(self, X):
+         """Perform regression on samples in X.
+diff --git a/sklearn/svm/tests/test_sparse.py b/sklearn/svm/tests/test_sparse.py
+index 7cf6e8af2..08903474d 100644
+--- a/sklearn/svm/tests/test_sparse.py
++++ b/sklearn/svm/tests/test_sparse.py
+@@ -360,3 +360,37 @@ def test_consistent_proba():
+     with ignore_warnings(category=ConvergenceWarning):
+         proba_2 = a.fit(X, Y).predict_proba(X)
+     assert_array_almost_equal(proba_1, proba_2)
++
++
++def test_sparse_svm_empty_support_vectors():
++    """Test that sparse SVM doesn't crash when support_vectors_ is empty.
++    
++    Non-regression test for:
++    https://github.com/scikit-learn/scikit-learn/issues/XXXXX
++    """
++    # Test data that results in empty support vectors
++    X_train = np.array([[0, 1, 0, 0],
++                        [0, 0, 0, 1],
++                        [0, 0, 1, 0],
++                        [0, 0, 0, 1]])
++    y_train = np.array([0.04, 0.04, 0.10, 0.16])
++    
++    # Model configuration that leads to empty support vectors
++    model = svm.SVR(C=316.227766017, cache_size=200, coef0=0.0, degree=3, 
++                    epsilon=0.1, gamma=1.0, kernel='linear', max_iter=15000,
++                    shrinking=True, tol=0.001, verbose=False)
++    
++    # Convert to sparse
++    X_sparse = sparse.csr_matrix(X_train)
++    
++    # This should not raise ZeroDivisionError
++    model.fit(X_sparse, y_train)
++    
++    # Verify the model state
++    assert model.support_vectors_.shape[0] == 0
++    assert model.dual_coef_.shape == (1, 0)
++    assert sparse.issparse(model.dual_coef_)
++    
++    # Predictions should still work
++    predictions = model.predict(X_sparse)
++    assert predictions.shape == (4,)
+diff --git a/test_empty_support_vectors.py b/test_empty_support_vectors.py
+new file mode 100644
+index 000000000..bf2bfb832
+--- /dev/null
++++ b/test_empty_support_vectors.py
+@@ -0,0 +1,74 @@
++"""Test for empty support vectors issue with sparse data."""
++import numpy as np
++import scipy.sparse as sp
++import pytest
++from sklearn.svm import SVR, SVC
++
++
++def test_sparse_svm_empty_support_vectors():
++    """Test that sparse SVM doesn't crash when support_vectors_ is empty.
++    
++    Non-regression test for issue where _sparse_fit would raise
++    ZeroDivisionError when no support vectors were found.
++    """
++    # Test data that results in empty support vectors
++    X = np.array([[0, 1, 0, 0],
++                  [0, 0, 0, 1],
++                  [0, 0, 1, 0],
++                  [0, 0, 0, 1]])
++    y = np.array([0.04, 0.04, 0.10, 0.16])
++    
++    # Model configuration that leads to empty support vectors
++    model = SVR(C=316.227766017, cache_size=200, coef0=0.0, degree=3, 
++                epsilon=0.1, gamma=1.0, kernel='linear', max_iter=15000,
++                shrinking=True, tol=0.001, verbose=False)
++    
++    # Convert to sparse
++    X_sparse = sp.csr_matrix(X)
++    
++    # This should not raise ZeroDivisionError
++    model.fit(X_sparse, y)
++    
++    # Verify the model state
++    assert model.support_vectors_.shape[0] == 0
++    assert model.dual_coef_.shape == (1, 0)
++    assert sp.issparse(model.dual_coef_)
++    
++    # Predictions should still work
++    predictions = model.predict(X_sparse)
++    assert predictions.shape == (4,)
++
++
++def test_sparse_svc_empty_support_vectors_multiclass():
++    """Test sparse SVC with empty support vectors in multiclass setting."""
++    # Simple separable data that might lead to no support vectors with high C
++    X = np.array([[0, 0], [10, 10], [20, 20],
++                  [0, 0], [10, 10], [20, 20]])
++    y = np.array([0, 1, 2, 0, 1, 2])
++    
++    model = SVC(C=1e10, kernel='linear')
++    X_sparse = sp.csr_matrix(X)
++    
++    # Should not raise error
++    model.fit(X_sparse, y)
++    
++    # Check model state
++    n_classes = len(model.classes_)
++    n_sv = len(model.support_)
++    
++    if n_sv == 0:
++        assert model.dual_coef_.shape == (n_classes - 1, 0)
++    else:
++        assert model.dual_coef_.shape == (n_classes - 1, n_sv)
++    
++    assert sp.issparse(model.dual_coef_)
++    
++    # Predictions should work
++    predictions = model.predict(X_sparse)
++    assert predictions.shape == (6,)
++
++
++if __name__ == "__main__":
++    test_sparse_svm_empty_support_vectors()
++    test_sparse_svc_empty_support_vectors_multiclass()
++    print("All tests passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 000000000..cb5e047bf
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,113 @@
++import numpy as np
++import scipy.sparse as sp
++from sklearn.svm import SVR, SVC
++from sklearn.datasets import make_classification, make_regression
++
++def test_empty_support_vectors_sparse():
++    """Test SVM with sparse data when support vectors are empty."""
++    # Test case from the issue
++    x_train = np.array([[0, 1, 0, 0],
++                        [0, 0, 0, 1],
++                        [0, 0, 1, 0],
++                        [0, 0, 0, 1]])
++    y_train = np.array([0.04, 0.04, 0.10, 0.16])
++    
++    model = SVR(C=316.227766017, cache_size=200, coef0=0.0, degree=3, epsilon=0.1,
++                gamma=1.0, kernel='linear', max_iter=15000,
++                shrinking=True, tol=0.001, verbose=False)
++    
++    # Test with sparse data
++    x_sparse = sp.csr_matrix(x_train)
++    model.fit(x_sparse, y_train)
++    
++    # Check that the model was fitted correctly
++    assert hasattr(model, 'dual_coef_')
++    assert model.dual_coef_.shape == (1, 0)  # For regression, n_class=1, n_SV=0
++    assert sp.issparse(model.dual_coef_)
++    assert isinstance(model.dual_coef_, sp.csr_matrix)
++    
++    # Test prediction (should work even with no support vectors)
++    predictions = model.predict(x_sparse)
++    assert predictions.shape == (4,)
++    
++    print("[PASS] SVR with empty support vectors (sparse) test passed")
++
++def test_classification_empty_support_vectors():
++    """Test SVC with sparse data when support vectors might be empty."""
++    # Create a simple dataset where all points might be correctly classified
++    # with a large margin (leading to potentially no support vectors)
++    X = np.array([[0, 0], [2, 2], [0, 0], [2, 2]])
++    y = np.array([0, 1, 0, 1])
++    
++    # Use very high C to potentially get no support vectors
++    model = SVC(C=1e10, kernel='linear')
++    
++    # Test with sparse data
++    X_sparse = sp.csr_matrix(X)
++    model.fit(X_sparse, y)
++    
++    # Check that the model was fitted correctly
++    assert hasattr(model, 'dual_coef_')
++    n_classes = len(model.classes_)
++    n_sv = len(model.support_)
++    
++    if n_sv == 0:
++        assert model.dual_coef_.shape == (n_classes - 1, 0)
++        print("[PASS] SVC with empty support vectors (sparse) test passed")
++    else:
++        print(f"[PASS] SVC test passed (had {n_sv} support vectors)")
++
++def test_multiclass_empty_support_vectors():
++    """Test multiclass SVC with sparse data."""
++    # Create a simple multiclass dataset
++    X = np.array([[0, 0], [1, 1], [2, 2], [0, 0], [1, 1], [2, 2]])
++    y = np.array([0, 1, 2, 0, 1, 2])
++    
++    model = SVC(C=1e10, kernel='linear')
++    
++    # Test with sparse data
++    X_sparse = sp.csr_matrix(X)
++    model.fit(X_sparse, y)
++    
++    # Check that the model was fitted correctly
++    assert hasattr(model, 'dual_coef_')
++    n_classes = len(model.classes_)
++    n_sv = len(model.support_)
++    
++    if n_sv == 0:
++        assert model.dual_coef_.shape == (n_classes - 1, 0)
++        print("[PASS] Multiclass SVC with empty support vectors (sparse) test passed")
++    else:
++        assert model.dual_coef_.shape == (n_classes - 1, n_sv)
++        print(f"[PASS] Multiclass SVC test passed (had {n_sv} support vectors)")
++
++def test_normal_case_still_works():
++    """Ensure normal cases with support vectors still work correctly."""
++    # Generate a dataset that will definitely have support vectors
++    X, y = make_classification(n_samples=20, n_features=4, n_redundant=0, 
++                                n_informative=2, random_state=42, 
++                                n_clusters_per_class=1)
++    
++    model = SVC(C=1.0, kernel='linear')
++    
++    # Test with sparse data
++    X_sparse = sp.csr_matrix(X)
++    model.fit(X_sparse, y)
++    
++    # Check that we have support vectors
++    assert len(model.support_) > 0
++    assert model.dual_coef_.shape[1] == len(model.support_)
++    assert sp.issparse(model.dual_coef_)
++    
++    # Test prediction
++    predictions = model.predict(X_sparse)
++    assert predictions.shape == (20,)
++    
++    print(f"[PASS] Normal case test passed ({len(model.support_)} support vectors)")
++
++if __name__ == "__main__":
++    test_empty_support_vectors_sparse()
++    test_classification_empty_support_vectors()
++    test_multiclass_empty_support_vectors()
++    test_normal_case_still_works()
++    print("\nAll tests passed!")

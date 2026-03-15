@@ -1,0 +1,570 @@
+diff --git a/lib/matplotlib/backends/backend_agg.py b/lib/matplotlib/backends/backend_agg.py
+index 7d038a998f..22907b00d9 100644
+--- a/lib/matplotlib/backends/backend_agg.py
++++ b/lib/matplotlib/backends/backend_agg.py
+@@ -206,7 +206,7 @@ class RendererAgg(RendererBase):
+         # space) in the following call to draw_text_image).
+         font.set_text(s, 0, flags=get_hinting_flag())
+         font.draw_glyphs_to_bitmap(
+-            antialiased=mpl.rcParams['text.antialiased'])
++            antialiased=gc.get_antialiased())
+         d = font.get_descent() / 64.0
+         # The descent needs to be adjusted for the angle.
+         xo, yo = font.get_bitmap_offset()
+diff --git a/lib/matplotlib/backends/backend_cairo.py b/lib/matplotlib/backends/backend_cairo.py
+index 9ccadcdf1c..7f1888b4dd 100644
+--- a/lib/matplotlib/backends/backend_cairo.py
++++ b/lib/matplotlib/backends/backend_cairo.py
+@@ -205,7 +205,7 @@ class RendererCairo(RendererBase):
+             ctx.set_font_size(self.points_to_pixels(prop.get_size_in_points()))
+             opts = cairo.FontOptions()
+             opts.set_antialias(
+-                cairo.ANTIALIAS_DEFAULT if mpl.rcParams["text.antialiased"]
++                cairo.ANTIALIAS_DEFAULT if gc.get_antialiased()
+                 else cairo.ANTIALIAS_NONE)
+             ctx.set_font_options(opts)
+             if angle:
+diff --git a/lib/matplotlib/text.py b/lib/matplotlib/text.py
+index 4591316cf9..7e296573bb 100644
+--- a/lib/matplotlib/text.py
++++ b/lib/matplotlib/text.py
+@@ -115,6 +115,7 @@ class Text(Artist):
+                  wrap=False,
+                  transform_rotates_text=False,
+                  parse_math=None,    # defaults to rcParams['text.parse_math']
++                 antialiased=None,    # defaults to rcParams['text.antialiased']
+                  **kwargs
+                  ):
+         """
+@@ -149,6 +150,7 @@ class Text(Artist):
+             transform_rotates_text=transform_rotates_text,
+             linespacing=linespacing,
+             rotation_mode=rotation_mode,
++            antialiased=antialiased,
+         )
+         self.update(kwargs)
+ 
+@@ -167,6 +169,7 @@ class Text(Artist):
+         transform_rotates_text=False,
+         linespacing=None,
+         rotation_mode=None,
++        antialiased=None,
+     ):
+         self.set_text(text)
+         self.set_color(
+@@ -187,6 +190,8 @@ class Text(Artist):
+             linespacing = 1.2  # Maybe use rcParam later.
+         self.set_linespacing(linespacing)
+         self.set_rotation_mode(rotation_mode)
++        # Initialize antialiasing
++        self._antialiased = antialiased
+ 
+     def update(self, kwargs):
+         # docstring inherited
+@@ -737,6 +742,7 @@ class Text(Artist):
+             gc.set_foreground(self.get_color())
+             gc.set_alpha(self.get_alpha())
+             gc.set_url(self._url)
++            gc.set_antialiased(self.get_antialiased())
+             self._set_gc_clip(gc)
+ 
+             angle = self.get_rotation()
+@@ -1317,6 +1323,29 @@ class Text(Artist):
+         """Return whether mathtext parsing is considered for this `Text`."""
+         return self._parse_math
+ 
++    def set_antialiased(self, antialiased):
++        """
++        Set whether to use antialiased rendering.
++
++        Parameters
++        ----------
++        antialiased : bool or None
++            If None, use the default from rcParams['text.antialiased'].
++        """
++        self._antialiased = antialiased
++        self.stale = True
++
++    def get_antialiased(self):
++        """
++        Return whether antialiasing is used for rendering.
++        
++        If the antialiasing state was never explicitly set, this will
++        return the value from rcParams['text.antialiased'].
++        """
++        if self._antialiased is None:
++            return mpl.rcParams['text.antialiased']
++        return self._antialiased
++
+     def set_fontname(self, fontname):
+         """
+         Alias for `set_family`.
+diff --git a/rotated_antialiasing_test.png b/rotated_antialiasing_test.png
+new file mode 100644
+index 0000000000..1f7935beb3
+Binary files /dev/null and b/rotated_antialiasing_test.png differ
+diff --git a/test_add_to_suite.py b/test_add_to_suite.py
+new file mode 100644
+index 0000000000..4e417b1d99
+--- /dev/null
++++ b/test_add_to_suite.py
+@@ -0,0 +1,56 @@
++"""
++Test to add to lib/matplotlib/tests/test_text.py
++"""
++
++def test_text_antialiased_property():
++    """Test the get/set_antialiased methods on Text objects."""
++    import matplotlib.pyplot as plt
++    import matplotlib as mpl
++    
++    fig, ax = plt.subplots()
++    
++    # Save original rcParam
++    original_aa = mpl.rcParams['text.antialiased']
++    
++    try:
++        # Test default behavior - should use rcParams
++        mpl.rcParams['text.antialiased'] = True
++        text = ax.text(0.5, 0.5, 'Test')
++        assert text.get_antialiased() == True
++        
++        # Test setting to False
++        text.set_antialiased(False)
++        assert text.get_antialiased() == False
++        
++        # Test setting to True
++        text.set_antialiased(True)
++        assert text.get_antialiased() == True
++        
++        # Test setting to None - should revert to rcParams
++        mpl.rcParams['text.antialiased'] = False
++        text.set_antialiased(None)
++        assert text.get_antialiased() == False
++        
++        # Test passing antialiased as parameter
++        text2 = ax.text(0.2, 0.2, 'Test2', antialiased=True)
++        assert text2.get_antialiased() == True
++        
++        text3 = ax.text(0.3, 0.3, 'Test3', antialiased=False)
++        assert text3.get_antialiased() == False
++        
++        # Test with Annotation
++        ann = ax.annotate('Ann', xy=(0.5, 0.5), xytext=(0.7, 0.7), antialiased=False)
++        assert ann.get_antialiased() == False
++        
++        ann.set_antialiased(True)
++        assert ann.get_antialiased() == True
++        
++    finally:
++        # Restore original rcParam
++        mpl.rcParams['text.antialiased'] = original_aa
++        plt.close(fig)
++
++
++# Print the test function so it can be added to the test file
++print(test_text_antialiased_property.__doc__)
++print(test_text_antialiased_property)
+diff --git a/test_antialiased_param.py b/test_antialiased_param.py
+new file mode 100644
+index 0000000000..013673e2a9
+--- /dev/null
++++ b/test_antialiased_param.py
+@@ -0,0 +1,30 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++
++# Test passing antialiased as a parameter
++fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4))
++
++# Test with antialiased=True
++text1 = ax1.text(0.5, 0.5, 'AA=True', ha='center', va='center', fontsize=20, antialiased=True)
++ax1.set_title(f'Passed AA=True: {text1.get_antialiased()}')
++
++# Test with antialiased=False
++text2 = ax2.text(0.5, 0.5, 'AA=False', ha='center', va='center', fontsize=20, antialiased=False)
++ax2.set_title(f'Passed AA=False: {text2.get_antialiased()}')
++
++# Test with antialiased=None (should use rcParams)
++mpl.rcParams['text.antialiased'] = False
++text3 = ax3.text(0.5, 0.5, 'AA=None', ha='center', va='center', fontsize=20, antialiased=None)
++ax3.set_title(f'Passed AA=None: {text3.get_antialiased()} (rcParams={mpl.rcParams["text.antialiased"]})')
++
++# Test with annotations
++fig2, ax4 = plt.subplots()
++ann = ax4.annotate('Annotation', xy=(0.5, 0.5), xytext=(0.2, 0.8), 
++                   fontsize=16, antialiased=False,
++                   arrowprops=dict(arrowstyle='->', color='red'))
++ax4.set_title(f'Annotation with AA=False: {ann.get_antialiased()}')
++
++plt.tight_layout()
++plt.show()
++
++print("All parameter tests passed!")
+diff --git a/test_antialiasing_after.png b/test_antialiasing_after.png
+new file mode 100644
+index 0000000000..81b6520008
+Binary files /dev/null and b/test_antialiasing_after.png differ
+diff --git a/test_antialiasing_before.png b/test_antialiasing_before.png
+new file mode 100644
+index 0000000000..387c949da6
+Binary files /dev/null and b/test_antialiasing_before.png differ
+diff --git a/test_comprehensive_antialiasing.png b/test_comprehensive_antialiasing.png
+new file mode 100644
+index 0000000000..0d825fc7a0
+Binary files /dev/null and b/test_comprehensive_antialiasing.png differ
+diff --git a/test_comprehensive_antialiasing.py b/test_comprehensive_antialiasing.py
+new file mode 100644
+index 0000000000..69b4ea8a80
+--- /dev/null
++++ b/test_comprehensive_antialiasing.py
+@@ -0,0 +1,86 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++import numpy as np
++
++# Comprehensive test of text antialiasing feature
++fig = plt.figure(figsize=(12, 8))
++
++# Test 1: Regular text with different antialiasing settings
++ax1 = plt.subplot(3, 3, 1)
++mpl.rcParams['text.antialiased'] = True
++t1 = ax1.text(0.5, 0.5, 'Default AA=True', ha='center', va='center', fontsize=14)
++ax1.set_title(f'AA: {t1.get_antialiased()}')
++
++ax2 = plt.subplot(3, 3, 2)
++t2 = ax2.text(0.5, 0.5, 'Explicit AA=False', ha='center', va='center', fontsize=14)
++t2.set_antialiased(False)
++ax2.set_title(f'AA: {t2.get_antialiased()}')
++
++ax3 = plt.subplot(3, 3, 3)
++mpl.rcParams['text.antialiased'] = False
++t3 = ax3.text(0.5, 0.5, 'Default AA=False', ha='center', va='center', fontsize=14)
++ax3.set_title(f'AA: {t3.get_antialiased()}')
++
++# Test 2: Annotations
++ax4 = plt.subplot(3, 3, 4)
++ann1 = ax4.annotate('Annotation AA=True', xy=(0.5, 0.5), xytext=(0.2, 0.8),
++                    arrowprops=dict(arrowstyle='->', color='red'), fontsize=12)
++ann1.set_antialiased(True)
++ax4.set_title(f'Ann AA: {ann1.get_antialiased()}')
++
++ax5 = plt.subplot(3, 3, 5)
++ann2 = ax5.annotate('Annotation AA=False', xy=(0.5, 0.5), xytext=(0.2, 0.8),
++                    arrowprops=dict(arrowstyle='->', color='blue'), fontsize=12)
++ann2.set_antialiased(False)
++ax5.set_title(f'Ann AA: {ann2.get_antialiased()}')
++
++# Test 3: Math text (uses rcParams)
++ax6 = plt.subplot(3, 3, 6)
++mpl.rcParams['text.antialiased'] = True
++t4 = ax6.text(0.5, 0.5, r'$\sqrt{x^2 + y^2}$', ha='center', va='center', fontsize=16)
++ax6.set_title('Math text (uses rcParams)')
++
++# Test 4: Mixed text and math
++ax7 = plt.subplot(3, 3, 7)
++t5 = ax7.text(0.5, 0.5, 'Text with $math$', ha='center', va='center', fontsize=14)
++t5.set_antialiased(False)
++ax7.set_title(f'Mixed text AA: {t5.get_antialiased()}')
++
++# Test 5: Large text to see antialiasing effect
++ax8 = plt.subplot(3, 3, 8)
++t6 = ax8.text(0.5, 0.5, 'BIG', ha='center', va='center', fontsize=40, weight='bold')
++t6.set_antialiased(True)
++ax8.set_title('Large text AA=True')
++
++ax9 = plt.subplot(3, 3, 9)
++t7 = ax9.text(0.5, 0.5, 'BIG', ha='center', va='center', fontsize=40, weight='bold')
++t7.set_antialiased(False)
++ax9.set_title('Large text AA=False')
++
++# Remove axes for cleaner look
++for ax in fig.axes:
++    ax.set_xlim(0, 1)
++    ax.set_ylim(0, 1)
++    ax.set_xticks([])
++    ax.set_yticks([])
++
++plt.tight_layout()
++plt.savefig('/testbed/test_comprehensive_antialiasing.png', dpi=150)
++plt.close()
++
++# Test the update method
++fig2, ax = plt.subplots()
++text = ax.text(0.5, 0.5, 'Test update', ha='center', va='center')
++print(f"Initial antialiased: {text.get_antialiased()}")
++
++# Update using the update method
++text.update({'antialiased': False})
++print(f"After update antialiased: {text.get_antialiased()}")
++
++# Test with None
++text.set_antialiased(None)
++print(f"After None: {text.get_antialiased()} (should match rcParams={mpl.rcParams['text.antialiased']})")
++
++plt.close(fig2)
++
++print("\nAll tests completed successfully!")
+diff --git a/test_text_antialiasing.py b/test_text_antialiasing.py
+new file mode 100644
+index 0000000000..baa49be0bd
+--- /dev/null
++++ b/test_text_antialiasing.py
+@@ -0,0 +1,32 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++
++# Test current behavior
++fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
++
++# Test with antialiasing on (default)
++mpl.rcParams['text.antialiased'] = True
++text1 = ax1.text(0.5, 0.5, 'Antialiased Text', fontsize=20, ha='center', va='center')
++ax1.set_title('text.antialiased = True')
++
++# Test with antialiasing off
++mpl.rcParams['text.antialiased'] = False
++text2 = ax2.text(0.5, 0.5, 'Non-antialiased Text', fontsize=20, ha='center', va='center')
++ax2.set_title('text.antialiased = False')
++
++# Try to access antialiasing property (this should fail currently)
++try:
++    print(f"text1 antialiased: {text1.get_antialiased()}")
++except AttributeError as e:
++    print(f"Error: {e}")
++
++# Try to set antialiasing property (this should fail currently)
++try:
++    text1.set_antialiased(False)
++except AttributeError as e:
++    print(f"Error: {e}")
++
++plt.savefig('/testbed/test_antialiasing_before.png', dpi=150)
++plt.close()
++
++print("Test complete - check test_antialiasing_before.png")
+diff --git a/test_text_antialiasing_after.py b/test_text_antialiasing_after.py
+new file mode 100644
+index 0000000000..d902aab25b
+--- /dev/null
++++ b/test_text_antialiasing_after.py
+@@ -0,0 +1,48 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++
++# Test the new functionality
++fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 10))
++
++# Test 1: Default behavior (should use rcParams)
++mpl.rcParams['text.antialiased'] = True
++text1 = ax1.text(0.5, 0.5, 'Default (rcParams=True)', fontsize=20, ha='center', va='center')
++ax1.set_title(f'Default: antialiased={text1.get_antialiased()}')
++
++# Test 2: Explicitly set to False
++text2 = ax2.text(0.5, 0.5, 'Explicitly False', fontsize=20, ha='center', va='center')
++text2.set_antialiased(False)
++ax2.set_title(f'Set to False: antialiased={text2.get_antialiased()}')
++
++# Test 3: Change rcParams and create new text
++mpl.rcParams['text.antialiased'] = False
++text3 = ax3.text(0.5, 0.5, 'Default (rcParams=False)', fontsize=20, ha='center', va='center')
++ax3.set_title(f'Default with rcParams=False: antialiased={text3.get_antialiased()}')
++
++# Test 4: Override rcParams
++text4 = ax4.text(0.5, 0.5, 'Override rcParams', fontsize=20, ha='center', va='center')
++text4.set_antialiased(True)
++ax4.set_title(f'Override to True: antialiased={text4.get_antialiased()}')
++
++# Test with Annotation
++fig2, ax5 = plt.subplots(1, 1, figsize=(6, 6))
++ann = ax5.annotate('Annotation Test', xy=(0.5, 0.5), xytext=(0.2, 0.8),
++                   fontsize=16, arrowprops=dict(arrowstyle='->', color='red'))
++ann.set_antialiased(False)
++ax5.set_title(f'Annotation: antialiased={ann.get_antialiased()}')
++
++plt.tight_layout()
++plt.savefig('/testbed/test_antialiasing_after.png', dpi=150)
++plt.close()
++
++print("Test complete - check test_antialiasing_after.png")
++print("\nTesting get/set methods:")
++print(f"text1.get_antialiased() = {text1.get_antialiased()}")
++print(f"text2.get_antialiased() = {text2.get_antialiased()}")
++print(f"text3.get_antialiased() = {text3.get_antialiased()}")
++print(f"text4.get_antialiased() = {text4.get_antialiased()}")
++print(f"ann.get_antialiased() = {ann.get_antialiased()}")
++
++# Test setting to None
++text1.set_antialiased(None)
++print(f"\nAfter setting text1 to None: {text1.get_antialiased()} (should use rcParams)")
+diff --git a/test_text_antialiasing_feature.py b/test_text_antialiasing_feature.py
+new file mode 100644
+index 0000000000..b144a3aed1
+--- /dev/null
++++ b/test_text_antialiasing_feature.py
+@@ -0,0 +1,94 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++import pytest
++
++def test_text_antialiasing_methods():
++    """Test that Text objects have get/set_antialiased methods."""
++    fig, ax = plt.subplots()
++    
++    # Test default behavior - should use rcParams
++    mpl.rcParams['text.antialiased'] = True
++    text = ax.text(0.5, 0.5, 'Test')
++    assert text.get_antialiased() == True
++    
++    # Test setting to False
++    text.set_antialiased(False)
++    assert text.get_antialiased() == False
++    
++    # Test setting to True
++    text.set_antialiased(True)
++    assert text.get_antialiased() == True
++    
++    # Test setting to None - should revert to rcParams
++    mpl.rcParams['text.antialiased'] = False
++    text.set_antialiased(None)
++    assert text.get_antialiased() == False
++    
++    # Test that new text objects use rcParams by default
++    text2 = ax.text(0.2, 0.2, 'Test2')
++    assert text2.get_antialiased() == False
++    
++    plt.close(fig)
++
++def test_annotation_antialiasing_methods():
++    """Test that Annotation objects have get/set_antialiased methods."""
++    fig, ax = plt.subplots()
++    
++    # Test default behavior
++    mpl.rcParams['text.antialiased'] = True
++    ann = ax.annotate('Test', xy=(0.5, 0.5), xytext=(0.2, 0.2))
++    assert ann.get_antialiased() == True
++    
++    # Test setting to False
++    ann.set_antialiased(False)
++    assert ann.get_antialiased() == False
++    
++    plt.close(fig)
++
++def test_antialiasing_rendering():
++    """Test that antialiasing setting affects rendering."""
++    import numpy as np
++    from matplotlib.backends.backend_agg import FigureCanvasAgg
++    
++    # Create two identical texts with different antialiasing
++    fig = plt.figure(figsize=(4, 2))
++    canvas = FigureCanvasAgg(fig)
++    
++    ax1 = fig.add_subplot(121)
++    ax2 = fig.add_subplot(122)
++    
++    text1 = ax1.text(0.5, 0.5, 'A', fontsize=40, ha='center', va='center')
++    text1.set_antialiased(True)
++    
++    text2 = ax2.text(0.5, 0.5, 'A', fontsize=40, ha='center', va='center')
++    text2.set_antialiased(False)
++    
++    # Render and get pixel data
++    canvas.draw()
++    buf = canvas.buffer_rgba()
++    arr = np.asarray(buf)
++    
++    # The antialiased text should have more unique grayscale values
++    # due to smoothing at edges
++    region1 = arr[:, :arr.shape[1]//2, :]  # left half
++    region2 = arr[:, arr.shape[1]//2:, :]  # right half
++    
++    # Convert to grayscale
++    gray1 = np.mean(region1[:, :, :3], axis=2)
++    gray2 = np.mean(region2[:, :, :3], axis=2)
++    
++    # Count unique values (antialiased should have more due to smoothing)
++    unique1 = len(np.unique(gray1))
++    unique2 = len(np.unique(gray2))
++    
++    # This is a weak test but should generally hold
++    # Antialiased text should have more unique gray values
++    assert unique1 != unique2, "Antialiasing setting should affect rendering"
++    
++    plt.close(fig)
++
++if __name__ == "__main__":
++    test_text_antialiasing_methods()
++    test_annotation_antialiasing_methods()
++    test_antialiasing_rendering()
++    print("All tests passed!")
+diff --git a/test_visual_antialiasing.py b/test_visual_antialiasing.py
+new file mode 100644
+index 0000000000..cfb460c8fd
+--- /dev/null
++++ b/test_visual_antialiasing.py
+@@ -0,0 +1,61 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++import numpy as np
++
++# Visual test to confirm antialiasing is working
++fig, axes = plt.subplots(2, 3, figsize=(15, 10))
++axes = axes.flatten()
++
++# Different font sizes to see the effect
++sizes = [10, 20, 30, 40, 50, 60]
++
++for i, (ax, size) in enumerate(zip(axes, sizes)):
++    # Top row: antialiased
++    if i < 3:
++        text = ax.text(0.5, 0.5, 'Smooth', ha='center', va='center', 
++                      fontsize=size, antialiased=True)
++        ax.set_title(f'Size {size}, AA=True')
++    # Bottom row: not antialiased
++    else:
++        text = ax.text(0.5, 0.5, 'Jagged', ha='center', va='center', 
++                      fontsize=size, antialiased=False)
++        ax.set_title(f'Size {size-30}, AA=False')
++    
++    ax.set_xlim(0, 1)
++    ax.set_ylim(0, 1)
++    ax.set_aspect('equal')
++    ax.axis('off')
++
++plt.suptitle('Text Antialiasing Comparison', fontsize=16)
++plt.tight_layout()
++plt.savefig('/testbed/visual_antialiasing_test.png', dpi=200, bbox_inches='tight')
++plt.close()
++
++# Test with rotated text
++fig2, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
++
++for angle in [0, 15, 30, 45, 60, 75, 90]:
++    # Antialiased
++    t1 = ax1.text(0.5, 0.5, 'Rotated', ha='center', va='center',
++                  fontsize=20, rotation=angle, alpha=0.7, antialiased=True)
++    # Non-antialiased
++    t2 = ax2.text(0.5, 0.5, 'Rotated', ha='center', va='center',
++                  fontsize=20, rotation=angle, alpha=0.7, antialiased=False)
++
++ax1.set_title('Antialiased Rotated Text')
++ax2.set_title('Non-antialiased Rotated Text')
++
++for ax in [ax1, ax2]:
++    ax.set_xlim(0, 1)
++    ax.set_ylim(0, 1)
++    ax.set_aspect('equal')
++    ax.axis('off')
++
++plt.tight_layout()
++plt.savefig('/testbed/rotated_antialiasing_test.png', dpi=200, bbox_inches='tight')
++plt.close()
++
++print("Visual tests saved to:")
++print("- /testbed/visual_antialiasing_test.png")
++print("- /testbed/rotated_antialiasing_test.png")
++print("\nYou should see smoother edges on antialiased text.")
+diff --git a/visual_antialiasing_test.png b/visual_antialiasing_test.png
+new file mode 100644
+index 0000000000..a0bf36e9ed
+Binary files /dev/null and b/visual_antialiasing_test.png differ

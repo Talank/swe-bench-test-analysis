@@ -1,0 +1,142 @@
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 19f7c0a8d..f0eb8543f 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -369,14 +369,49 @@ class Include(BaseInclude, SphinxDirective):
+     """
+ 
+     def run(self) -> list[Node]:
++        # First check for standard includes
+         if self.arguments[0].startswith('<') and \
+            self.arguments[0].endswith('>'):
+             # docutils "standard" includes, do not do path processing
+             return super().run()
++            
++        # Store the original path argument for event emission
+         rel_filename, filename = self.env.relfn2path(self.arguments[0])
+         self.arguments[0] = filename
+         self.env.note_included(filename)
+-        return super().run()
++        
++        # Store the original state_machine insert_input method
++        original_insert_input = self.state_machine.insert_input
++        
++        def insert_input_with_event(input_lines, source):
++            # Convert input_lines to a string if it's a list
++            if isinstance(input_lines, list):
++                content = '\n'.join(input_lines)
++            else:
++                content = str(input_lines)
++            
++            # Emit source-read event for included content
++            arg = [content]
++            self.env.events.emit('source-read', rel_filename, arg)
++            
++            # Convert back to lines if needed
++            if isinstance(input_lines, list):
++                modified_lines = arg[0].split('\n')
++                original_insert_input(modified_lines, source)
++            else:
++                original_insert_input(arg[0].split('\n'), source)
++        
++        # Temporarily replace the insert_input method
++        self.state_machine.insert_input = insert_input_with_event
++        
++        try:
++            # Call the parent run() method
++            result = super().run()
++        finally:
++            # Restore the original method
++            self.state_machine.insert_input = original_insert_input
++        
++        return result
+ 
+ 
+ def setup(app: Sphinx) -> dict[str, Any]:
+diff --git a/tests/roots/test-source-read-include/conf.py b/tests/roots/test-source-read-include/conf.py
+new file mode 100644
+index 000000000..19ad7f293
+--- /dev/null
++++ b/tests/roots/test-source-read-include/conf.py
+@@ -0,0 +1,13 @@
++"""Test configuration for source-read event with includes."""
++
++extensions = []
++
++
++def replace_content(app, docname, source):
++    """Replace tokens in source content."""
++    source[0] = source[0].replace('&REPLACE_ME;', 'REPLACED')
++
++
++def setup(app):
++    """Set up the test extension."""
++    app.connect('source-read', replace_content)
+diff --git a/tests/roots/test-source-read-include/included.rst b/tests/roots/test-source-read-include/included.rst
+new file mode 100644
+index 000000000..ad4a50cb9
+--- /dev/null
++++ b/tests/roots/test-source-read-include/included.rst
+@@ -0,0 +1,4 @@
++Included Section
++----------------
++
++This is included content with token: &REPLACE_ME;
+diff --git a/tests/roots/test-source-read-include/index.rst b/tests/roots/test-source-read-include/index.rst
+new file mode 100644
+index 000000000..43f0e6335
+--- /dev/null
++++ b/tests/roots/test-source-read-include/index.rst
+@@ -0,0 +1,6 @@
++Test Source Read Include
++========================
++
++.. include:: included.rst
++
++Main document text: &REPLACE_ME;
+diff --git a/tests/test_source_read_include.py b/tests/test_source_read_include.py
+new file mode 100644
+index 000000000..d09d8c82a
+--- /dev/null
++++ b/tests/test_source_read_include.py
+@@ -0,0 +1,40 @@
++"""Test source-read event with include directive."""
++
++import pytest
++
++
++@pytest.mark.sphinx('html', testroot='source-read-include')
++def test_source_read_modifies_included_files(app, status, warning):
++    """Test that source-read event modifies content from included files."""
++    app.build()
++    
++    # Check the build succeeded
++    assert app.statuscode == 0
++    
++    # Read the output
++    content = (app.outdir / 'index.html').read_text()
++    
++    # Both the main document and included content should be modified
++    assert content.count('REPLACED') == 2
++    
++    # No unmodified tokens should remain
++    assert '&amp;REPLACE_ME;' not in content
++    assert '&REPLACE_ME;' not in content
++
++
++@pytest.mark.sphinx('text', testroot='source-read-include')  
++def test_source_read_modifies_included_files_text(app, status, warning):
++    """Test that source-read event works with text builder too."""
++    app.build()
++    
++    # Check the build succeeded
++    assert app.statuscode == 0
++    
++    # Read the output
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Both the main document and included content should be modified
++    assert content.count('REPLACED') == 2
++    
++    # No unmodified tokens should remain
++    assert '&REPLACE_ME;' not in content

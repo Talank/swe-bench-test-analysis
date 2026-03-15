@@ -1,0 +1,72 @@
+diff --git a/pylint/lint/pylinter.py b/pylint/lint/pylinter.py
+index 53345a6b1..79037540c 100644
+--- a/pylint/lint/pylinter.py
++++ b/pylint/lint/pylinter.py
+@@ -563,31 +563,50 @@ class PyLinter(
+         for msg in self.msgs_store.messages:
+             if not msg.may_be_emitted():
+                 self._msgs_state[msg.msgid] = False
++        
++        # Initialize _ignore_paths for use in _discover_files
++        self._ignore_paths = getattr(self.config, 'ignore_paths', [])
+ 
+-    @staticmethod
+-    def _discover_files(files_or_modules: Sequence[str]) -> Iterator[str]:
++    def _discover_files(self, files_or_modules: Sequence[str]) -> Iterator[str]:
+         """Discover python modules and packages in sub-directory.
+ 
+         Returns iterator of paths to discovered modules and packages.
+         """
++        from pylint.lint.expand_modules import _is_in_ignore_list_re
++        
+         for something in files_or_modules:
+             if os.path.isdir(something) and not os.path.isfile(
+                 os.path.join(something, "__init__.py")
+             ):
+                 skip_subtrees: list[str] = []
+-                for root, _, files in os.walk(something):
++                for root, dirs, files in os.walk(something):
+                     if any(root.startswith(s) for s in skip_subtrees):
+                         # Skip subtree of already discovered package.
+                         continue
++                    
++                    # Check if the directory should be ignored
++                    dirname = os.path.basename(root)
++                    if (dirname in self.config.ignore or
++                        _is_in_ignore_list_re(dirname, self.config.ignore_patterns) or
++                        _is_in_ignore_list_re(root, self._ignore_paths)):
++                        # Remove this directory from dirs to prevent os.walk from descending into it
++                        dirs[:] = []
++                        continue
++                    
+                     if "__init__.py" in files:
+                         skip_subtrees.append(root)
+                         yield root
+                     else:
+-                        yield from (
+-                            os.path.join(root, file)
+-                            for file in files
+-                            if file.endswith(".py")
+-                        )
++                        for file in files:
++                            if file.endswith(".py"):
++                                # Check if the file should be ignored
++                                if (file in self.config.ignore or
++                                    _is_in_ignore_list_re(file, self.config.ignore_patterns)):
++                                    continue
++                                filepath = os.path.join(root, file)
++                                if _is_in_ignore_list_re(filepath, self._ignore_paths):
++                                    continue
++                                yield filepath
+             else:
+                 yield something
+ 
+@@ -959,7 +978,7 @@ class PyLinter(
+                 self.config.extension_pkg_whitelist
+             )
+         self.stats.reset_message_count()
+-        self._ignore_paths = self.linter.config.ignore_paths
++        self._ignore_paths = self.config.ignore_paths
+ 
+     def generate_reports(self) -> int | None:
+         """Close the whole package /module, it's time to make reports !

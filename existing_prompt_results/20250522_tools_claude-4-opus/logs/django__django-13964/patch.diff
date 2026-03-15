@@ -1,0 +1,1057 @@
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 0000000000..eec020cd0a
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,81 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Debugging the issue...")
++
++# Create instances
++order = Order()
++product = Product()
++
++# Check the field information
++print(f"\nOrder.product field info:")
++print(f"  field.attname: {Order._meta.get_field('product').attname}")
++print(f"  field.column: {Order._meta.get_field('product').column}")
++print(f"  related_fields: {Order._meta.get_field('product').related_fields}")
++
++# Assign the product
++print(f"\nBefore assignment:")
++print(f"  product.sku: '{product.sku}'")
++print(f"  order.product_id: '{order.product_id}'")
++
++order.product = product
++
++print(f"\nAfter assignment:")
++print(f"  product.sku: '{product.sku}'")
++print(f"  order.product_id: '{order.product_id}'")
++
++# Now set the sku
++product.sku = "foo"
++
++print(f"\nAfter setting sku:")
++print(f"  product.sku: '{product.sku}'")
++print(f"  order.product_id: '{order.product_id}'")
++
++# Let's trace what happens in the descriptor
++print(f"\nChecking field attributes:")
++for lh_field, rh_field in Order._meta.get_field('product').related_fields:
++    print(f"  lh_field (Order): {lh_field.name}, attname: {lh_field.attname}")
++    print(f"  rh_field (Product): {rh_field.name}, attname: {rh_field.attname}")
++    print(f"  getattr(product, rh_field.attname): '{getattr(product, rh_field.attname)}'")
+diff --git a/debug_multiple_changes.py b/debug_multiple_changes.py
+new file mode 100644
+index 0000000000..d3f0dd50ea
+--- /dev/null
++++ b/debug_multiple_changes.py
+@@ -0,0 +1,83 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Debugging multiple primary key changes...")
++
++with transaction.atomic():
++    product = Product()
++    order = Order(product=product)
++    
++    # First save with empty pk
++    product.save()
++    order.save()
++    print(f"After first save: order.product_id = '{order.product_id}'")
++    
++    # Update pk and save again
++    product.sku = "first"
++    product.save()
++    print(f"After product.sku='first': product.sku = '{product.sku}'")
++    order.save()
++    print(f"After order save: order.product_id = '{order.product_id}'")
++    
++    # Update pk again and save
++    product.sku = "second"
++    product.save()
++    print(f"After product.sku='second': product.sku = '{product.sku}'")
++    
++    # Check field values before save
++    print(f"\nBefore save:")
++    print(f"  getattr(order, 'product_id'): '{getattr(order, 'product_id')}'")
++    print(f"  getattr(product, 'sku'): '{getattr(product, 'sku')}'")
++    
++    # Check if they're different
++    field = Order._meta.get_field('product')
++    target_value = getattr(product, field.target_field.attname)
++    current_value = getattr(order, field.attname)
++    print(f"  target_value: '{target_value}'")
++    print(f"  current_value: '{current_value}'")
++    print(f"  Are they different? {target_value != current_value}")
++    
++    order.save()
++    print(f"\nAfter order save: order.product_id = '{order.product_id}'")
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 2428218696..2db3717585 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -937,10 +937,12 @@ class Model(metaclass=ModelBase):
+                     # Use pk from related object if it has been saved after
+                     # an assignment.
+                     setattr(self, field.attname, obj.pk)
+-                # If the relationship's pk/to_field was changed, clear the
+-                # cached relationship.
+-                if getattr(obj, field.target_field.attname) != getattr(self, field.attname):
+-                    field.delete_cached_value(self)
++                # If the relationship's pk/to_field was changed, update the
++                # foreign key value to match the related object's current pk.
++                elif getattr(obj, field.target_field.attname) != getattr(self, field.attname):
++                    setattr(self, field.attname, getattr(obj, field.target_field.attname))
++                    if field.is_cached(self):
++                        field.delete_cached_value(self)
+ 
+     def delete(self, using=None, keep_parents=False):
+         using = using or router.db_for_write(self.__class__, instance=self)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..b8811cd54b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,139 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Testing the issue...")
++
++# Test case 1: The problematic case
++print("\nTest case 1: Setting primary key after assignment (problematic)")
++try:
++    with transaction.atomic():
++        order = Order()
++        order.product = Product()
++        order.product.sku = "foo"
++        order.product.save()
++        print(f"Product saved with sku: {order.product.sku}")
++        print(f"Order.product_id before save: {order.product_id}")
++        order.save()
++        print(f"Order.product_id after save: {order.product_id}")
++        
++        # Check what's in the database
++        exists_empty = Order.objects.filter(product_id="").exists()
++        exists_correct = Order.objects.filter(product_id="foo").exists()
++        print(f"Order with product_id='' exists: {exists_empty}")
++        print(f"Order with product_id='foo' exists: {exists_correct}")
++        
++        if exists_empty:
++            print("BUG CONFIRMED: Order saved with empty product_id!")
++        
++        # This will fail on commit due to FK constraint
++        raise Exception("Rolling back to test next case")
++except Exception as e:
++    print(f"Transaction rolled back: {e}")
++
++# Test case 2: The working case
++print("\nTest case 2: Setting primary key before assignment (working)")
++try:
++    with transaction.atomic():
++        order = Order()
++        order.product = Product(sku="bar")
++        order.product.save()
++        print(f"Product saved with sku: {order.product.sku}")
++        print(f"Order.product_id before save: {order.product_id}")
++        order.save()
++        print(f"Order.product_id after save: {order.product_id}")
++        
++        # Check what's in the database
++        exists_correct = Order.objects.filter(product_id="bar").exists()
++        print(f"Order with product_id='bar' exists: {exists_correct}")
++        
++        if exists_correct:
++            print("SUCCESS: Order saved with correct product_id!")
++        
++        # Clean up
++        Order.objects.all().delete()
++        Product.objects.all().delete()
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test case 3: Numeric primary key (for comparison)
++print("\nTest case 3: Testing with numeric primary key")
++
++class NumericProduct(models.Model):
++    id = models.AutoField(primary_key=True)
++    name = models.CharField(max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class NumericOrder(models.Model):
++    product = models.ForeignKey(NumericProduct, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(NumericProduct)
++    schema_editor.create_model(NumericOrder)
++
++try:
++    with transaction.atomic():
++        order = NumericOrder()
++        order.product = NumericProduct()
++        order.product.name = "test"
++        order.product.save()
++        print(f"NumericProduct saved with id: {order.product.id}")
++        print(f"NumericOrder.product_id before save: {order.product_id}")
++        order.save()
++        print(f"NumericOrder.product_id after save: {order.product_id}")
++        
++        # Check what's in the database
++        exists = NumericOrder.objects.filter(product_id=order.product.id).exists()
++        print(f"NumericOrder with correct product_id exists: {exists}")
++        
++        if exists:
++            print("Numeric primary key works correctly!")
++except Exception as e:
++    print(f"Error: {e}")
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000000..e85db06cd1
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,125 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Running comprehensive tests...")
++
++# Test 1: Primary key set after assignment
++print("\nTest 1: Primary key set after assignment")
++with transaction.atomic():
++    order = Order()
++    product = Product()
++    order.product = product
++    product.sku = "test1"
++    product.save()
++    order.save()
++    
++    assert order.product_id == "test1", f"Expected 'test1', got '{order.product_id}'"
++    assert Order.objects.filter(product_id="test1").exists(), "Order not found with correct product_id"
++    print("✓ PASSED")
++    
++    # Cleanup
++    Order.objects.all().delete()
++    Product.objects.all().delete()
++
++# Test 2: Primary key changed after save
++print("\nTest 2: Primary key changed after initial save")
++with transaction.atomic():
++    product = Product(sku="initial")
++    product.save()
++    
++    order = Order(product=product)
++    order.save()
++    
++    # Change the primary key
++    product.sku = "changed"
++    product.save()
++    
++    # Save order again
++    order.save()
++    
++    assert order.product_id == "changed", f"Expected 'changed', got '{order.product_id}'"
++    print("✓ PASSED")
++    
++    # Cleanup
++    Order.objects.all().delete()
++    Product.objects.all().delete()
++
++# Test 3: Empty string primary key gets updated
++print("\nTest 3: Empty string primary key gets updated")
++with transaction.atomic():
++    order = Order()
++    product = Product()  # sku is empty string by default
++    order.product = product
++    
++    # Verify initial state
++    assert order.product_id == "", "Initial product_id should be empty string"
++    
++    # Set sku and save
++    product.sku = "test3"
++    product.save()
++    order.save()
++    
++    assert order.product_id == "test3", f"Expected 'test3', got '{order.product_id}'"
++    assert Order.objects.filter(product_id="test3").exists(), "Order not found with correct product_id"
++    print("✓ PASSED")
++    
++    # Cleanup
++    Order.objects.all().delete()
++    Product.objects.all().delete()
++
++# Test 4: Ensure existing behavior still works
++print("\nTest 4: Primary key set before assignment (existing behavior)")
++with transaction.atomic():
++    product = Product(sku="test4")
++    product.save()
++    
++    order = Order(product=product)
++    order.save()
++    
++    assert order.product_id == "test4", f"Expected 'test4', got '{order.product_id}'"
++    assert Order.objects.filter(product_id="test4").exists(), "Order not found with correct product_id"
++    print("✓ PASSED")
++
++print("\n✅ All tests passed!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..faca2ef402
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,149 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Models with different field types
++class IntProduct(models.Model):
++    id = models.IntegerField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class IntOrder(models.Model):
++    product = models.ForeignKey(IntProduct, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++    schema_editor.create_model(IntProduct)
++    schema_editor.create_model(IntOrder)
++
++print("Running edge case tests...")
++
++# Test 1: Primary key set after assignment (main fix)
++print("\nTest 1: Primary key set after assignment")
++with transaction.atomic():
++    product = Product()
++    order = Order(product=product)
++    
++    # Set pk after assignment
++    product.sku = "test1"
++    product.save()
++    order.save()
++    assert order.product_id == "test1"
++    
++    print("✓ PASSED")
++    
++    # Cleanup
++    Order.objects.all().delete()
++    Product.objects.all().delete()
++
++# Test 2: Non-string primary key (IntegerField)
++print("\nTest 2: Non-string primary key (IntegerField)")
++with transaction.atomic():
++    int_product = IntProduct()
++    int_order = IntOrder(product=int_product)
++    
++    # Set pk after assignment
++    int_product.id = 123
++    int_product.save()
++    int_order.save()
++    
++    assert int_order.product_id == 123
++    
++    print("✓ PASSED")
++    
++    # Cleanup
++    IntOrder.objects.all().delete()
++    IntProduct.objects.all().delete()
++
++# Test 3: None to value transition
++print("\nTest 3: None to value transition for nullable FK")
++
++class NullableOrder(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE, null=True, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(NullableOrder)
++
++with transaction.atomic():
++    nullable_order = NullableOrder()
++    nullable_order.save()
++    assert nullable_order.product_id is None
++    
++    # Assign a product
++    product = Product()
++    nullable_order.product = product
++    product.sku = "nullable-test"
++    product.save()
++    nullable_order.save()
++    
++    assert nullable_order.product_id == "nullable-test"
++    
++    print("✓ PASSED")
++
++# Test 4: Ensure the fix doesn't affect already-set foreign keys
++print("\nTest 4: Already-set foreign keys remain unchanged")
++with transaction.atomic():
++    product1 = Product(sku="prod1")
++    product1.save()
++    
++    product2 = Product(sku="prod2")
++    product2.save()
++    
++    order = Order(product=product1)
++    order.save()
++    
++    # The FK is already set to prod1
++    assert order.product_id == "prod1"
++    
++    # Even if we save again, it shouldn't change
++    order.save()
++    assert order.product_id == "prod1"
++    
++    print("✓ PASSED")
++
++print("\n✅ All edge case tests passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..9edfda1379
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,78 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++import traceback
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Testing the fix...")
++
++# Test case 1: The problematic case
++print("\nTest case 1: Setting primary key after assignment")
++try:
++    with transaction.atomic():
++        order = Order()
++        order.product = Product()
++        order.product.sku = "foo"
++        order.product.save()
++        print(f"Product saved with sku: {order.product.sku}")
++        print(f"Order.product_id before save: {order.product_id}")
++        order.save()
++        print(f"Order.product_id after save: {order.product_id}")
++        
++        # Check what's in the database
++        exists_empty = Order.objects.filter(product_id="").exists()
++        exists_correct = Order.objects.filter(product_id="foo").exists()
++        print(f"Order with product_id='' exists: {exists_empty}")
++        print(f"Order with product_id='foo' exists: {exists_correct}")
++        
++        if exists_correct and not exists_empty:
++            print("SUCCESS: Bug is fixed!")
++        else:
++            print("FAILED: Bug still exists")
++            
++        # Clean up
++        Order.objects.all().delete()
++        Product.objects.all().delete()
++except Exception as e:
++    print(f"Error: {e}")
++    traceback.print_exc()
+diff --git a/test_foreign_key_pk_update.py b/test_foreign_key_pk_update.py
+new file mode 100644
+index 0000000000..6e20dcfdbd
+--- /dev/null
++++ b/test_foreign_key_pk_update.py
+@@ -0,0 +1,116 @@
++"""
++Test for foreign key updates when related object's primary key changes.
++"""
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'test_fk_pk_update',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++from django.db import models, transaction
++from django.test import TestCase
++
++
++class CharPKProduct(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_fk_pk_update'
++
++
++class CharPKOrder(models.Model):
++    product = models.ForeignKey(CharPKProduct, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_fk_pk_update'
++
++
++class ForeignKeyPrimaryKeyUpdateTest(TestCase):
++    def test_foreign_key_updates_when_char_pk_set_after_assignment(self):
++        """
++        Test that foreign key is updated when a CharField primary key
++        is set after the foreign key assignment.
++        """
++        with transaction.atomic():
++            order = CharPKOrder()
++            product = CharPKProduct()
++            
++            # Assign product before setting its primary key
++            order.product = product
++            
++            # Set primary key after assignment
++            product.sku = "test-sku"
++            product.save()
++            
++            # Save order - the foreign key should be updated
++            order.save()
++            
++            # Verify the foreign key was updated correctly
++            self.assertEqual(order.product_id, "test-sku")
++            
++            # Verify it's saved correctly in the database
++            saved_order = CharPKOrder.objects.get(pk=order.pk)
++            self.assertEqual(saved_order.product_id, "test-sku")
++            self.assertEqual(saved_order.product.sku, "test-sku")
++    
++    def test_foreign_key_updates_when_char_pk_changed_after_save(self):
++        """
++        Test that foreign key is updated when a CharField primary key
++        is changed after both objects are saved.
++        """
++        with transaction.atomic():
++            # Create and save product with initial sku
++            product = CharPKProduct(sku="initial-sku")
++            product.save()
++            
++            # Create and save order
++            order = CharPKOrder(product=product)
++            order.save()
++            
++            # Verify initial state
++            self.assertEqual(order.product_id, "initial-sku")
++            
++            # Change the product's primary key
++            product.sku = "updated-sku"
++            product.save()
++            
++            # Save order again - the foreign key should be updated
++            order.save()
++            
++            # Verify the foreign key was updated
++            self.assertEqual(order.product_id, "updated-sku")
++            
++            # Verify it's saved correctly in the database
++            saved_order = CharPKOrder.objects.get(pk=order.pk)
++            self.assertEqual(saved_order.product_id, "updated-sku")
++
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(CharPKProduct)
++        schema_editor.create_model(CharPKOrder)
++    
++    # Run tests
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.ForeignKeyPrimaryKeyUpdateTest"])
+diff --git a/test_pk_change.py b/test_pk_change.py
+new file mode 100644
+index 0000000000..ec5c7a3d0d
+--- /dev/null
++++ b/test_pk_change.py
+@@ -0,0 +1,57 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++
++print("Testing primary key changes...")
++
++with transaction.atomic():
++    # Create a product
++    product = Product(sku="first")
++    product.save()
++    print(f"Created product with sku='first'")
++    print(f"Products in DB: {list(Product.objects.values_list('sku', flat=True))}")
++    
++    # Try to change the primary key
++    product.sku = "second"
++    product.save()
++    print(f"\nAfter changing sku to 'second' and saving:")
++    print(f"product.sku = '{product.sku}'")
++    print(f"Products in DB: {list(Product.objects.values_list('sku', flat=True))}")
++    
++    # Check if both exist
++    print(f"\nProduct.objects.filter(sku='first').exists(): {Product.objects.filter(sku='first').exists()}")
++    print(f"Product.objects.filter(sku='second').exists(): {Product.objects.filter(sku='second').exists()}")
+diff --git a/test_with_prints.py b/test_with_prints.py
+new file mode 100644
+index 0000000000..c5b9e970b7
+--- /dev/null
++++ b/test_with_prints.py
+@@ -0,0 +1,81 @@
++import os
++import django
++from django.db import models, transaction
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Monkey patch to add debug prints
++from django.db.models import base
++original_prepare = base.Model._prepare_related_fields_for_save
++
++def debug_prepare(self, operation_name):
++    print(f"\n_prepare_related_fields_for_save called for {self.__class__.__name__}")
++    for field in self._meta.concrete_fields:
++        if field.is_relation and field.is_cached(self):
++            obj = getattr(self, field.name, None)
++            if obj:
++                print(f"  Field: {field.name}")
++                print(f"    obj.pk: {obj.pk}")
++                print(f"    getattr(self, field.attname): {getattr(self, field.attname)}")
++                print(f"    field.target_field.attname: {field.target_field.attname}")
++                print(f"    getattr(obj, field.target_field.attname): {getattr(obj, field.target_field.attname)}")
++    original_prepare(self, operation_name)
++    print(f"After _prepare_related_fields_for_save: {self.__class__.__name__}")
++    for field in self._meta.concrete_fields:
++        if field.is_relation and field.is_cached(self):
++            print(f"  {field.attname}: {getattr(self, field.attname)}")
++
++base.Model._prepare_related_fields_for_save = debug_prepare
++
++# Define test models
++class Product(models.Model):
++    sku = models.CharField(primary_key=True, max_length=50)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Order(models.Model):
++    product = models.ForeignKey(Product, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++    schema_editor.create_model(Order)
++
++print("Testing with debug prints...")
++
++with transaction.atomic():
++    product = Product()
++    order = Order(product=product)
++    
++    # Update pk again and save
++    product.sku = "second"
++    product.save()
++    
++    print("\nSaving order...")
++    order.save()
++    print(f"Final order.product_id: '{order.product_id}'")
+diff --git a/tests/model_fields/test_foreignkey.py b/tests/model_fields/test_foreignkey.py
+index d30cca9b5c..d668b02eeb 100644
+--- a/tests/model_fields/test_foreignkey.py
++++ b/tests/model_fields/test_foreignkey.py
+@@ -3,7 +3,7 @@ from decimal import Decimal
+ from django.apps import apps
+ from django.core import checks
+ from django.core.exceptions import FieldError
+-from django.db import models
++from django.db import models, transaction
+ from django.test import TestCase, skipIfDBFeature
+ from django.test.utils import isolate_apps
+ 
+@@ -147,3 +147,59 @@ class ForeignKeyTests(TestCase):
+         )
+         with self.assertRaisesMessage(FieldError, msg):
+             Related._meta.get_field('child').related_fields
++
++    def test_foreign_key_update_with_char_pk_change(self):
++        """
++        Test that foreign key is updated when a CharField primary key
++        is set after the foreign key assignment (#xxxxx).
++        """
++        # Test case 1: Primary key set after assignment
++        with transaction.atomic():
++            char_model = PrimaryKeyCharModel()
++            fk_model = FkToChar()
++            fk_model.out = char_model
++            
++            # At this point, fk_model.out_id should be empty string
++            self.assertEqual(fk_model.out_id, '')
++            
++            # Set the primary key and save
++            char_model.string = 'test-pk-1'
++            char_model.save()
++            fk_model.save()
++            
++            # The foreign key should have been updated
++            self.assertEqual(fk_model.out_id, 'test-pk-1')
++            
++            # Verify it's saved correctly in the database
++            saved_fk_model = FkToChar.objects.get(pk=fk_model.pk)
++            self.assertEqual(saved_fk_model.out_id, 'test-pk-1')
++            self.assertEqual(saved_fk_model.out.string, 'test-pk-1')
++            
++            # Clean up
++            FkToChar.objects.all().delete()
++            PrimaryKeyCharModel.objects.all().delete()
++        
++        # Test case 2: Primary key changed after save
++        with transaction.atomic():
++            char_model = PrimaryKeyCharModel(string='initial-pk')
++            char_model.save()
++            
++            fk_model = FkToChar(out=char_model)
++            fk_model.save()
++            
++            # Verify initial state
++            self.assertEqual(fk_model.out_id, 'initial-pk')
++            
++            # Change the primary key
++            char_model.string = 'updated-pk'
++            char_model.save()
++            
++            # Save the FK model again - the foreign key should be updated
++            fk_model.save()
++            
++            # The foreign key should have been updated
++            self.assertEqual(fk_model.out_id, 'updated-pk')
++            
++            # Clean up
++            FkToChar.objects.all().delete()
++            PrimaryKeyCharModel.objects.all().delete()

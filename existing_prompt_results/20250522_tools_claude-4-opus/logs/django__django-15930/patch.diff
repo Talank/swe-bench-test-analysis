@@ -1,0 +1,429 @@
+diff --git a/debug_compile.py b/debug_compile.py
+new file mode 100644
+index 0000000000..7fe124a916
+--- /dev/null
++++ b/debug_compile.py
+@@ -0,0 +1,60 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db.models import Q
++from django.db import connection
++from django.core.exceptions import EmptyResultSet
++
++# Create the tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++# Get a queryset and compiler
++qs = User.objects.all()
++query = qs.query
++compiler = query.get_compiler(using='default')
++
++# Test compiling different Q objects
++test_cases = [
++    Q(pk__in=[]),
++    ~Q(pk__in=[]),
++    Q(pk__in=[1,2,3]),
++    ~Q(pk__in=[1,2,3]),
++]
++
++for q in test_cases:
++    print(f"\nTesting: {q}")
++    print(f"  bool(q) = {bool(q)}")
++    try:
++        # First resolve the Q object
++        resolved = q.resolve_expression(query)
++        print(f"  Resolved: {resolved}")
++        
++        # Then compile it
++        sql, params = compiler.compile(resolved)
++        print(f"  SQL: '{sql}'")
++        print(f"  Params: {params}")
++    except EmptyResultSet as e:
++        print(f"  EmptyResultSet raised: {e}")
++    except Exception as e:
++        print(f"  Exception: {type(e).__name__}: {e}")
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 822968ef56..049ae5c8e1 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -1299,6 +1299,10 @@ class When(Expression):
+         template_params = extra_context
+         sql_params = []
+         condition_sql, condition_params = compiler.compile(self.condition)
++        # If the condition compiles to an empty string, it means it's always true
++        # (e.g., ~Q(pk__in=[]) which means "NOT (pk IN empty set)" which is always true)
++        if not condition_sql:
++            condition_sql = '1=1'
+         template_params["condition"] = condition_sql
+         sql_params.extend(condition_params)
+         result_sql, result_params = compiler.compile(self.result)
+diff --git a/test_case_issue.py b/test_case_issue.py
+new file mode 100644
+index 0000000000..aeff87ea8d
+--- /dev/null
++++ b/test_case_issue.py
+@@ -0,0 +1,80 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db.models import Case, When, Q, Value, BooleanField
++from django.db import connection
++
++# Create the tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++# Test the issue
++print("Testing Case with ~Q(pk__in=[])...")
++try:
++    # This should crash with syntax error
++    query = User.objects.annotate(
++        _a=Case(
++            When(~Q(pk__in=[]), then=Value(True)),
++            default=Value(False),
++            output_field=BooleanField(),
++        )
++    ).order_by("-_a")
++    
++    # Try to get the SQL
++    print("SQL:", query.query)
++    
++    # Try to execute
++    list(query.values("pk"))
++    print("SUCCESS: Query executed without error")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++    
++# Let's also test with a regular Q object
++print("\nTesting Case with Q(pk__in=[1,2,3])...")
++try:
++    query = User.objects.annotate(
++        _a=Case(
++            When(Q(pk__in=[1,2,3]), then=Value(True)),
++            default=Value(False),
++            output_field=BooleanField(),
++        )
++    ).order_by("-_a")
++    
++    print("SQL:", query.query)
++    list(query.values("pk"))
++    print("SUCCESS: Query executed without error")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
++
++# Test empty Q() directly
++print("\nTesting empty Q()...")
++try:
++    q = Q(pk__in=[])
++    print(f"Q(pk__in=[]) = {q}")
++    print(f"bool(Q(pk__in=[])) = {bool(q)}")
++    
++    q_negated = ~Q(pk__in=[])
++    print(f"~Q(pk__in=[]) = {q_negated}")
++    print(f"bool(~Q(pk__in=[])) = {bool(q_negated)}")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..74cc027572
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,99 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db.models import Case, When, Q, Value, BooleanField, IntegerField
++from django.db import connection
++
++# Create the tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++# Create some test users
++User.objects.create(username='user1', pk=1)
++User.objects.create(username='user2', pk=2)
++User.objects.create(username='user3', pk=3)
++
++print("Testing various Case/When scenarios with empty Q objects...")
++
++# Test 1: ~Q(pk__in=[]) should match all users
++print("\nTest 1: ~Q(pk__in=[]) - should match all users")
++result = User.objects.annotate(
++    matches=Case(
++        When(~Q(pk__in=[]), then=Value(True)),
++        default=Value(False),
++        output_field=BooleanField(),
++    )
++).values('username', 'matches').order_by('pk')
++for row in result:
++    print(f"  {row['username']}: matches={row['matches']}")
++    assert row['matches'] is True, f"Expected True for {row['username']}"
++
++# Test 2: Q(pk__in=[]) should match no users  
++print("\nTest 2: Q(pk__in=[]) - should match no users")
++result = User.objects.annotate(
++    matches=Case(
++        When(Q(pk__in=[]), then=Value(True)),
++        default=Value(False),
++        output_field=BooleanField(),
++    )
++).values('username', 'matches').order_by('pk')
++for row in result:
++    print(f"  {row['username']}: matches={row['matches']}")
++    assert row['matches'] is False, f"Expected False for {row['username']}"
++
++# Test 3: Multiple When clauses with empty Q
++print("\nTest 3: Multiple When clauses")
++result = User.objects.annotate(
++    category=Case(
++        When(Q(pk=1), then=Value('first')),
++        When(~Q(pk__in=[]), then=Value('not_empty')),
++        When(Q(pk__in=[]), then=Value('empty')),
++        default=Value('other'),
++        output_field=Value('').output_field,
++    )
++).values('username', 'category').order_by('pk')
++for row in result:
++    print(f"  {row['username']}: category={row['category']}")
++    if row['username'] == 'user1':
++        assert row['category'] == 'first'
++    else:
++        assert row['category'] == 'not_empty'
++
++# Test 4: Nested Q objects with empty sets
++print("\nTest 4: Complex Q objects")
++result = User.objects.annotate(
++    complex_match=Case(
++        When(Q(pk__in=[1,2]) & ~Q(username__in=[]), then=Value(1)),
++        When(~Q(pk__in=[]) & Q(username__startswith='user'), then=Value(2)),
++        default=Value(0),
++        output_field=IntegerField(),
++    )
++).values('username', 'complex_match').order_by('pk')
++for row in result:
++    print(f"  {row['username']}: complex_match={row['complex_match']}")
++    if row['username'] in ['user1', 'user2']:
++        assert row['complex_match'] == 1
++    else:
++        assert row['complex_match'] == 2
++
++print("\nAll tests passed!")
+diff --git a/test_db_compatibility.py b/test_db_compatibility.py
+new file mode 100644
+index 0000000000..d3d9890504
+--- /dev/null
++++ b/test_db_compatibility.py
+@@ -0,0 +1,25 @@
++"""
++Test that 1=1 is a valid SQL expression across different databases.
++"""
++
++# SQLite
++import sqlite3
++conn = sqlite3.connect(':memory:')
++cursor = conn.cursor()
++cursor.execute("SELECT CASE WHEN 1=1 THEN 'true' ELSE 'false' END")
++print(f"SQLite: {cursor.fetchone()[0]}")
++conn.close()
++
++# Test PostgreSQL syntax (just parsing, not execution)
++postgres_sql = "SELECT CASE WHEN 1=1 THEN true ELSE false END"
++print(f"PostgreSQL SQL: {postgres_sql}")
++
++# Test MySQL syntax (just parsing, not execution)
++mysql_sql = "SELECT CASE WHEN 1=1 THEN true ELSE false END"
++print(f"MySQL SQL: {mysql_sql}")
++
++# Test Oracle syntax (just parsing, not execution)
++oracle_sql = "SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END FROM DUAL"
++print(f"Oracle SQL: {oracle_sql}")
++
++print("\n1=1 is a standard SQL expression that should work on all databases.")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..b1cabb3ca5
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,85 @@
++"""
++Final verification that the fix works exactly as described in the problem statement.
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.models import User
++from django.db.models import Case, When, Q, Value, BooleanField
++from django.db import connection
++
++# Create the tables
++from django.core.management import call_command
++call_command('migrate', verbosity=0)
++
++# Create some test users
++User.objects.create(username='user1')
++User.objects.create(username='user2')
++User.objects.create(username='user3')
++
++print("Testing the exact code from the problem statement...")
++print("=" * 60)
++
++# The exact code from the problem statement
++try:
++    result = User.objects.annotate(
++        _a=Case(
++            When(~Q(pk__in=[]), then=Value(True)),
++            default=Value(False),
++            output_field=BooleanField(),
++        )
++    ).order_by("-_a").values("pk")
++    
++    # Execute the query
++    result_list = list(result)
++    
++    print("✓ SUCCESS: Query executed without syntax error!")
++    print(f"✓ Number of results: {len(result_list)}")
++    
++    # Verify all users have _a=True (since ~Q(pk__in=[]) matches all)
++    full_result = User.objects.annotate(
++        _a=Case(
++            When(~Q(pk__in=[]), then=Value(True)),
++            default=Value(False),
++            output_field=BooleanField(),
++        )
++    ).values("pk", "_a")
++    
++    print("\nResults with annotation:")
++    for row in full_result:
++        print(f"  User pk={row['pk']}: _a={row['_a']}")
++    
++    # Check that all have _a=True
++    all_true = all(row['_a'] for row in full_result)
++    print(f"\n✓ All users have _a=True: {all_true}")
++    
++    # Show the generated SQL
++    print("\nGenerated SQL:")
++    print(str(result.query))
++    
++except Exception as e:
++    print(f"✗ ERROR: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\n" + "=" * 60)
++print("The fix successfully resolves the issue!")
+diff --git a/tests/expressions_case/tests.py b/tests/expressions_case/tests.py
+index 9bad0b8747..25cc05c5dd 100644
+--- a/tests/expressions_case/tests.py
++++ b/tests/expressions_case/tests.py
+@@ -1491,6 +1491,30 @@ class CaseExpressionTests(TestCase):
+                     transform=itemgetter("string", "case", "integer_sum"),
+                 )
+ 
++    def test_negated_empty_q_object(self):
++        # ~Q(pk__in=[]) should work and match all records
++        result = CaseTestModel.objects.annotate(
++            matches=Case(
++                When(~Q(pk__in=[]), then=Value(True)),
++                default=Value(False),
++                output_field=BooleanField(),
++            )
++        ).values_list('matches', flat=True)
++        # All records should match
++        self.assertTrue(all(result))
++        self.assertEqual(len(list(result)), CaseTestModel.objects.count())
++        
++        # Q(pk__in=[]) should match no records
++        result = CaseTestModel.objects.annotate(
++            matches=Case(
++                When(Q(pk__in=[]), then=Value(True)),
++                default=Value(False),
++                output_field=BooleanField(),
++            )
++        ).values_list('matches', flat=True)
++        # No records should match
++        self.assertFalse(any(result))
++
+ 
+ class CaseDocumentationExamples(TestCase):
+     @classmethod

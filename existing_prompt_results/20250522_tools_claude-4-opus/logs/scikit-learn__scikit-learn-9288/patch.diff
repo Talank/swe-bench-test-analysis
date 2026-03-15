@@ -1,0 +1,296 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..72a9eb7ff
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,11 @@
++from sklearn.cluster import KMeans
++from sklearn.datasets import make_blobs
++
++# Generate some data
++X, y = make_blobs(n_samples=10000, centers=10, n_features=2, random_state=2)
++
++# Run KMeans with various n_jobs values
++for n_jobs in range(1, 5):
++    kmeans = KMeans(n_clusters=10, random_state=2, n_jobs=n_jobs)
++    kmeans.fit(X)
++    print(f'(n_jobs={n_jobs}) kmeans.inertia_ = {kmeans.inertia_}')
+diff --git a/sklearn/cluster/k_means_.py b/sklearn/cluster/k_means_.py
+index b7fbdf7da..e07ba5ac1 100644
+--- a/sklearn/cluster/k_means_.py
++++ b/sklearn/cluster/k_means_.py
+@@ -360,6 +360,9 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
+     else:
+         raise ValueError("Algorithm must be 'auto', 'full' or 'elkan', got"
+                          " %s" % str(algorithm))
++    # Generate seeds for all runs to ensure consistency between serial and parallel execution
++    seeds = random_state.randint(np.iinfo(np.int32).max, size=n_init)
++    
+     if effective_n_jobs(n_jobs) == 1:
+         # For a single thread, less memory is needed if we just store one set
+         # of the best results (as opposed to one set per run per thread).
+@@ -369,7 +372,7 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
+                 X, sample_weight, n_clusters, max_iter=max_iter, init=init,
+                 verbose=verbose, precompute_distances=precompute_distances,
+                 tol=tol, x_squared_norms=x_squared_norms,
+-                random_state=random_state)
++                random_state=seeds[it])
+             # determine if these results are the best so far
+             if best_inertia is None or inertia < best_inertia:
+                 best_labels = labels.copy()
+@@ -378,7 +381,6 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
+                 best_n_iter = n_iter_
+     else:
+         # parallelisation of k-means runs
+-        seeds = random_state.randint(np.iinfo(np.int32).max, size=n_init)
+         results = Parallel(n_jobs=n_jobs, verbose=0)(
+             delayed(kmeans_single)(X, sample_weight, n_clusters,
+                                    max_iter=max_iter, init=init,
+diff --git a/test_custom_init.py b/test_custom_init.py
+new file mode 100644
+index 000000000..cbe7a5a2f
+--- /dev/null
++++ b/test_custom_init.py
+@@ -0,0 +1,59 @@
++import numpy as np
++from sklearn.cluster import KMeans
++from sklearn.datasets import make_blobs
++
++
++def test_kmeans_custom_init_njobs():
++    """Test that custom initialization works consistently with different n_jobs."""
++    # Generate test data
++    X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=42)
++    
++    # Custom initialization
++    custom_centers = np.array([[0, 0], [5, 5], [-5, -5]], dtype=X.dtype)
++    
++    # Run with n_jobs=1
++    kmeans_single = KMeans(n_clusters=3, init=custom_centers, n_init=1, n_jobs=1)
++    kmeans_single.fit(X)
++    
++    # Run with n_jobs=2
++    kmeans_parallel = KMeans(n_clusters=3, init=custom_centers, n_init=1, n_jobs=2)
++    kmeans_parallel.fit(X)
++    
++    # Check that results are identical
++    assert kmeans_single.inertia_ == kmeans_parallel.inertia_
++    assert np.allclose(kmeans_single.cluster_centers_, kmeans_parallel.cluster_centers_)
++    assert np.array_equal(kmeans_single.labels_, kmeans_parallel.labels_)
++    
++    print("Custom initialization test passed!")
++
++
++def test_kmeans_callable_init_njobs():
++    """Test that callable initialization works consistently with different n_jobs."""
++    # Generate test data
++    X, _ = make_blobs(n_samples=100, centers=3, n_features=2, random_state=42)
++    
++    # Callable initialization function
++    def custom_init(X, k, random_state):
++        # Simple initialization: pick first k points
++        return X[:k].copy()
++    
++    # Run with n_jobs=1
++    kmeans_single = KMeans(n_clusters=3, init=custom_init, n_init=1, n_jobs=1, random_state=42)
++    kmeans_single.fit(X)
++    
++    # Run with n_jobs=2
++    kmeans_parallel = KMeans(n_clusters=3, init=custom_init, n_init=1, n_jobs=2, random_state=42)
++    kmeans_parallel.fit(X)
++    
++    # Check that results are identical
++    assert kmeans_single.inertia_ == kmeans_parallel.inertia_
++    assert np.allclose(kmeans_single.cluster_centers_, kmeans_parallel.cluster_centers_)
++    assert np.array_equal(kmeans_single.labels_, kmeans_parallel.labels_)
++    
++    print("Callable initialization test passed!")
++
++
++if __name__ == "__main__":
++    test_kmeans_custom_init_njobs()
++    test_kmeans_callable_init_njobs()
++    print("All custom initialization tests passed!")
+diff --git a/test_kmeans_consistency.py b/test_kmeans_consistency.py
+new file mode 100644
+index 000000000..2e1638ae7
+--- /dev/null
++++ b/test_kmeans_consistency.py
+@@ -0,0 +1,93 @@
++import numpy as np
++from sklearn.cluster import KMeans
++from sklearn.datasets import make_blobs
++
++def test_kmeans_consistency():
++    """Test that KMeans gives consistent results regardless of n_jobs."""
++    # Test with different datasets and parameters
++    test_cases = [
++        # (n_samples, n_features, n_clusters, random_state)
++        (100, 2, 5, 0),
++        (1000, 10, 10, 42),
++        (500, 5, 3, 123),
++        (10000, 2, 10, 2),  # Original test case
++    ]
++    
++    for n_samples, n_features, n_clusters, random_state in test_cases:
++        print(f"\nTesting with n_samples={n_samples}, n_features={n_features}, "
++              f"n_clusters={n_clusters}, random_state={random_state}")
++        
++        # Generate data
++        X, _ = make_blobs(n_samples=n_samples, centers=n_clusters, 
++                         n_features=n_features, random_state=random_state)
++        
++        # Run with n_jobs=1
++        kmeans_single = KMeans(n_clusters=n_clusters, random_state=random_state, n_jobs=1)
++        kmeans_single.fit(X)
++        inertia_single = kmeans_single.inertia_
++        centers_single = kmeans_single.cluster_centers_
++        labels_single = kmeans_single.labels_
++        
++        # Test with different n_jobs values
++        for n_jobs in [2, 3, 4, -1]:
++            kmeans_parallel = KMeans(n_clusters=n_clusters, random_state=random_state, n_jobs=n_jobs)
++            kmeans_parallel.fit(X)
++            
++            # Check inertia
++            assert np.allclose(inertia_single, kmeans_parallel.inertia_), \
++                f"Inertia mismatch for n_jobs={n_jobs}: {inertia_single} vs {kmeans_parallel.inertia_}"
++            
++            # Check that we get the same clustering (labels might be permuted)
++            # So we check that the inertia is the same which is sufficient
++            print(f"  n_jobs={n_jobs}: inertia={kmeans_parallel.inertia_:.6f} [OK]")
++
++def test_kmeans_different_algorithms():
++    """Test consistency across different algorithms."""
++    X, _ = make_blobs(n_samples=1000, centers=5, n_features=10, random_state=42)
++    
++    for algorithm in ['full', 'elkan', 'auto']:
++        print(f"\nTesting algorithm='{algorithm}'")
++        
++        # Run with n_jobs=1
++        kmeans_single = KMeans(n_clusters=5, random_state=42, n_jobs=1, algorithm=algorithm)
++        kmeans_single.fit(X)
++        inertia_single = kmeans_single.inertia_
++        
++        # Test with parallel execution
++        for n_jobs in [2, -1]:
++            kmeans_parallel = KMeans(n_clusters=5, random_state=42, n_jobs=n_jobs, algorithm=algorithm)
++            kmeans_parallel.fit(X)
++            
++            assert np.allclose(inertia_single, kmeans_parallel.inertia_), \
++                f"Inertia mismatch for algorithm={algorithm}, n_jobs={n_jobs}"
++            
++            print(f"  n_jobs={n_jobs}: inertia={kmeans_parallel.inertia_:.6f} [OK]")
++
++def test_kmeans_different_init_methods():
++    """Test consistency with different initialization methods."""
++    X, _ = make_blobs(n_samples=500, centers=3, n_features=5, random_state=42)
++    
++    for init in ['k-means++', 'random']:
++        print(f"\nTesting init='{init}'")
++        
++        # Run with n_jobs=1
++        kmeans_single = KMeans(n_clusters=3, random_state=42, n_jobs=1, init=init)
++        kmeans_single.fit(X)
++        inertia_single = kmeans_single.inertia_
++        
++        # Test with parallel execution
++        for n_jobs in [2, -1]:
++            kmeans_parallel = KMeans(n_clusters=3, random_state=42, n_jobs=n_jobs, init=init)
++            kmeans_parallel.fit(X)
++            
++            assert np.allclose(inertia_single, kmeans_parallel.inertia_), \
++                f"Inertia mismatch for init={init}, n_jobs={n_jobs}"
++            
++            print(f"  n_jobs={n_jobs}: inertia={kmeans_parallel.inertia_:.6f} [OK]")
++
++if __name__ == "__main__":
++    print("Testing KMeans consistency across different n_jobs values...")
++    test_kmeans_consistency()
++    test_kmeans_different_algorithms()
++    test_kmeans_different_init_methods()
++    print("\nAll tests passed! [OK]")
+diff --git a/test_njobs_consistency.py b/test_njobs_consistency.py
+new file mode 100644
+index 000000000..85273c7a5
+--- /dev/null
++++ b/test_njobs_consistency.py
+@@ -0,0 +1,78 @@
++import numpy as np
++import pytest
++from sklearn.cluster import KMeans
++from sklearn.datasets import make_blobs
++
++
++def test_kmeans_njobs_consistency():
++    """Test that KMeans gives consistent results regardless of n_jobs."""
++    # Generate test data
++    X, _ = make_blobs(n_samples=10000, centers=10, n_features=2, random_state=2)
++    
++    # Run with n_jobs=1
++    kmeans_single = KMeans(n_clusters=10, random_state=2, n_jobs=1)
++    kmeans_single.fit(X)
++    
++    # Test with different n_jobs values
++    for n_jobs in [2, 3, 4, -1]:
++        kmeans_parallel = KMeans(n_clusters=10, random_state=2, n_jobs=n_jobs)
++        kmeans_parallel.fit(X)
++        
++        # Check that inertia is exactly the same
++        assert kmeans_single.inertia_ == kmeans_parallel.inertia_, \
++            f"Inertia mismatch for n_jobs={n_jobs}: {kmeans_single.inertia_} vs {kmeans_parallel.inertia_}"
++        
++        # Check that cluster centers are the same (allowing for label permutation)
++        # We check this by verifying that the sorted distances between all pairs of centers are the same
++        from sklearn.metrics.pairwise import euclidean_distances
++        
++        dist_single = euclidean_distances(kmeans_single.cluster_centers_)
++        dist_parallel = euclidean_distances(kmeans_parallel.cluster_centers_)
++        
++        # Sort the distances to handle label permutation
++        dist_single_sorted = np.sort(dist_single.ravel())
++        dist_parallel_sorted = np.sort(dist_parallel.ravel())
++        
++        assert np.allclose(dist_single_sorted, dist_parallel_sorted), \
++            f"Cluster centers mismatch for n_jobs={n_jobs}"
++
++
++def test_kmeans_njobs_consistency_different_algorithms():
++    """Test consistency across different algorithms and n_jobs."""
++    X, _ = make_blobs(n_samples=1000, centers=5, n_features=10, random_state=42)
++    
++    for algorithm in ['full', 'elkan', 'auto']:
++        # Run with n_jobs=1
++        kmeans_single = KMeans(n_clusters=5, random_state=42, n_jobs=1, algorithm=algorithm)
++        kmeans_single.fit(X)
++        
++        # Test with parallel execution
++        kmeans_parallel = KMeans(n_clusters=5, random_state=42, n_jobs=2, algorithm=algorithm)
++        kmeans_parallel.fit(X)
++        
++        assert kmeans_single.inertia_ == kmeans_parallel.inertia_, \
++            f"Inertia mismatch for algorithm={algorithm}"
++
++
++def test_kmeans_njobs_consistency_different_init():
++    """Test consistency with different initialization methods and n_jobs."""
++    X, _ = make_blobs(n_samples=500, centers=3, n_features=5, random_state=42)
++    
++    for init in ['k-means++', 'random']:
++        # Run with n_jobs=1
++        kmeans_single = KMeans(n_clusters=3, random_state=42, n_jobs=1, init=init)
++        kmeans_single.fit(X)
++        
++        # Test with parallel execution
++        kmeans_parallel = KMeans(n_clusters=3, random_state=42, n_jobs=2, init=init)
++        kmeans_parallel.fit(X)
++        
++        assert kmeans_single.inertia_ == kmeans_parallel.inertia_, \
++            f"Inertia mismatch for init={init}"
++
++
++if __name__ == "__main__":
++    test_kmeans_njobs_consistency()
++    test_kmeans_njobs_consistency_different_algorithms()
++    test_kmeans_njobs_consistency_different_init()
++    print("All n_jobs consistency tests passed!")

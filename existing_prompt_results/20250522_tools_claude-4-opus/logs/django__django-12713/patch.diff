@@ -1,0 +1,435 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 69a5fbf389..db7df891e3 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -249,16 +249,17 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):
+             return None
+         db = kwargs.get('using')
+ 
+-        autocomplete_fields = self.get_autocomplete_fields(request)
+-        if db_field.name in autocomplete_fields:
+-            kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)
+-        elif db_field.name in self.raw_id_fields:
+-            kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)
+-        elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:
+-            kwargs['widget'] = widgets.FilteredSelectMultiple(
+-                db_field.verbose_name,
+-                db_field.name in self.filter_vertical
+-            )
++        if 'widget' not in kwargs:
++            autocomplete_fields = self.get_autocomplete_fields(request)
++            if db_field.name in autocomplete_fields:
++                kwargs['widget'] = AutocompleteSelectMultiple(db_field.remote_field, self.admin_site, using=db)
++            elif db_field.name in self.raw_id_fields:
++                kwargs['widget'] = widgets.ManyToManyRawIdWidget(db_field.remote_field, self.admin_site, using=db)
++            elif db_field.name in [*self.filter_vertical, *self.filter_horizontal]:
++                kwargs['widget'] = widgets.FilteredSelectMultiple(
++                    db_field.verbose_name,
++                    db_field.name in self.filter_vertical
++                )
+ 
+         if 'queryset' not in kwargs:
+             queryset = self.get_field_queryset(db, db_field, request)
+diff --git a/test_comprehensive_widget_override.py b/test_comprehensive_widget_override.py
+new file mode 100644
+index 0000000000..b746e54897
+--- /dev/null
++++ b/test_comprehensive_widget_override.py
+@@ -0,0 +1,148 @@
++"""Comprehensive test for widget override in formfield_for_manytomany"""
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.contrib import admin
++from django.db import models
++from django.forms import widgets
++from django.test import RequestFactory
++from django.contrib.admin.sites import AdminSite
++
++
++# Create test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    authors = models.ManyToManyField(Author, related_name='books')
++    co_authors = models.ManyToManyField(Author, related_name='co_authored_books')
++    reviewers = models.ManyToManyField(Author, related_name='reviewed_books')
++    editors = models.ManyToManyField(Author, related_name='edited_books')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create custom widget
++class CustomSelectMultiple(widgets.SelectMultiple):
++    pass
++
++
++def test_all_scenarios():
++    """Test widget override works in all scenarios"""
++    
++    # Test 1: filter_vertical with widget override
++    class BookAdmin1(admin.ModelAdmin):
++        filter_vertical = ('authors',)
++        
++        def formfield_for_manytomany(self, db_field, request, **kwargs):
++            if db_field.name == 'authors':
++                kwargs['widget'] = CustomSelectMultiple()
++            return super().formfield_for_manytomany(db_field, request, **kwargs)
++    
++    site = AdminSite()
++    book_admin = BookAdmin1(Book, site)
++    request = RequestFactory().get('/')
++    authors_field = Book._meta.get_field('authors')
++    formfield = book_admin.formfield_for_manytomany(authors_field, request)
++    
++    print("Test 1 - filter_vertical with widget override:")
++    print(f"  Widget type: {type(formfield.widget)}")
++    print(f"  Is CustomSelectMultiple? {isinstance(formfield.widget, CustomSelectMultiple)}")
++    assert isinstance(formfield.widget, CustomSelectMultiple), "Widget override should work with filter_vertical"
++    
++    # Test 2: filter_horizontal with widget override
++    class BookAdmin2(admin.ModelAdmin):
++        filter_horizontal = ('co_authors',)
++        
++        def formfield_for_manytomany(self, db_field, request, **kwargs):
++            if db_field.name == 'co_authors':
++                kwargs['widget'] = CustomSelectMultiple()
++            return super().formfield_for_manytomany(db_field, request, **kwargs)
++    
++    book_admin = BookAdmin2(Book, site)
++    co_authors_field = Book._meta.get_field('co_authors')
++    formfield = book_admin.formfield_for_manytomany(co_authors_field, request)
++    
++    print("\nTest 2 - filter_horizontal with widget override:")
++    print(f"  Widget type: {type(formfield.widget)}")
++    print(f"  Is CustomSelectMultiple? {isinstance(formfield.widget, CustomSelectMultiple)}")
++    assert isinstance(formfield.widget, CustomSelectMultiple), "Widget override should work with filter_horizontal"
++    
++    # Test 3: raw_id_fields with widget override
++    class BookAdmin3(admin.ModelAdmin):
++        raw_id_fields = ('reviewers',)
++        
++        def formfield_for_manytomany(self, db_field, request, **kwargs):
++            if db_field.name == 'reviewers':
++                kwargs['widget'] = CustomSelectMultiple()
++            return super().formfield_for_manytomany(db_field, request, **kwargs)
++    
++    book_admin = BookAdmin3(Book, site)
++    reviewers_field = Book._meta.get_field('reviewers')
++    formfield = book_admin.formfield_for_manytomany(reviewers_field, request)
++    
++    print("\nTest 3 - raw_id_fields with widget override:")
++    print(f"  Widget type: {type(formfield.widget)}")
++    print(f"  Is CustomSelectMultiple? {isinstance(formfield.widget, CustomSelectMultiple)}")
++    assert isinstance(formfield.widget, CustomSelectMultiple), "Widget override should work with raw_id_fields"
++    
++    # Test 4: No special configuration - should still allow widget override
++    class BookAdmin4(admin.ModelAdmin):
++        def formfield_for_manytomany(self, db_field, request, **kwargs):
++            if db_field.name == 'editors':
++                kwargs['widget'] = CustomSelectMultiple()
++            return super().formfield_for_manytomany(db_field, request, **kwargs)
++    
++    book_admin = BookAdmin4(Book, site)
++    editors_field = Book._meta.get_field('editors')
++    formfield = book_admin.formfield_for_manytomany(editors_field, request)
++    
++    print("\nTest 4 - No special config with widget override:")
++    print(f"  Widget type: {type(formfield.widget)}")
++    print(f"  Is CustomSelectMultiple? {isinstance(formfield.widget, CustomSelectMultiple)}")
++    assert isinstance(formfield.widget, CustomSelectMultiple), "Widget override should work without special config"
++    
++    # Test 5: Default behavior when no widget is specified
++    class BookAdmin5(admin.ModelAdmin):
++        filter_vertical = ('authors',)
++    
++    book_admin = BookAdmin5(Book, site)
++    formfield = book_admin.formfield_for_manytomany(authors_field, request)
++    
++    print("\nTest 5 - Default behavior (no widget override):")
++    print(f"  Widget type: {type(formfield.widget)}")
++    print(f"  Is FilteredSelectMultiple? {formfield.widget.__class__.__name__ == 'FilteredSelectMultiple'}")
++    assert formfield.widget.__class__.__name__ == 'FilteredSelectMultiple', "Default widget should be used when no override"
++
++
++if __name__ == '__main__':
++    try:
++        test_all_scenarios()
++        print("\nAll tests passed!")
++    except AssertionError as e:
++        print(f"\nTest failed: {e}")
+diff --git a/test_widget_override.py b/test_widget_override.py
+new file mode 100644
+index 0000000000..57ea54f1d7
+--- /dev/null
++++ b/test_widget_override.py
+@@ -0,0 +1,103 @@
++"""Test script to reproduce the widget override issue in formfield_for_manytomany"""
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.contrib import admin
++from django.db import models
++from django.forms import widgets
++from django.test import RequestFactory
++from django.contrib.admin.sites import AdminSite
++
++
++# Create test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    authors = models.ManyToManyField(Author)
++    editor = models.ForeignKey(Author, on_delete=models.CASCADE, related_name='edited_books', null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create custom widget
++class CustomSelectMultiple(widgets.SelectMultiple):
++    pass
++
++
++class CustomSelect(widgets.Select):
++    pass
++
++
++# Create ModelAdmin
++class BookAdmin(admin.ModelAdmin):
++    filter_vertical = ('authors',)  # This will trigger the issue
++    
++    def formfield_for_manytomany(self, db_field, request, **kwargs):
++        if db_field.name == 'authors':
++            kwargs['widget'] = CustomSelectMultiple()
++        return super().formfield_for_manytomany(db_field, request, **kwargs)
++    
++    def formfield_for_foreignkey(self, db_field, request, **kwargs):
++        if db_field.name == 'editor':
++            kwargs['widget'] = CustomSelect()
++        return super().formfield_for_foreignkey(db_field, request, **kwargs)
++
++
++# Test the issue
++def test_widget_override():
++    # Setup
++    site = AdminSite()
++    book_admin = BookAdmin(Book, site)
++    request = RequestFactory().get('/')
++    
++    # Get the many-to-many field
++    authors_field = Book._meta.get_field('authors')
++    editor_field = Book._meta.get_field('editor')
++    
++    # Test formfield_for_manytomany
++    m2m_formfield = book_admin.formfield_for_manytomany(authors_field, request)
++    print(f"ManyToMany field widget type: {type(m2m_formfield.widget)}")
++    print(f"Is CustomSelectMultiple? {isinstance(m2m_formfield.widget, CustomSelectMultiple)}")
++    
++    # Test formfield_for_foreignkey
++    fk_formfield = book_admin.formfield_for_foreignkey(editor_field, request)
++    print(f"\nForeignKey field widget type: {type(fk_formfield.widget)}")
++    print(f"Is CustomSelect? {isinstance(fk_formfield.widget, CustomSelect)}")
++    
++    # The issue: ManyToMany widget is not CustomSelectMultiple, but ForeignKey widget is CustomSelect
++    assert isinstance(fk_formfield.widget, CustomSelect), "ForeignKey widget override works"
++    assert isinstance(m2m_formfield.widget, CustomSelectMultiple), "ManyToMany widget override should work but doesn't"
++
++
++if __name__ == '__main__':
++    try:
++        test_widget_override()
++        print("\nTest passed!")
++    except AssertionError as e:
++        print(f"\nTest failed: {e}")
+diff --git a/tests/admin_views/test_widget_override.py b/tests/admin_views/test_widget_override.py
+new file mode 100644
+index 0000000000..4c0262a93e
+--- /dev/null
++++ b/tests/admin_views/test_widget_override.py
+@@ -0,0 +1,134 @@
++"""
++Tests for widget override in formfield_for_manytomany.
++"""
++
++from django.contrib import admin
++from django.contrib.admin.widgets import FilteredSelectMultiple, ManyToManyRawIdWidget
++from django.contrib.auth.models import User
++from django.db import models
++from django.forms import widgets
++from django.test import RequestFactory, TestCase
++
++
++# Test models
++class WidgetTestAuthor(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'admin_views'
++
++
++class WidgetTestBook(models.Model):
++    title = models.CharField(max_length=100)
++    authors = models.ManyToManyField(WidgetTestAuthor)
++    
++    class Meta:
++        app_label = 'admin_views'
++
++
++class CustomSelectMultiple(widgets.SelectMultiple):
++    """Custom widget for testing"""
++    pass
++
++
++class TestWidgetOverride(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.request = self.factory.get('/')
++        
++    def test_formfield_for_manytomany_widget_override_with_filter_vertical(self):
++        """Widget override should work even when field is in filter_vertical."""
++        
++        class BookAdmin(admin.ModelAdmin):
++            filter_vertical = ('authors',)
++            
++            def formfield_for_manytomany(self, db_field, request, **kwargs):
++                if db_field.name == 'authors':
++                    kwargs['widget'] = CustomSelectMultiple()
++                return super().formfield_for_manytomany(db_field, request, **kwargs)
++        
++        ma = BookAdmin(WidgetTestBook, admin.site)
++        authors_field = WidgetTestBook._meta.get_field('authors')
++        form_field = ma.formfield_for_manytomany(authors_field, self.request)
++        
++        # Widget should be our custom widget, not FilteredSelectMultiple
++        self.assertIsInstance(form_field.widget, CustomSelectMultiple)
++        self.assertNotIsInstance(form_field.widget, FilteredSelectMultiple)
++        
++    def test_formfield_for_manytomany_widget_override_with_filter_horizontal(self):
++        """Widget override should work even when field is in filter_horizontal."""
++        
++        class BookAdmin(admin.ModelAdmin):
++            filter_horizontal = ('authors',)
++            
++            def formfield_for_manytomany(self, db_field, request, **kwargs):
++                if db_field.name == 'authors':
++                    kwargs['widget'] = CustomSelectMultiple()
++                return super().formfield_for_manytomany(db_field, request, **kwargs)
++        
++        ma = BookAdmin(WidgetTestBook, admin.site)
++        authors_field = WidgetTestBook._meta.get_field('authors')
++        form_field = ma.formfield_for_manytomany(authors_field, self.request)
++        
++        # Widget should be our custom widget, not FilteredSelectMultiple
++        self.assertIsInstance(form_field.widget, CustomSelectMultiple)
++        self.assertNotIsInstance(form_field.widget, FilteredSelectMultiple)
++        
++    def test_formfield_for_manytomany_widget_override_with_raw_id_fields(self):
++        """Widget override should work even when field is in raw_id_fields."""
++        
++        class BookAdmin(admin.ModelAdmin):
++            raw_id_fields = ('authors',)
++            
++            def formfield_for_manytomany(self, db_field, request, **kwargs):
++                if db_field.name == 'authors':
++                    kwargs['widget'] = CustomSelectMultiple()
++                return super().formfield_for_manytomany(db_field, request, **kwargs)
++        
++        ma = BookAdmin(WidgetTestBook, admin.site)
++        authors_field = WidgetTestBook._meta.get_field('authors')
++        form_field = ma.formfield_for_manytomany(authors_field, self.request)
++        
++        # Widget should be our custom widget, not ManyToManyRawIdWidget
++        self.assertIsInstance(form_field.widget, CustomSelectMultiple)
++        self.assertNotIsInstance(form_field.widget, ManyToManyRawIdWidget)
++        
++    def test_formfield_for_manytomany_default_behavior(self):
++        """Default widgets should be used when no widget override is specified."""
++        
++        class BookAdmin(admin.ModelAdmin):
++            filter_vertical = ('authors',)
++        
++        ma = BookAdmin(WidgetTestBook, admin.site)
++        authors_field = WidgetTestBook._meta.get_field('authors')
++        form_field = ma.formfield_for_manytomany(authors_field, self.request)
++        
++        # Should use default FilteredSelectMultiple widget
++        self.assertIsInstance(form_field.widget, FilteredSelectMultiple)
++        
++    def test_formfield_for_foreignkey_widget_override_consistency(self):
++        """formfield_for_foreignkey already supports widget override - verify it still works."""
++        
++        class CustomSelect(widgets.Select):
++            pass
++        
++        # Create a test model with ForeignKey
++        class WidgetTestBookWithEditor(models.Model):
++            title = models.CharField(max_length=100)
++            editor = models.ForeignKey(User, on_delete=models.CASCADE)
++            
++            class Meta:
++                app_label = 'admin_views'
++            
++        class BookWithEditorAdmin(admin.ModelAdmin):
++            def formfield_for_foreignkey(self, db_field, request, **kwargs):
++                if db_field.name == 'editor':
++                    kwargs['widget'] = CustomSelect()
++                return super().formfield_for_foreignkey(db_field, request, **kwargs)
++        
++        ma = BookWithEditorAdmin(WidgetTestBookWithEditor, admin.site)
++        editor_field = WidgetTestBookWithEditor._meta.get_field('editor')
++        form_field = ma.formfield_for_foreignkey(editor_field, self.request)
++        
++        # Should use our custom widget
++        self.assertIsInstance(form_field.widget, CustomSelect)

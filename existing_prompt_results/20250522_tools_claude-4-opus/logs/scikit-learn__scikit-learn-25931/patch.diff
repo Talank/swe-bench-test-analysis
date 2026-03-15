@@ -1,0 +1,337 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..0dd07ea95
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,37 @@
++from sklearn.ensemble import IsolationForest
++import pandas as pd
++import warnings
++
++# Capture warnings
++warnings.filterwarnings("error", category=UserWarning)
++warnings.filterwarnings("ignore", category=DeprecationWarning)
++
++print("Testing IsolationForest with pandas DataFrame...")
++
++# Test case 1: With contamination="auto" (should not raise warning)
++print("\nTest 1: contamination='auto'")
++try:
++    X = pd.DataFrame({"a": [-1.1, 0.3, 0.5, 100]})
++    clf = IsolationForest(random_state=0, contamination="auto").fit(X)
++    print("✓ No warning raised (expected)")
++except UserWarning as e:
++    print(f"✗ Warning raised: {e}")
++
++# Test case 2: With contamination=0.05 (currently raises warning)
++print("\nTest 2: contamination=0.05")
++try:
++    X = pd.DataFrame({"a": [-1.1, 0.3, 0.5, 100]})
++    clf = IsolationForest(random_state=0, contamination=0.05).fit(X)
++    print("✓ No warning raised")
++except UserWarning as e:
++    print(f"✗ Warning raised: {e}")
++
++# Test case 3: With numpy array (should not raise warning)
++print("\nTest 3: numpy array with contamination=0.05")
++try:
++    import numpy as np
++    X_np = np.array([[-1.1], [0.3], [0.5], [100]])
++    clf = IsolationForest(random_state=0, contamination=0.05).fit(X_np)
++    print("✓ No warning raised (expected)")
++except UserWarning as e:
++    print(f"✗ Warning raised: {e}")
+diff --git a/sklearn/ensemble/_iforest.py b/sklearn/ensemble/_iforest.py
+index 4d6c1c3f0..0cd5c156c 100644
+--- a/sklearn/ensemble/_iforest.py
++++ b/sklearn/ensemble/_iforest.py
+@@ -345,7 +345,9 @@ class IsolationForest(OutlierMixin, BaseBagging):
+             return self
+ 
+         # else, define offset_ wrt contamination parameter
+-        self.offset_ = np.percentile(self.score_samples(X), 100.0 * self.contamination)
++        # Directly compute scores without re-validating X since we're in fit()
++        scores = -self._compute_chunked_score_samples(X)
++        self.offset_ = np.percentile(scores, 100.0 * self.contamination)
+ 
+         return self
+ 
+diff --git a/sklearn/ensemble/tests/test_iforest.py b/sklearn/ensemble/tests/test_iforest.py
+index 5f046540f..1c7ecfe82 100644
+--- a/sklearn/ensemble/tests/test_iforest.py
++++ b/sklearn/ensemble/tests/test_iforest.py
+@@ -339,3 +339,36 @@ def test_base_estimator_property_deprecated():
+     )
+     with pytest.warns(FutureWarning, match=warn_msg):
+         model.base_estimator_
++
++
++def test_iforest_pandas_dataframe_no_warning():
++    """Check that IsolationForest does not raise feature name warning with pandas DataFrame."""
++    pd = pytest.importorskip("pandas")
++    
++    # Create a pandas DataFrame
++    X = pd.DataFrame({"feature1": [-1.1, 0.3, 0.5, 100]})
++    
++    # Test with contamination != "auto" which previously caused the warning
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(random_state=0, contamination=0.05)
++        clf.fit(X)
++        
++        # Filter out deprecation warnings and check for UserWarnings
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected UserWarning: {user_warnings}"
++    
++    # Test that it still works with "auto" contamination
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf_auto = IsolationForest(random_state=0, contamination="auto")
++        clf_auto.fit(X)
++        
++        # Filter out deprecation warnings and check for UserWarnings
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected UserWarning: {user_warnings}"
++    
++    # Ensure predictions work correctly
++    predictions = clf.predict(X)
++    assert predictions.shape == (4,)
++    assert np.sum(predictions == -1) >= 1  # At least one outlier
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..3f2e1c778
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,87 @@
++import numpy as np
++import pandas as pd
++from sklearn.ensemble import IsolationForest
++import warnings
++
++def test_edge_cases():
++    print("Testing edge cases...")
++    
++    # Test 1: Single sample
++    print("\nTest 1: Single sample")
++    X_single = pd.DataFrame({"a": [1.0]})
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(contamination=0.1, random_state=0)
++        clf.fit(X_single)
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected warning: {user_warnings}"
++        print("  ✓ No warnings with single sample")
++    
++    # Test 2: Large DataFrame
++    print("\nTest 2: Large DataFrame")
++    np.random.seed(42)
++    X_large = pd.DataFrame(np.random.randn(1000, 10), columns=[f"feat_{i}" for i in range(10)])
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(contamination=0.1, random_state=0)
++        clf.fit(X_large)
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected warning: {user_warnings}"
++        print("  ✓ No warnings with large DataFrame")
++    
++    # Test 3: DataFrame with special column names
++    print("\nTest 3: DataFrame with special column names")
++    X_special = pd.DataFrame({
++        "feature with spaces": [1, 2, 3, 4],
++        "feature-with-dashes": [5, 6, 7, 8],
++        "feature.with.dots": [9, 10, 11, 12]
++    })
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(contamination=0.25, random_state=0)
++        clf.fit(X_special)
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected warning: {user_warnings}"
++        print("  ✓ No warnings with special column names")
++    
++    # Test 4: Test that predict still validates properly
++    print("\nTest 4: Predict validation")
++    X_train = pd.DataFrame({"a": [1, 2, 3, 4], "b": [5, 6, 7, 8]})
++    clf = IsolationForest(contamination=0.25, random_state=0)
++    clf.fit(X_train)
++    
++    # This should raise an error because we're predicting with different feature names
++    X_test_wrong = pd.DataFrame({"c": [1, 2], "d": [5, 6]})
++    try:
++        predictions = clf.predict(X_test_wrong)
++        assert False, "Expected ValueError for mismatched feature names"
++    except ValueError as e:
++        assert "feature names" in str(e).lower(), f"Expected feature names error, got: {e}"
++        print("  ✓ Correctly raises error when predicting with different feature names")
++    
++    # Test 5: Test contamination edge values
++    print("\nTest 5: Contamination edge values")
++    X = pd.DataFrame({"a": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]})
++    
++    # Test minimum contamination
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(contamination=0.01, random_state=0)
++        clf.fit(X)
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected warning: {user_warnings}"
++        print("  ✓ No warnings with contamination=0.01")
++    
++    # Test maximum contamination
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        clf = IsolationForest(contamination=0.5, random_state=0)
++        clf.fit(X)
++        user_warnings = [warning for warning in w if warning.category == UserWarning]
++        assert len(user_warnings) == 0, f"Unexpected warning: {user_warnings}"
++        print("  ✓ No warnings with contamination=0.5")
++    
++    print("\n✅ All edge case tests passed!")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 000000000..edefeb05f
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,65 @@
++import numpy as np
++import pandas as pd
++from sklearn.ensemble import IsolationForest
++import warnings
++
++# Test comprehensive functionality
++def test_isolation_forest_fix():
++    print("Testing IsolationForest fix comprehensively...")
++    
++    # Test data
++    X_array = np.array([[-1.1], [0.3], [0.5], [100]])
++    X_df = pd.DataFrame({"feature1": [-1.1, 0.3, 0.5, 100]})
++    
++    # Test different contamination values
++    contamination_values = ["auto", 0.05, 0.1, 0.25, 0.5]
++    
++    for contamination in contamination_values:
++        print(f"\nTesting contamination={contamination}")
++        
++        # Test with numpy array
++        clf_array = IsolationForest(random_state=0, contamination=contamination)
++        with warnings.catch_warnings(record=True) as w:
++            warnings.simplefilter("always")
++            clf_array.fit(X_array)
++            # Filter out deprecation warnings
++            user_warnings = [warning for warning in w if warning.category == UserWarning]
++            assert len(user_warnings) == 0, f"Unexpected warning with numpy array: {user_warnings}"
++            print(f"  ✓ numpy array: No warnings")
++        
++        # Test with pandas DataFrame
++        clf_df = IsolationForest(random_state=0, contamination=contamination)
++        with warnings.catch_warnings(record=True) as w:
++            warnings.simplefilter("always")
++            clf_df.fit(X_df)
++            # Filter out deprecation warnings
++            user_warnings = [warning for warning in w if warning.category == UserWarning]
++            assert len(user_warnings) == 0, f"Unexpected warning with DataFrame: {user_warnings}"
++            print(f"  ✓ DataFrame: No warnings")
++        
++        # Test that results are consistent
++        scores_array = clf_array.score_samples(X_array)
++        scores_df = clf_df.score_samples(X_df)
++        np.testing.assert_allclose(scores_array, scores_df, rtol=1e-10)
++        print(f"  ✓ Consistent scores between array and DataFrame")
++        
++        # Test predict functionality
++        predictions_array = clf_array.predict(X_array)
++        predictions_df = clf_df.predict(X_df)
++        np.testing.assert_array_equal(predictions_array, predictions_df)
++        print(f"  ✓ Consistent predictions between array and DataFrame")
++        
++        # Test that offset is computed correctly
++        if contamination != "auto":
++            expected_outliers = int(np.ceil(len(X_array) * contamination))
++            actual_outliers_array = np.sum(predictions_array == -1)
++            actual_outliers_df = np.sum(predictions_df == -1)
++            # Due to ties in scores, we might not get exact contamination rate
++            assert actual_outliers_array >= expected_outliers - 1, f"Expected at least {expected_outliers-1} outliers, got {actual_outliers_array}"
++            assert actual_outliers_df >= expected_outliers - 1, f"Expected at least {expected_outliers-1} outliers, got {actual_outliers_df}"
++            print(f"  ✓ Correct number of outliers detected")
++
++    print("\n✅ All tests passed!")
++
++if __name__ == "__main__":
++    test_isolation_forest_fix()
+diff --git a/test_offset_calculation.py b/test_offset_calculation.py
+new file mode 100644
+index 000000000..5cf6b6b9b
+--- /dev/null
++++ b/test_offset_calculation.py
+@@ -0,0 +1,68 @@
++import numpy as np
++import pandas as pd
++from sklearn.ensemble import IsolationForest
++
++def test_offset_calculation():
++    """Test that offset calculation is correct after the fix."""
++    print("Testing offset calculation...")
++    
++    # Create test data
++    np.random.seed(42)
++    n_samples = 100
++    n_outliers = 10
++    
++    # Generate normal data
++    X_normal = np.random.randn(n_samples - n_outliers, 2)
++    # Generate outliers
++    X_outliers = np.random.uniform(low=-10, high=10, size=(n_outliers, 2))
++    X = np.vstack([X_normal, X_outliers])
++    
++    # Test with numpy array
++    clf_array = IsolationForest(contamination=0.1, random_state=42)
++    clf_array.fit(X)
++    
++    # Test with DataFrame
++    X_df = pd.DataFrame(X, columns=['feature1', 'feature2'])
++    clf_df = IsolationForest(contamination=0.1, random_state=42)
++    clf_df.fit(X_df)
++    
++    # Check that offsets are the same
++    print(f"Offset with array: {clf_array.offset_}")
++    print(f"Offset with DataFrame: {clf_df.offset_}")
++    np.testing.assert_allclose(clf_array.offset_, clf_df.offset_, rtol=1e-10)
++    print("✓ Offsets match between array and DataFrame")
++    
++    # Check that the contamination rate is respected
++    predictions_array = clf_array.predict(X)
++    predictions_df = clf_df.predict(X_df)
++    
++    outliers_array = np.sum(predictions_array == -1)
++    outliers_df = np.sum(predictions_df == -1)
++    
++    print(f"Outliers detected with array: {outliers_array}/{n_samples} ({outliers_array/n_samples:.2%})")
++    print(f"Outliers detected with DataFrame: {outliers_df}/{n_samples} ({outliers_df/n_samples:.2%})")
++    
++    # Should be close to 10% (contamination=0.1)
++    assert abs(outliers_array / n_samples - 0.1) < 0.05, f"Contamination rate not respected: {outliers_array/n_samples}"
++    assert abs(outliers_df / n_samples - 0.1) < 0.05, f"Contamination rate not respected: {outliers_df/n_samples}"
++    print("✓ Contamination rate is correctly respected")
++    
++    # Test that scores are computed correctly
++    scores_array = clf_array.score_samples(X)
++    scores_df = clf_df.score_samples(X_df)
++    
++    np.testing.assert_allclose(scores_array, scores_df, rtol=1e-10)
++    print("✓ Scores match between array and DataFrame")
++    
++    # Verify the offset calculation manually
++    expected_offset_array = np.percentile(scores_array, 10.0)  # 10% contamination
++    expected_offset_df = np.percentile(scores_df, 10.0)
++    
++    np.testing.assert_allclose(clf_array.offset_, expected_offset_array, rtol=1e-10)
++    np.testing.assert_allclose(clf_df.offset_, expected_offset_df, rtol=1e-10)
++    print("✓ Offset calculation is correct")
++    
++    print("\n✅ All offset calculation tests passed!")
++
++if __name__ == "__main__":
++    test_offset_calculation()

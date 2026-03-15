@@ -1,0 +1,501 @@
+diff --git a/sympy/core/mod.py b/sympy/core/mod.py
+index eae25630cc..8ea2b7815b 100644
+--- a/sympy/core/mod.py
++++ b/sympy/core/mod.py
+@@ -118,6 +118,29 @@ def doit(p, q):
+                 return cls(net, q)
+ 
+         elif isinstance(p, Mul):
++            # Special handling for products of integers
++            # This handles cases like Mod(3*i, 2) -> Mod(i, 2)
++            if all(arg.is_integer for arg in p.args):
++                # Apply modulo to each factor and reconstruct
++                new_factors = []
++                for factor in p.args:
++                    mod_factor = cls(factor, q)
++                    if mod_factor == 0:
++                        return S.Zero
++                    elif mod_factor != factor:
++                        # Factor was simplified
++                        if isinstance(mod_factor, cls):
++                            new_factors.append(mod_factor.args[0])
++                        else:
++                            new_factors.append(mod_factor)
++                    else:
++                        new_factors.append(factor)
++                
++                # If we made progress, return the simplified result
++                if new_factors != list(p.args):
++                    new_p = Mul(*new_factors)
++                    return cls(new_p, q)
++            
+             # separating into modulus and non modulus
+             both_l = non_mod_l, mod_l = [], []
+             for arg in p.args:
+diff --git a/sympy/core/tests/test_arit.py b/sympy/core/tests/test_arit.py
+index 04d3b1ab9f..05e2d1979b 100644
+--- a/sympy/core/tests/test_arit.py
++++ b/sympy/core/tests/test_arit.py
+@@ -1624,6 +1624,7 @@ def test_Mod():
+     i = Symbol('i', integer=True)
+     assert (3*i*x) % (2*i*y) == i*Mod(3*x, 2*y)
+     assert Mod(4*i, 4) == 0
++    assert Mod(3*i, 2) == Mod(i, 2)
+ 
+     # issue 8677
+     n = Symbol('n', integer=True, positive=True)
+diff --git a/test_analysis.py b/test_analysis.py
+new file mode 100644
+index 0000000000..a67fecddb5
+--- /dev/null
++++ b/test_analysis.py
+@@ -0,0 +1,25 @@
++from sympy import Symbol, Mod, Integer
++
++x = Symbol('x')
++i = Symbol('i', integer=True)
++
++# Case 1: Integer coefficient, integer symbol
++print("Case 1: Mod(3*i, 2)")
++print(f"Result: {Mod(3*i, 2)}")
++print(f"3 is integer: {Integer(3).is_integer}")
++print(f"i is integer: {i.is_integer}")
++
++# Case 2: Float coefficient, general symbol  
++print("\nCase 2: Mod(1.0*x, 1)")
++print(f"Result: {Mod(1.0*x, 1)}")
++print(f"1.0 is integer: {(1.0).is_integer}")  # This is a Python float
++print(f"x is integer: {x.is_integer}")
++
++# Case 3: Integer coefficient, general symbol
++print("\nCase 3: Mod(3*x, 2)")
++print(f"Result: {Mod(3*x, 2)}")
++print(f"3 is integer: {Integer(3).is_integer}")
++print(f"x is integer: {x.is_integer}")
++
++# The key insight: we should only apply the simplification when
++# ALL factors are known to be integers
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..9d1af5bb30
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,39 @@
++from sympy import Symbol, Mod, Float, pi, sympify
++
++# Test various cases
++x = Symbol('x')
++y = Symbol('y')
++i = Symbol('i', integer=True)
++j = Symbol('j', integer=True)
++
++print("Integer cases:")
++print(f"Mod(3*i, 2) = {Mod(3*i, 2)}")  # Should be Mod(i, 2)
++print(f"Mod(4*i, 2) = {Mod(4*i, 2)}")  # Should be 0
++print(f"Mod(5*i, 3) = {Mod(5*i, 3)}")  # Should be Mod(2*i, 3)
++print(f"Mod(6*i, 4) = {Mod(6*i, 4)}")  # Should be Mod(2*i, 4)
++
++print("\nFloat cases (should not simplify incorrectly):")
++print(f"Mod(1.0*x, 1) = {Mod(1.0*x, 1)}")  # Should stay as Mod(1.0*x, 1)
++print(f"Mod(2.5*x, 1) = {Mod(2.5*x, 1)}")  # Should be Mod(0.5*x, 1)
++
++print("\nMixed cases:")
++print(f"Mod(3*i*x, 2) = {Mod(3*i*x, 2)}")  # Should not simplify (x is not integer)
++print(f"Mod(3*i*j, 2) = {Mod(3*i*j, 2)}")  # Should be Mod(i*j, 2)
++
++print("\nExisting test cases:")
++print(f"(3*i*x) % (2*i*y) = {(3*i*x) % (2*i*y)}")
++print(f"Expected: i*Mod(3*x, 2*y) = {i*Mod(3*x, 2*y)}")
++
++print("\nFloat handling test:")
++point3 = Float(3.3) % 1
++lhs = (x - 3.3) % 1
++rhs = Mod(1.*x + 1 - point3, 1)
++print(f"(x - 3.3) % 1 = {lhs}")
++print(f"Mod(1.*x + 1 - point3, 1) = {rhs}")
++print(f"Equal? {lhs == rhs}")
++
++print("\nSympify test:")
++k = Symbol('k', integer=True)
++result = sympify(3*k % 2)
++print(f"sympify(3*k % 2) = {result}")
++print(f"Expected: Mod(k, 2)")
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..f32428f06e
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,20 @@
++from sympy import Symbol, Mod, Float
++
++x = Symbol('x')
++point3 = Float(3.3) % 1
++print(f"point3 = {point3}")
++
++lhs = (x - 3.3) % 1
++print(f"LHS: {lhs}")
++
++rhs = Mod(1.*x + 1 - point3, 1)
++print(f"RHS: {rhs}")
++
++print(f"Are they equal? {lhs == rhs}")
++print(f"LHS type: {type(lhs)}")
++print(f"RHS type: {type(rhs)}")
++
++# Let's see what happens step by step
++print("\nStep by step:")
++print(f"x - 3.3 = {x - 3.3}")
++print(f"1.*x + 1 - point3 = {1.*x + 1 - point3}")
+diff --git a/test_debug2.py b/test_debug2.py
+new file mode 100644
+index 0000000000..c98c1647df
+--- /dev/null
++++ b/test_debug2.py
+@@ -0,0 +1,17 @@
++from sympy import Symbol, Mod, Float, Mul
++
++x = Symbol('x')
++point3 = Float(3.3) % 1
++
++# Test case that's failing
++expr = 1.*x + 1 - point3
++print(f"expr = {expr}")
++print(f"Is expr a Mul? {isinstance(expr, Mul)}")
++print(f"expr type: {type(expr)}")
++
++# Our original test case
++i = Symbol('i', integer=True)
++expr2 = 3*i
++print(f"\nexpr2 = {expr2}")
++print(f"Is expr2 a Mul? {isinstance(expr2, Mul)}")
++print(f"Mod(expr2, 2) = {Mod(expr2, 2)}")
+diff --git a/test_debug3.py b/test_debug3.py
+new file mode 100644
+index 0000000000..da71a9fa7f
+--- /dev/null
++++ b/test_debug3.py
+@@ -0,0 +1,24 @@
++from sympy import Symbol, Mod, Float, Add
++
++x = Symbol('x')
++point3 = Float(3.3) % 1
++
++# The failing expression
++expr = 1.*x + 1 - point3  # This is 1.0*x + 0.7
++print(f"expr = {expr}")
++print(f"expr type: {type(expr)}")
++print(f"expr.args = {expr.args}")
++
++# Let's trace through what happens
++for arg in expr.args:
++    print(f"\nArg: {arg}, type: {type(arg)}")
++    if hasattr(arg, 'args'):
++        print(f"  args: {arg.args}")
++    
++# Now let's see what Mod does with this
++result = Mod(expr, 1)
++print(f"\nMod(expr, 1) = {result}")
++
++# Let's also check the individual terms
++print(f"\nMod(1.0*x, 1) = {Mod(1.0*x, 1)}")
++print(f"Mod(0.7, 1) = {Mod(0.7, 1)}")
+diff --git a/test_debug4.py b/test_debug4.py
+new file mode 100644
+index 0000000000..dc5ff0b394
+--- /dev/null
++++ b/test_debug4.py
+@@ -0,0 +1,18 @@
++from sympy import Symbol, Mod
++
++# Test various cases
++x = Symbol('x')
++i = Symbol('i', integer=True)
++
++print("Integer cases:")
++print(f"Mod(3*i, 2) = {Mod(3*i, 2)}")  # Should be Mod(i, 2)
++print(f"Mod(4*i, 2) = {Mod(4*i, 2)}")  # Should be 0
++print(f"Mod(5*i, 3) = {Mod(5*i, 3)}")  # Should be Mod(2*i, 3)
++
++print("\nFloat cases:")
++print(f"Mod(1.0*x, 1) = {Mod(1.0*x, 1)}")  # Should be 0? Or Mod(x, 1)?
++print(f"Mod(2.0*x, 1) = {Mod(2.0*x, 1)}")  # Should be 0? Or Mod(x, 1)?
++
++print("\nWhat the test expects:")
++print("(x - 3.3) % 1 should equal Mod(1.*x + 1 - 0.3, 1)")
++print("which means Mod(1.0*x + 0.7, 1) should stay as is, not become 0.7")
+diff --git a/test_debug5.py b/test_debug5.py
+new file mode 100644
+index 0000000000..54174f0537
+--- /dev/null
++++ b/test_debug5.py
+@@ -0,0 +1,25 @@
++from sympy import Symbol, Mod
++
++x = Symbol('x')
++i = Symbol('i', integer=True)
++
++# Case 1: Mod(3*i, 2) - we want this to simplify
++print("Case 1: Mod(3*i, 2)")
++expr1 = 3*i
++non_mod_l1 = list(expr1.args)  # [3, i]
++print(f"non_mod_l = {non_mod_l1}")
++new_non_mod_l1 = [Mod(f, 2) for f in non_mod_l1]
++print(f"After applying Mod: {new_non_mod_l1}")
++print(f"Changed? {non_mod_l1 != new_non_mod_l1}")
++
++# Case 2: Mod(1.0*x, 1) - we don't want this to simplify to 0
++print("\nCase 2: Mod(1.0*x, 1)")
++expr2 = 1.0*x
++non_mod_l2 = list(expr2.args)  # [1.0, x]
++print(f"non_mod_l = {non_mod_l2}")
++new_non_mod_l2 = [Mod(f, 1) for f in non_mod_l2]
++print(f"After applying Mod: {new_non_mod_l2}")
++print(f"Changed? {non_mod_l2 != new_non_mod_l2}")
++
++# The issue is that both cases show "changed", but we only want to 
++# process case 1, not case 2
+diff --git a/test_debug_recursion.py b/test_debug_recursion.py
+new file mode 100644
+index 0000000000..08fa3f0057
+--- /dev/null
++++ b/test_debug_recursion.py
+@@ -0,0 +1,17 @@
++from sympy import Symbol, Mod
++
++i = Symbol('i', integer=True)
++j = Symbol('j', integer=True)
++
++# Let's trace what happens manually
++print("Mod(3*i*j, 2)")
++print("non_mod_l = [3, i, j]")
++print("After applying Mod: [Mod(3, 2), Mod(i, 2), Mod(j, 2)] = [1, Mod(i, 2), Mod(j, 2)]")
++print("mod = [i, j] (from Mod(i, 2) and Mod(j, 2))")
++print("non_mod = [1]")
++print("prod_mod = i*j")
++print("prod_non_mod = 1")
++print("prod_mod1 = 1 (empty mod_l)")
++print("net = 1 * i*j = i*j")
++print("Result would be: 1 * Mod(i*j, 2) = Mod(i*j, 2)")
++print("\nThis causes recursion because Mod(i*j, 2) has the same structure")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..db9f753f4a
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,18 @@
++from sympy import Symbol, Mod, pi, I
++
++# Test edge cases
++i = Symbol('i', integer=True)
++x = Symbol('x')
++
++print("Edge cases:")
++print(f"Mod(0*i, 2) = {Mod(0*i, 2)}")  # Should be 0
++print(f"Mod(1*i, 2) = {Mod(1*i, 2)}")  # Should be Mod(i, 2)
++print(f"Mod(2*i, 2) = {Mod(2*i, 2)}")  # Should be 0
++print(f"Mod(-3*i, 2) = {Mod(-3*i, 2)}")  # Should be Mod(-i, 2) or Mod(i, 2)?
++
++print("\nComplex cases:")
++print(f"Mod(3*I, 2) = {Mod(3*I, 2)}")  # Should not simplify (I is not integer)
++print(f"Mod(3*pi, 2) = {Mod(3*pi, 2)}")  # Should not simplify (pi is not integer)
++
++print("\nNested Mod:")
++print(f"Mod(3*Mod(i, 5), 2) = {Mod(3*Mod(i, 5), 2)}")  # Should handle nested Mod
+diff --git a/test_float_case.py b/test_float_case.py
+new file mode 100644
+index 0000000000..449de50fb3
+--- /dev/null
++++ b/test_float_case.py
+@@ -0,0 +1,23 @@
++from sympy import Symbol, Mod, Float
++
++x = Symbol('x')
++point3 = Float(3.3) % 1
++print(f"point3 = {point3}")
++
++# What the test has
++lhs = (x - 3.3) % 1
++rhs_expr = 1.*x + 1 - point3  # This is 1.0*x + 0.7
++rhs = Mod(rhs_expr, 1)
++
++print(f"\nLHS: (x - 3.3) % 1 = {lhs}")
++print(f"RHS expression: 1.*x + 1 - point3 = {rhs_expr}")
++print(f"RHS: Mod(1.*x + 1 - point3, 1) = {rhs}")
++
++# The test expects these to be equal
++# But with our change, Mod(1.0*x + 0.7, 1) becomes 0.7
++# because Mod(1.0*x, 1) becomes 0
++
++# Let's think about this mathematically:
++# (x - 3.3) % 1 = (x - 3 - 0.3) % 1 = (x - 0.3) % 1 = Mod(x + 0.7, 1)
++# But 1.0*x + 0.7 = x + 0.7, so Mod(x + 0.7, 1) should equal Mod(1.0*x + 0.7, 1)
++# The issue is that our code is incorrectly simplifying Mod(1.0*x, 1) to 0
+diff --git a/test_gcd.py b/test_gcd.py
+new file mode 100644
+index 0000000000..29aeee1db0
+--- /dev/null
++++ b/test_gcd.py
+@@ -0,0 +1,17 @@
++from sympy import Symbol, gcd
++from sympy.polys.polytools import gcd as poly_gcd
++
++i = Symbol('i', integer=True)
++print(f"gcd(3*i, 2) = {gcd(3*i, 2)}")
++print(f"poly_gcd(3*i, 2) = {poly_gcd(3*i, 2)}")
++
++# Let's also check what happens after gcd extraction
++from sympy.core.exprtools import gcd_terms
++
++G = gcd(3*i, 2)
++print(f"\nG = {G}")
++if G != 1:
++    p_new = gcd_terms((3*i)/G, clear=False, fraction=False)
++    q_new = gcd_terms(2/G, clear=False, fraction=False)
++    print(f"p_new = {p_new}")
++    print(f"q_new = {q_new}")
+diff --git a/test_mod_issue.py b/test_mod_issue.py
+new file mode 100644
+index 0000000000..39aa2284bd
+--- /dev/null
++++ b/test_mod_issue.py
+@@ -0,0 +1,18 @@
++from sympy import Symbol, Mod, sympify
++
++# Test the issue
++i = Symbol('i', integer=True)
++k = Symbol('k', integer=True)
++
++print("Testing Mod(3*i, 2):")
++result = Mod(3*i, 2)
++print(f"Result: {result}")
++print(f"Expected: Mod(i, 2)")
++print(f"Correct: {result == Mod(i, 2)}")
++print()
++
++print("Testing sympify(3*k % 2):")
++result2 = sympify(3*k % 2)
++print(f"Result: {result2}")
++print(f"Expected: Mod(k, 2)")
++print(f"Correct: {result2 == Mod(k, 2)}")
+diff --git a/test_original.py b/test_original.py
+new file mode 100644
+index 0000000000..68bdca2b77
+--- /dev/null
++++ b/test_original.py
+@@ -0,0 +1,15 @@
++from sympy import Symbol, Mod, Float
++
++x = Symbol('x')
++i = Symbol('i', integer=True)
++
++print("Original behavior:")
++print(f"Mod(3*i, 2) = {Mod(3*i, 2)}")
++print(f"Mod(1.0*x, 1) = {Mod(1.0*x, 1)}")
++
++point3 = Float(3.3) % 1
++lhs = (x - 3.3) % 1
++rhs = Mod(1.*x + 1 - point3, 1)
++print(f"\n(x - 3.3) % 1 = {lhs}")
++print(f"Mod(1.*x + 1 - point3, 1) = {rhs}")
++print(f"Are they equal? {lhs == rhs}")
+diff --git a/test_specific.py b/test_specific.py
+new file mode 100644
+index 0000000000..61c83e226d
+--- /dev/null
++++ b/test_specific.py
+@@ -0,0 +1,27 @@
++from sympy import Symbol, Mod, Float
++from sympy.core.tests.test_arit import comp
++
++x = Symbol('x')
++
++# This is the specific test that's failing
++point3 = Float(3.3) % 1
++print(f"point3 = {point3}")
++
++lhs = (x - 3.3) % 1
++rhs = Mod(1.*x + 1 - point3, 1)
++
++print(f"\nLHS: (x - 3.3) % 1 = {lhs}")
++print(f"RHS: Mod(1.*x + 1 - point3, 1) = {rhs}")
++print(f"Are they equal? {lhs == rhs}")
++
++# Let's see what the test expects vs what we get
++print(f"\nWhat test expects: LHS == RHS")
++print(f"What we get: {lhs} == {rhs}")
++
++# The issue is that with our change:
++# Mod(1.0*x + 0.7, 1) evaluates differently
++# Let's trace through it step by step
++
++print("\n--- Without going through Add processing ---")
++expr = 1.0*x + 0.7
++print(f"Direct: Mod({expr}, 1) = {Mod(expr, 1)}")
+diff --git a/test_trace.py b/test_trace.py
+new file mode 100644
+index 0000000000..01306a7688
+--- /dev/null
++++ b/test_trace.py
+@@ -0,0 +1,26 @@
++from sympy import Symbol, Mod, Float, Add
++
++x = Symbol('x')
++
++# Test the specific case from the failing test
++expr = 1.0*x + 0.7
++print(f"Testing Mod({expr}, 1)")
++print(f"expr type: {type(expr)}")
++print(f"Is Add? {isinstance(expr, Add)}")
++
++# The expr is an Add, so it goes through the Add handling code
++# Let's see what happens to each term
++for i, arg in enumerate(expr.args):
++    print(f"\nArg {i}: {arg}")
++    mod_arg = Mod(arg, 1)
++    print(f"  Mod({arg}, 1) = {mod_arg}")
++    
++result = Mod(expr, 1)
++print(f"\nFinal result: {result}")
++
++# Now let's understand why Mod(1.0*x, 1) becomes 0
++print("\n" + "="*50)
++print("Why does Mod(1.0*x, 1) become 0?")
++term = 1.0*x
++print(f"term = {term}")
++print(f"term.as_coeff_Mul() = {term.as_coeff_Mul()}")
+diff --git a/test_trace2.py b/test_trace2.py
+new file mode 100644
+index 0000000000..bf597fdf11
+--- /dev/null
++++ b/test_trace2.py
+@@ -0,0 +1,30 @@
++from sympy import Symbol, Mod, Mul
++
++x = Symbol('x')
++expr = 1.0*x
++
++print(f"expr = {expr}")
++print(f"Is Mul? {isinstance(expr, Mul)}")
++print(f"expr.args = {expr.args}")
++
++# When Mod(1.0*x, 1) is evaluated, it goes through the Mul case
++# Let's see what happens
++print("\nIn the Mul case:")
++non_mod_l = []
++mod_l = []
++for arg in expr.args:
++    if isinstance(arg, Mod):
++        mod_l.append(arg)
++    else:
++        non_mod_l.append(arg)
++        
++print(f"non_mod_l = {non_mod_l}")
++print(f"mod_l = {mod_l}")
++
++# Now with our change, we do:
++print("\nApplying Mod to non_mod_l:")
++non_mod_l_new = [Mod(x, 1) for x in non_mod_l]
++print(f"non_mod_l_new = {non_mod_l_new}")
++
++print(f"\nMod(1.0, 1) = {Mod(1.0, 1)}")
++print(f"Mod(x, 1) = {Mod(x, 1)}")

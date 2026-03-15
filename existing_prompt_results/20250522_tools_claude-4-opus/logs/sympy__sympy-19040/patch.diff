@@ -1,0 +1,790 @@
+diff --git a/check_sqf.py b/check_sqf.py
+new file mode 100644
+index 0000000000..1ff5e3b0f9
+--- /dev/null
++++ b/check_sqf.py
+@@ -0,0 +1,27 @@
++from sympy import symbols, expand, I, Poly
++from sympy.polys.domains import QQ
++from sympy.polys.sqfreetools import dmp_sqf_part
++
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))  # x*y - x - y + 1
++
++K = QQ.algebraic_field(I)
++poly = Poly(z, x, y, domain=K)
++f = poly.rep.rep
++u = poly.rep.lev
++
++print(f"Original polynomial: {f}")
++print(f"As expression: {poly.as_expr()}")
++
++# Get square-free part
++f_sqf = dmp_sqf_part(f, u, K)
++print(f"\nSquare-free part: {f_sqf}")
++
++# Convert back to see what it is
++from sympy.polys.polyclasses import DMP
++dmp_sqf = DMP(f_sqf, K, u)
++poly_sqf = Poly.from_dict(dmp_sqf.to_dict(), *poly.gens, domain=K)
++print(f"Square-free part as expression: {poly_sqf.as_expr()}")
++
++# The square-free part of (x-1)(y-1) should be (x-1)(y-1) itself
++# since it has no repeated factors
+diff --git a/debug_factor.py b/debug_factor.py
+new file mode 100644
+index 0000000000..a4e2b70d66
+--- /dev/null
++++ b/debug_factor.py
+@@ -0,0 +1,46 @@
++from sympy import symbols, expand, factor, I, Poly
++from sympy.polys.polytools import _symbolic_factor_list, _poly_from_expr
++from sympy.polys.polyoptions import build_options
++
++x, y = symbols('x y')
++
++# Create the expression
++z = expand((x-1)*(y-1))
++print(f"Original expression: {z}")
++
++# Create options with extension
++opt = build_options([], {'extension': [I]})
++print(f"\nOptions: {opt}")
++
++# Try to understand what happens in _symbolic_factor_list
++print("\n--- Debugging _symbolic_factor_list ---")
++
++# First, let's see what happens when we create a polynomial with extension
++try:
++    poly, _ = _poly_from_expr(z, opt)
++    print(f"Poly created: {poly}")
++    print(f"Poly domain: {poly.domain}")
++    print(f"Poly gens: {poly.gens}")
++    
++    # Try factor_list on the poly
++    coeff, factors = poly.factor_list()
++    print(f"\nPoly.factor_list() result:")
++    print(f"  coeff: {coeff}")
++    print(f"  factors: {factors}")
++except Exception as e:
++    print(f"Error creating poly: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's also check what happens with different generator orderings
++print("\n--- Testing with explicit generators ---")
++result3 = factor(z, x, y, extension=[I])
++print(f"factor(z, x, y, extension=[I]): {result3}")
++
++# Try with just x as generator
++result4 = factor(z, x, extension=[I])
++print(f"factor(z, x, extension=[I]): {result4}")
++
++# Try with just y as generator  
++result5 = factor(z, y, extension=[I])
++print(f"factor(z, y, extension=[I]): {result5}")
+diff --git a/debug_mixed_case.py b/debug_mixed_case.py
+new file mode 100644
+index 0000000000..33b5559469
+--- /dev/null
++++ b/debug_mixed_case.py
+@@ -0,0 +1,25 @@
++from sympy import symbols, expand, factor, I, Poly
++from sympy.polys.domains import QQ
++from sympy.polys.factortools import dmp_factor_list
++
++x, y = symbols('x y')
++v = expand((x**2 + 1)*(y - 1))
++print(f"Expression: {v}")
++
++# Check factorization over QQ
++poly_qq = Poly(v, x, y, domain=QQ)
++print(f"\nPoly over QQ: {poly_qq}")
++f = poly_qq.rep
++coeff, factors = dmp_factor_list(f.rep, f.lev, f.dom)
++print(f"Factors over QQ: {factors}")
++
++# Check factorization over QQ<I>
++K = QQ.algebraic_field(I)
++poly_qi = Poly(v, x, y, domain=K)
++print(f"\nPoly over QQ<I>: {poly_qi}")
++f = poly_qi.rep
++coeff, factors = dmp_factor_list(f.rep, f.lev, f.dom)
++print(f"Factors over QQ<I>: {factors}")
++
++# The issue is that over QQ, it factors as (x^2+1, 1), (y-1, 1)
++# But x^2+1 can be further factored over QQ<I>
+diff --git a/debug_reconstruction.py b/debug_reconstruction.py
+new file mode 100644
+index 0000000000..ebfc743b92
+--- /dev/null
++++ b/debug_reconstruction.py
+@@ -0,0 +1,62 @@
++from sympy import symbols, expand, I, Poly
++from sympy.polys.factortools import dmp_ext_factor, dmp_sqf_norm, dmp_factor_list_include
++from sympy.polys.factortools import dmp_trial_division
++from sympy.polys.sqfreetools import dmp_sqf_part
++from sympy.polys.euclidtools import dmp_inner_gcd
++from sympy.polys.densetools import dmp_compose, dmp_convert
++from sympy.polys.densebasic import dmp_raise
++from sympy.polys.domains import QQ
++
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))  # x*y - x - y + 1
++
++# Create polynomial over QQ<I>
++K = QQ.algebraic_field(I)
++poly = Poly(z, x, y, domain=K)
++f = poly.rep.rep
++u = poly.rep.lev
++
++print("Original polynomial f:", f)
++print("Level u:", u)
++
++# Follow dmp_ext_factor step by step
++lc = K.one  # ground LC
++F = f  # save original
++
++# Square-free part
++f_sqf = dmp_sqf_part(f, u, K)
++print("\nSquare-free part:", f_sqf)
++
++# Norm
++s, g, r = dmp_sqf_norm(f, u, K)
++print("\nNorm s:", s)
++print("g:", g) 
++print("r:", r)
++
++# Factor norm
++factors = dmp_factor_list_include(r, u, K.dom)
++print("\nNorm factors:", factors)
++
++# Since len(factors) > 1, reconstruct factors
++H = dmp_raise([K.one, s*K.unit], u, 0, K)
++print("\nH:", H)
++
++reconstructed_factors = []
++for i, (factor, _) in enumerate(factors):
++    print(f"\nProcessing norm factor {i}: {factor}")
++    h = dmp_convert(factor, u, K.dom, K)
++    print(f"  Converted to K: {h}")
++    h_orig = h
++    h, _, g = dmp_inner_gcd(h, g, u, K)
++    print(f"  After gcd with g: {h}")
++    h = dmp_compose(h, H, u, K)
++    print(f"  After compose with H: {h}")
++    reconstructed_factors.append(h)
++
++print("\nReconstructed factors:", reconstructed_factors)
++
++# Trial division
++result = dmp_trial_division(F, reconstructed_factors, u, K)
++print("\nFinal result from trial division:", result)
++
++# The expected result should be [(x-1, 1), (y-1, 1)]
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..a08e4e9b19
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,18 @@
++from sympy import symbols, expand, factor, I
++
++x, y = symbols('x y')
++
++# Create the expression
++z = expand((x-1)*(y-1))
++print(f"Original expression: {z}")
++
++# Factor without extension
++result1 = factor(z)
++print(f"factor(z): {result1}")
++
++# Factor with extension=[I]
++result2 = factor(z, extension=[I])
++print(f"factor(z, extension=[I]): {result2}")
++
++# Expected: (x - 1)*(y - 1)
++# Actual: x - 1 (missing the (y - 1) factor)
+diff --git a/run_factor_tests.py b/run_factor_tests.py
+new file mode 100644
+index 0000000000..60658ef36a
+--- /dev/null
++++ b/run_factor_tests.py
+@@ -0,0 +1,12 @@
++import sys
++sys.path.insert(0, '/testbed')
++
++from sympy.polys.tests.test_polytools import test_factor
++
++try:
++    test_factor()
++    print("test_factor passed!")
++except Exception as e:
++    print(f"test_factor failed: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/sympy/polys/factortools.py b/sympy/polys/factortools.py
+index c6a5f9f063..ce1b39316a 100644
+--- a/sympy/polys/factortools.py
++++ b/sympy/polys/factortools.py
+@@ -1146,6 +1146,59 @@ def dmp_ext_factor(f, u, K):
+     if all(d <= 0 for d in dmp_degree_list(f, u)):
+         return lc, []
+ 
++    # First, try to factor over the ground field K.dom
++    # This handles cases where the polynomial is already factorizable
++    # without needing the algebraic extension
++    f_dom = dmp_convert(f, u, K, K.dom)
++    coeff_dom, factors_dom = dmp_factor_list(f_dom, u, K.dom)
++    
++    # If we get a non-trivial factorization over the ground field,
++    # check if any factors can be further factored over K
++    if len(factors_dom) > 1 or (len(factors_dom) == 1 and factors_dom[0][1] > 1):
++        # For each factor from the ground field factorization,
++        # try the standard algebraic extension factorization
++        all_factors = []
++        final_coeff = lc * K.convert(coeff_dom, K.dom)
++        
++        for factor_dom, k in factors_dom:
++            factor_K = dmp_convert(factor_dom, u, K.dom, K)
++            
++            # Try to factor this factor using the standard algorithm
++            # Save the original factor
++            F_sub = factor_K
++            f_sub = dmp_sqf_part(factor_K, u, K)
++            
++            # Only proceed if square-free part is non-trivial
++            if f_sub != factor_K or dmp_degree(f_sub, u) <= 0:
++                # Can't factor further
++                all_factors.append((factor_K, k))
++                continue
++                
++            s, g, r = dmp_sqf_norm(f_sub, u, K)
++            factors_sub = dmp_factor_list_include(r, u, K.dom)
++            
++            if len(factors_sub) == 1:
++                # Irreducible over K
++                all_factors.append((factor_K, k))
++            else:
++                # Can factor further
++                H = dmp_raise([K.one, s*K.unit], u, 0, K)
++                reconstructed = []
++                
++                for i, (h_factor, _) in enumerate(factors_sub):
++                    h = dmp_convert(h_factor, u, K.dom, K)
++                    h, _, g = dmp_inner_gcd(h, g, u, K)
++                    h = dmp_compose(h, H, u, K)
++                    reconstructed.append(h)
++                
++                # Use trial division to get the factors with correct multiplicities
++                sub_factorization = dmp_trial_division(F_sub, reconstructed, u, K)
++                for sub_f, sub_k in sub_factorization:
++                    all_factors.append((sub_f, k * sub_k))
++        
++        return final_coeff, all_factors
++
++    # If no factorization over ground field, use the standard algorithm
+     f, F = dmp_sqf_part(f, u, K), f
+     s, g, r = dmp_sqf_norm(f, u, K)
+ 
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..a8466fc019
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,65 @@
++from sympy import symbols, expand, factor, I, sqrt, Poly
++from sympy.abc import x, y, z
++
++def test_comprehensive():
++    """Comprehensive tests for factor with extension"""
++    
++    # Test 1: Original issue - multivariate polynomial factorizable over Q
++    expr1 = expand((x-1)*(y-1))
++    assert factor(expr1, extension=[I]) == (x - 1)*(y - 1)
++    print("Test 1 passed: (x-1)*(y-1)")
++    
++    # Test 2: Univariate needing extension
++    expr2 = x**4 + 1
++    result2 = factor(expr2, extension=[I])
++    # x^4 + 1 = (x^2 - sqrt(2)*x + 1)(x^2 + sqrt(2)*x + 1) over Q(sqrt(2))
++    # but over Q(I) it factors differently
++    print(f"Test 2: x^4 + 1 = {result2}")
++    
++    # Test 3: Three variables
++    expr3 = expand((x-1)*(y-2)*(z-3))
++    assert factor(expr3, extension=[I]) == (x - 1)*(y - 2)*(z - 3)
++    print("Test 3 passed: (x-1)*(y-2)*(z-3)")
++    
++    # Test 4: Repeated factors
++    expr4 = expand((x-1)**2 * (y-1))
++    assert factor(expr4, extension=[I]) == (x - 1)**2 * (y - 1)
++    print("Test 4 passed: (x-1)^2*(y-1)")
++    
++    # Test 5: No factorization possible
++    expr5 = x*y + 1
++    assert factor(expr5, extension=[I]) == x*y + 1
++    print("Test 5 passed: x*y + 1 (irreducible)")
++    
++    # Test 6: Gaussian integers
++    expr6 = 2*x**2 + 2
++    result6 = factor(expr6, extension=[I])
++    print(f"Test 6: 2*x^2 + 2 = {result6}")
++    # Note: sympy factors out the 2 differently
++    assert result6.equals(2*(x - I)*(x + I)) or str(result6) == "2*(x - I)*(x + I)" or str(result6) == "2*(x + I)*(x - I)"
++    
++    # Test 7: Multiple extensions (this might not work perfectly)
++    expr7 = x**2 - 2
++    result7 = factor(expr7, extension=sqrt(2))
++    assert result7 == (x - sqrt(2))*(x + sqrt(2))
++    print("Test 7 passed: x^2 - 2 with extension=sqrt(2)")
++    
++    # Test 8: Polynomial already in factored form
++    expr8 = (x - 1)*(y - 1)
++    assert factor(expr8, extension=[I]) == (x - 1)*(y - 1)
++    print("Test 8 passed: already factored (x-1)*(y-1)")
++    
++    # Test 9: Complex coefficient
++    expr9 = x**2 + 2*I*x - 1
++    result9 = factor(expr9, extension=[I])
++    print(f"Test 9: x^2 + 2*I*x - 1 = {result9}")
++    
++    # Test 10: Ensure univariate case still works
++    expr10 = x**2 + 1
++    assert factor(expr10, extension=[I]) == (x - I)*(x + I)
++    print("Test 10 passed: x^2 + 1")
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_comprehensive()
+diff --git a/test_dmp_ext_factor.py b/test_dmp_ext_factor.py
+new file mode 100644
+index 0000000000..a4f6dac70d
+--- /dev/null
++++ b/test_dmp_ext_factor.py
+@@ -0,0 +1,79 @@
++from sympy import symbols, expand, I, Poly
++from sympy.polys.domains import QQ
++from sympy.polys.factortools import (dmp_ext_factor, dmp_sqf_part, dmp_sqf_norm, 
++                                     dmp_factor_list_include, dmp_trial_division)
++from sympy.polys.densebasic import dmp_raise, dmp_ground_LC, dmp_degree_list
++from sympy.polys.densetools import dmp_compose, dmp_convert, dmp_ground_monic
++from sympy.polys.euclidtools import dmp_inner_gcd
++
++def debug_dmp_ext_factor(f, u, K):
++    """Debug version of dmp_ext_factor with print statements"""
++    print(f"\n=== dmp_ext_factor called ===")
++    print(f"Input f: {f}")
++    print(f"Level u: {u}")
++    print(f"Domain K: {K}")
++    
++    lc = dmp_ground_LC(f, u, K)
++    f = dmp_ground_monic(f, u, K)
++    print(f"\nAfter monic: {f}")
++    
++    if all(d <= 0 for d in dmp_degree_list(f, u)):
++        return lc, []
++    
++    F = f  # Save original before modification
++    f = dmp_sqf_part(f, u, K)
++    print(f"\nSquare-free part f: {f}")
++    print(f"Original F: {F}")
++    
++    s, g, r = dmp_sqf_norm(f, u, K)
++    print(f"\nNorm computation:")
++    print(f"  s = {s}")
++    print(f"  g = {g}")
++    print(f"  r = {r}")
++    
++    factors = dmp_factor_list_include(r, u, K.dom)
++    print(f"\nFactors of norm: {factors}")
++    print(f"Number of norm factors: {len(factors)}")
++    
++    if len(factors) == 1:
++        print("\nOnly one norm factor, returning f as irreducible")
++        factors = [f]
++    else:
++        print("\nMultiple norm factors, reconstructing...")
++        H = dmp_raise([K.one, s*K.unit], u, 0, K)
++        print(f"H = {H}")
++        
++        reconstructed = []
++        for i, (factor, _) in enumerate(factors):
++            print(f"\n  Processing norm factor {i}: {factor}")
++            h = dmp_convert(factor, u, K.dom, K)
++            print(f"    Converted: {h}")
++            h_before_gcd = h
++            h, _, g = dmp_inner_gcd(h, g, u, K)
++            print(f"    After GCD: {h}")
++            h = dmp_compose(h, H, u, K)
++            print(f"    After compose: {h}")
++            reconstructed.append(h)
++        
++        factors = reconstructed
++        print(f"\nAll reconstructed factors: {factors}")
++    
++    result = dmp_trial_division(F, factors, u, K)
++    print(f"\nTrial division result: {result}")
++    
++    return lc, result
++
++
++# Test
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))
++
++K = QQ.algebraic_field(I)
++poly = Poly(z, x, y, domain=K)
++f = poly.rep.rep
++u = poly.rep.lev
++
++coeff, factors = debug_dmp_ext_factor(f, u, K)
++print(f"\n=== FINAL RESULT ===")
++print(f"Coefficient: {coeff}")
++print(f"Factors: {factors}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..5cdef0ba69
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,58 @@
++from sympy import symbols, factor, I, Poly, ZZ, QQ
++from sympy.polys.domains import QQ as QQ_domain
++
++x, y, z = symbols('x y z')
++
++def test_edge_cases():
++    """Test edge cases for the factor fix"""
++    
++    # Test with constant polynomial
++    print("Test 1: Constant polynomial")
++    try:
++        result = factor(42, extension=[I])
++        print(f"  factor(42, extension=[I]) = {result}")
++        assert result == 42
++    except Exception as e:
++        print(f"  Error: {e}")
++    
++    # Test with zero polynomial
++    print("\nTest 2: Zero polynomial")
++    try:
++        result = factor(0*x, extension=[I])
++        print(f"  factor(0*x, extension=[I]) = {result}")
++        assert result == 0
++    except Exception as e:
++        print(f"  Error: {e}")
++    
++    # Test with monomial
++    print("\nTest 3: Monomial")
++    result = factor(x**3 * y**2, extension=[I])
++    print(f"  factor(x^3*y^2, extension=[I]) = {result}")
++    assert result == x**3 * y**2
++    
++    # Test polynomial with no real factorization but complex factorization
++    print("\nTest 4: x^2 + y^2 + 1")
++    result = factor(x**2 + y**2 + 1, extension=[I])
++    print(f"  factor(x^2 + y^2 + 1, extension=[I]) = {result}")
++    
++    # Test with rational coefficients
++    print("\nTest 5: Rational coefficients")
++    result = factor(x**2/2 + x/2, extension=[I])
++    print(f"  factor(x^2/2 + x/2, extension=[I]) = {result}")
++    assert result == x*(x + 1)/2
++    
++    # Test single variable factor
++    print("\nTest 6: Single variable in multivariate context")
++    # Skip this test - it's an unrelated issue with argument parsing
++    print("  Skipped - unrelated argument parsing issue")
++    
++    # Test with domain specification
++    print("\nTest 7: With explicit domain")
++    p = Poly(x**2 + 1, x, domain=ZZ)
++    result = factor(p, extension=[I])
++    print(f"  factor(Poly(x^2 + 1, domain=ZZ), extension=[I]) = {result}")
++    
++    print("\nAll edge case tests completed!")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_extension_needed.py b/test_extension_needed.py
+new file mode 100644
+index 0000000000..94f4f6f59b
+--- /dev/null
++++ b/test_extension_needed.py
+@@ -0,0 +1,33 @@
++from sympy import symbols, factor, I, sqrt
++
++x, y = symbols('x y')
++
++# Test 1: Polynomial that needs I for factorization
++print("Test 1: x^2 + 1")
++expr1 = x**2 + 1
++print(f"  Without extension: {factor(expr1)}")
++print(f"  With extension=[I]: {factor(expr1, extension=[I])}")
++
++# Test 2: Multivariate polynomial that needs I
++print("\nTest 2: x^2 + y^2")
++expr2 = x**2 + y**2
++print(f"  Without extension: {factor(expr2)}")
++print(f"  With extension=[I]: {factor(expr2, extension=[I])}")
++
++# Test 3: Our original test case
++print("\nTest 3: (x-1)(y-1)")
++expr3 = x*y - x - y + 1
++print(f"  Without extension: {factor(expr3)}")
++print(f"  With extension=[I]: {factor(expr3, extension=[I])}")
++
++# Test 4: Polynomial needing sqrt(2)
++print("\nTest 4: x^2 - 2")
++expr4 = x**2 - 2
++print(f"  Without extension: {factor(expr4)}")
++print(f"  With extension=sqrt(2): {factor(expr4, extension=sqrt(2))}")
++
++# Test 5: Mixed case - factorizable over Q but with complex coefficients
++print("\nTest 5: (x-I)*(x+I)*(x-1)")
++expr5 = (x**2 + 1)*(x - 1)
++print(f"  Without extension: {factor(expr5)}")
++print(f"  With extension=[I]: {factor(expr5, extension=[I])}")
+diff --git a/test_factor_issue.py b/test_factor_issue.py
+new file mode 100644
+index 0000000000..4380263f1b
+--- /dev/null
++++ b/test_factor_issue.py
+@@ -0,0 +1,53 @@
++from sympy import symbols, expand, factor, I, Poly
++from sympy.polys.factortools import dmp_ext_factor, dmp_sqf_norm
++from sympy.polys.domains import QQ
++from sympy.polys.polyclasses import DMP
++
++x, y = symbols('x y')
++
++# Create the expression
++z = expand((x-1)*(y-1))  # x*y - x - y + 1
++print(f"Original expression: {z}")
++
++# Create a polynomial over QQ<I>
++K = QQ.algebraic_field(I)
++poly = Poly(z, x, y, domain=K)
++print(f"\nPoly: {poly}")
++print(f"Domain: {poly.domain}")
++
++# Get the DMP representation
++f = poly.rep
++print(f"\nDMP representation: {f}")
++print(f"Level: {f.lev}")
++
++# Let's trace through dmp_ext_factor
++print("\n--- Tracing dmp_ext_factor ---")
++
++# Get square-free part
++from sympy.polys.sqfreetools import dmp_sqf_part
++f_sqf = dmp_sqf_part(f.rep, f.lev, K)
++print(f"Square-free part: {f_sqf}")
++
++# Compute the norm
++s, g, r = dmp_sqf_norm(f.rep, f.lev, K)
++print(f"\nNorm computation:")
++print(f"  s = {s}")
++print(f"  g = {g}")
++print(f"  r = {r}")
++
++# Factor the norm over K.dom (QQ)
++from sympy.polys.factortools import dmp_factor_list_include
++factors_norm = dmp_factor_list_include(r, f.lev, K.dom)
++print(f"\nFactors of norm over QQ: {factors_norm}")
++print(f"Number of factors: {len(factors_norm)}")
++
++# The issue: if len(factors_norm) == 1, dmp_ext_factor returns [f] as irreducible
++# But (x-1)(y-1) is NOT irreducible!
++
++# Let's check if we can factor it differently
++print("\n--- Alternative factorization ---")
++# Try factoring as univariate in x with coefficients in K[y]
++poly_x = Poly(z, x, domain=K[y])
++print(f"As univariate in x: {poly_x}")
++factors_x = poly_x.factor_list()
++print(f"Factors: {factors_x}")
+diff --git a/test_factor_qq.py b/test_factor_qq.py
+new file mode 100644
+index 0000000000..ad7f178079
+--- /dev/null
++++ b/test_factor_qq.py
+@@ -0,0 +1,19 @@
++from sympy import symbols, expand, Poly
++from sympy.polys.domains import QQ
++from sympy.polys.factortools import dmp_factor_list
++
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))
++
++# Create polynomial over QQ (not QQ<I>)
++poly_qq = Poly(z, x, y, domain=QQ)
++print(f"Polynomial over QQ: {poly_qq}")
++
++# Factor over QQ
++f = poly_qq.rep
++coeff, factors = dmp_factor_list(f.rep, f.lev, f.dom)
++print(f"\nFactorization over QQ:")
++print(f"  coeff: {coeff}")
++print(f"  factors: {factors}")
++
++# This should give us both factors (x-1) and (y-1)
+diff --git a/test_issue_18895.py b/test_issue_18895.py
+new file mode 100644
+index 0000000000..db8bb511ed
+--- /dev/null
++++ b/test_issue_18895.py
+@@ -0,0 +1,33 @@
++"""Test for issue #18895: Factor with extension=True drops a factor"""
++from sympy import symbols, expand, factor, I
++
++def test_factor_extension_multivariate():
++    """Test that factor with extension doesn't drop factors in multivariate polynomials"""
++    x, y = symbols('x y')
++    
++    # Test case from the issue
++    z = expand((x-1)*(y-1))
++    assert factor(z) == (x - 1)*(y - 1)
++    assert factor(z, extension=[I]) == (x - 1)*(y - 1)
++    assert factor(z, gaussian=True) == (x - 1)*(y - 1)
++    
++    # Additional test cases
++    # Polynomial that is already factorizable over Q
++    w = expand((x-2)*(y+3))
++    assert factor(w, extension=[I]) == (x - 2)*(y + 3)
++    
++    # Polynomial with more factors
++    u = expand((x-1)*(x+1)*(y-1))
++    assert factor(u, extension=[I]) == (x - 1)*(x + 1)*(y - 1)
++    
++    # Mixed case - one factor needs extension, others don't
++    v = expand((x**2 + 1)*(y - 1))
++    result = factor(v, extension=[I])
++    print(f"Result for (x^2 + 1)(y - 1): {result}")
++    # Should factor x^2 + 1 but keep y - 1
++    assert result == (x - I)*(x + I)*(y - 1) or result == (y - 1)*(x - I)*(x + I)
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_factor_extension_multivariate()
+diff --git a/test_issue_18895_final.py b/test_issue_18895_final.py
+new file mode 100644
+index 0000000000..245a841d34
+--- /dev/null
++++ b/test_issue_18895_final.py
+@@ -0,0 +1,38 @@
++"""
++Test for issue #18895: Factor with extension=True drops a factor of y-1
++
++This issue occurred when factoring multivariate polynomials with an algebraic
++extension. The polynomial (x-1)*(y-1) was incorrectly factored as just (x-1)
++when using extension=[I].
++
++The root cause was in dmp_ext_factor() which would compute the square-free part
++of the polynomial first, potentially losing factors, before attempting to factor
++over the algebraic extension.
++
++The fix checks if the polynomial can be factored over the ground field first,
++and if so, recursively factors each factor over the extension field.
++"""
++
++from sympy import symbols, expand, factor, I
++
++def test_issue_18895():
++    x, y = symbols('x y')
++    
++    # The original reported issue
++    z = expand((x-1)*(y-1))
++    assert z == x*y - x - y + 1
++    
++    # Without extension - works correctly
++    assert factor(z) == (x - 1)*(y - 1)
++    
++    # With extension=[I] - was returning just (x - 1), now fixed
++    assert factor(z, extension=[I]) == (x - 1)*(y - 1)
++    
++    # Also test with gaussian=True which uses the same code path
++    assert factor(z, gaussian=True) == (x - 1)*(y - 1)
++    
++    print("Issue #18895 is fixed!")
++    print(f"factor({z}, extension=[I]) = {factor(z, extension=[I])}")
++
++if __name__ == "__main__":
++    test_issue_18895()
+diff --git a/test_simple.py b/test_simple.py
+new file mode 100644
+index 0000000000..8c60deb225
+--- /dev/null
++++ b/test_simple.py
+@@ -0,0 +1,21 @@
++from sympy import symbols, expand, factor, I
++
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))
++
++print("Expression:", z)
++print("factor(z):", factor(z))
++print("factor(z, extension=[I]):", factor(z, extension=[I]))
++
++# Let's also test with gaussian=True which should be equivalent
++print("factor(z, gaussian=True):", factor(z, gaussian=True))
++
++# And test factoring each term separately
++print("\nFactoring x-1 with extension=[I]:", factor(x-1, extension=[I]))
++print("Factoring y-1 with extension=[I]:", factor(y-1, extension=[I]))
++
++# Test with a polynomial that actually needs I
++w = x**2 + 1
++print("\nExpression:", w)
++print("factor(w):", factor(w))
++print("factor(w, extension=[I]):", factor(w, extension=[I]))
+diff --git a/trace_factor.py b/trace_factor.py
+new file mode 100644
+index 0000000000..3c6f75252b
+--- /dev/null
++++ b/trace_factor.py
+@@ -0,0 +1,41 @@
++from sympy import symbols, expand, factor, I, Poly
++from sympy.polys.polytools import _symbolic_factor_list, _poly_from_expr
++from sympy.polys.polyoptions import build_options
++
++x, y = symbols('x y')
++z = expand((x-1)*(y-1))  # x*y - x - y + 1
++
++print("=== Testing factor with extension=[I] ===")
++print(f"Expression: {z}")
++
++# Build options
++opt = build_options([], {'extension': [I]})
++print(f"\nOptions: {opt}")
++
++# Create polynomial
++poly, _ = _poly_from_expr(z, opt)
++print(f"\nPolynomial: {poly}")
++print(f"Domain: {poly.domain}")
++
++# Call factor_list on the polynomial
++coeff, factors = poly.factor_list()
++print(f"\nPoly.factor_list() result:")
++print(f"  coeff: {coeff}")
++print(f"  factors: {factors}")
++
++# The issue is here! factor_list returns only one factor when it should return two
++
++# Let's check the actual DMP factor_list
++print("\n=== Direct DMP factor_list ===")
++from sympy.polys.factortools import dmp_factor_list
++f = poly.rep
++coeff2, factors2 = dmp_factor_list(f.rep, f.lev, f.dom)
++print(f"dmp_factor_list result:")
++print(f"  coeff: {coeff2}")
++print(f"  factors: {factors2}")
++
++# Convert back to Poly objects
++print("\nConverted factors:")
++for g, k in factors2:
++    poly_factor = f.per(g)
++    print(f"  {poly_factor} ^ {k}")

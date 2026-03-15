@@ -1,0 +1,702 @@
+diff --git a/django/db/migrations/writer.py b/django/db/migrations/writer.py
+index a59f0c8dcb..a56c5ac3c1 100644
+--- a/django/db/migrations/writer.py
++++ b/django/db/migrations/writer.py
+@@ -175,7 +175,16 @@ class MigrationWriter:
+ 
+         # Sort imports by the package / module to be imported (the part after
+         # "from" in "from ... import ..." or after "import" in "import ...").
+-        sorted_imports = sorted(imports, key=lambda i: i.split()[1])
++        # Place all import module statements before from module import objects.
++        import_statements = sorted(
++            [i for i in imports if i.startswith("import ")],
++            key=lambda i: i.split()[1]
++        )
++        from_statements = sorted(
++            [i for i in imports if i.startswith("from ")],
++            key=lambda i: i.split()[1]
++        )
++        sorted_imports = import_statements + from_statements
+         items["imports"] = "\n".join(sorted_imports) + "\n" if imports else ""
+         if migration_imports:
+             items["imports"] += (
+diff --git a/test_comprehensive_imports.py b/test_comprehensive_imports.py
+new file mode 100644
+index 0000000000..744f61a2af
+--- /dev/null
++++ b/test_comprehensive_imports.py
+@@ -0,0 +1,192 @@
++"""Comprehensive test for import ordering in migrations"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.db.migrations.operations import CreateModel
++import datetime
++
++# Test case 1: Basic import ordering
++print("Test 1: Basic import ordering")
++print("-" * 40)
++
++test_imports = {
++    'import datetime',
++    'from django.db import migrations, models', 
++    'import time',
++    'from django.conf import settings',
++    'import os',
++    'from django.utils import timezone',
++}
++
++# Separate import and from imports
++import_statements = sorted(
++    [i for i in test_imports if i.startswith("import ")],
++    key=lambda i: i.split()[1]
++)
++from_statements = sorted(
++    [i for i in test_imports if i.startswith("from ")],
++    key=lambda i: i.split()[1]
++)
++expected_order = import_statements + from_statements
++
++print("Expected order:")
++for imp in expected_order:
++    print(f"  {imp}")
++
++# Test case 2: Edge cases with similar module names
++print("\nTest 2: Edge cases with similar module names")
++print("-" * 40)
++
++edge_case_imports = {
++    'import django',
++    'import django_extensions',
++    'from django import forms',
++    'from django.db import models',
++    'import djangorestframework',
++    'from django_filters import FilterSet',
++}
++
++import_statements = sorted(
++    [i for i in edge_case_imports if i.startswith("import ")],
++    key=lambda i: i.split()[1]
++)
++from_statements = sorted(
++    [i for i in edge_case_imports if i.startswith("from ")],
++    key=lambda i: i.split()[1]
++)
++expected_order = import_statements + from_statements
++
++print("Expected order:")
++for imp in expected_order:
++    print(f"  {imp}")
++
++# Test case 3: Real migration test
++print("\nTest 3: Real migration with MigrationWriter")
++print("-" * 40)
++
++class TestMigration(Migration):
++    dependencies = [
++        ('__setting__', 'AUTH_USER_MODEL'),
++    ]
++    operations = [
++        CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('created', models.DateTimeField(default=datetime.datetime.now)),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++
++# Add operations that will generate various imports
++TestMigration.operations.append(
++    type('TimeOperation', (), {
++        '__module__': 'time',
++        '__init__': lambda self: None,
++        'deconstruct': lambda self: ('TimeOp', [], {}),
++        'serialization_expand_args': [],
++    })()
++)
++
++TestMigration.operations.append(
++    type('OSOperation', (), {
++        '__module__': 'os',
++        '__init__': lambda self: None,
++        'deconstruct': lambda self: ('OSOp', [], {}),
++        'serialization_expand_args': [],
++    })()
++)
++
++writer = MigrationWriter(TestMigration('0001_initial', 'testapp'))
++migration_string = writer.as_string()
++
++# Extract imports
++lines = migration_string.split('\n')
++import_section = []
++in_imports = False
++for line in lines:
++    if line.strip() and (line.startswith('import ') or line.startswith('from ')):
++        in_imports = True
++        import_section.append(line)
++    elif in_imports and line.strip() and not line.startswith('#'):
++        break
++    elif in_imports and not line.strip():
++        continue
++
++print("Generated imports:")
++for imp in import_section:
++    print(f"  {imp}")
++
++# Verify ordering
++import_lines = [l for l in import_section if l.startswith('import ')]
++from_lines = [l for l in import_section if l.startswith('from ')]
++
++if import_lines and from_lines:
++    # Find positions
++    last_import_pos = import_section.index(import_lines[-1])
++    first_from_pos = import_section.index(from_lines[0])
++    
++    if last_import_pos < first_from_pos:
++        print("\n✓ PASS: Import ordering is correct")
++    else:
++        print("\n✗ FAIL: Import ordering is incorrect")
++        print(f"  Last import at position {last_import_pos}: {import_lines[-1]}")
++        print(f"  First from at position {first_from_pos}: {from_lines[0]}")
++
++# Test case 4: Check isort compatibility
++print("\nTest 4: isort compatibility check")
++print("-" * 40)
++
++# Write a temporary file and check if isort would change it
++import tempfile
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write(migration_string)
++    temp_path = f.name
++
++try:
++    # Try to run isort in check mode
++    import subprocess
++    result = subprocess.run(
++        ['python', '-m', 'isort', '--check-only', '--diff', temp_path],
++        capture_output=True,
++        text=True
++    )
++    
++    if result.returncode == 0:
++        print("✓ PASS: Generated migration passes isort check")
++    else:
++        print("✗ FAIL: isort would modify the generated migration")
++        if result.stdout:
++            print("isort diff:")
++            print(result.stdout)
++except (subprocess.SubprocessError, FileNotFoundError):
++    print("Note: isort not available for testing")
++finally:
++    os.unlink(temp_path)
+diff --git a/test_import_order.py b/test_import_order.py
+new file mode 100644
+index 0000000000..1d3561811b
+--- /dev/null
++++ b/test_import_order.py
+@@ -0,0 +1,76 @@
++"""Test script to verify import ordering in migrations"""
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++django.setup()
++
++# Create a test migration with various imports
++class TestMigration(Migration):
++    dependencies = []
++    operations = []
++
++# Create a writer
++writer = MigrationWriter(TestMigration('0001_initial', 'testapp'))
++
++# Manually add some imports to test sorting
++writer.migration.operations = []
++
++# Simulate imports that would be generated
++test_imports = {
++    'import datetime',
++    'from django.db import migrations, models', 
++    'import time',
++    'from django.conf import settings',
++    'import os',
++    'from django.utils import timezone',
++}
++
++# Get the sorted imports using the current implementation
++sorted_imports = sorted(test_imports, key=lambda i: i.split()[1])
++
++print("Current import ordering:")
++for imp in sorted_imports:
++    print(f"  {imp}")
++
++print("\nExpected import ordering (Django style/isort):")
++# Separate import and from imports
++import_statements = [i for i in test_imports if i.startswith('import ')]
++from_statements = [i for i in test_imports if i.startswith('from ')]
++
++# Sort each group separately
++import_statements.sort(key=lambda i: i.split()[1])
++from_statements.sort(key=lambda i: i.split()[1])
++
++# Combine with imports first
++expected_imports = import_statements + from_statements
++
++for imp in expected_imports:
++    print(f"  {imp}")
++
++print("\nDo they match?", sorted_imports == expected_imports)
+diff --git a/test_isort_check.py b/test_isort_check.py
+new file mode 100644
+index 0000000000..eae42d193b
+--- /dev/null
++++ b/test_isort_check.py
+@@ -0,0 +1,47 @@
++"""Check what isort expects for import ordering"""
++import tempfile
++import subprocess
++
++# Test content with our current ordering
++test_content = """# Generated by Django
++
++import datetime
++import os
++import time
++from django.conf import settings
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    pass
++"""
++
++# Write to temp file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write(test_content)
++    temp_path = f.name
++
++# Run isort to see what it would change
++result = subprocess.run(
++    ['python', '-m', 'isort', '--diff', temp_path],
++    capture_output=True,
++    text=True
++)
++
++print("Original content:")
++print(test_content)
++print("\nisort diff output:")
++print(result.stdout)
++
++# Also check what isort would produce
++result2 = subprocess.run(
++    ['python', '-m', 'isort', '--stdout', temp_path],
++    capture_output=True,
++    text=True
++)
++
++print("\nisort formatted output:")
++print(result2.stdout)
++
++import os
++os.unlink(temp_path)
+diff --git a/test_migration_writer.py b/test_migration_writer.py
+new file mode 100644
+index 0000000000..5841cc45d6
+--- /dev/null
++++ b/test_migration_writer.py
+@@ -0,0 +1,115 @@
++"""Test the MigrationWriter import ordering fix"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.db.migrations.operations import CreateModel
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++django.setup()
++
++# Create a test migration that will generate various imports
++class TestMigration(Migration):
++    dependencies = [
++        ('auth', '0001_initial'),
++        ('__setting__', 'AUTH_USER_MODEL'),  # This will add settings import
++    ]
++    operations = [
++        CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('created', models.DateTimeField(auto_now_add=True)),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++
++# Add some custom imports that would be generated
++TestMigration.operations[0].fields.append(
++    ('custom_field', models.CharField(max_length=50))
++)
++
++# Create writer and get the migration string
++writer = MigrationWriter(TestMigration('0001_initial', 'testapp'))
++
++# Manually inject some imports to test ordering
++import datetime
++import time
++# These imports would normally be added during serialization
++writer.migration.operations.append(
++    type('CustomOperation', (), {
++        '__module__': 'datetime',
++        '__init__': lambda self: None,
++        'deconstruct': lambda self: ('CustomOp', [], {}),
++        'serialization_expand_args': [],
++    })()
++)
++writer.migration.operations.append(
++    type('CustomOperation2', (), {
++        '__module__': 'time', 
++        '__init__': lambda self: None,
++        'deconstruct': lambda self: ('CustomOp2', [], {}),
++        'serialization_expand_args': [],
++    })()
++)
++
++migration_string = writer.as_string()
++
++print("Generated migration file:")
++print("=" * 60)
++print(migration_string)
++print("=" * 60)
++
++# Check import ordering
++lines = migration_string.split('\n')
++import_lines = []
++for i, line in enumerate(lines):
++    if line.strip() and (line.startswith('import ') or line.startswith('from ')):
++        import_lines.append((i, line))
++    elif import_lines and line.strip() and not line.startswith('#'):
++        # End of imports section
++        break
++
++print("\nImport statements found:")
++for line_num, line in import_lines:
++    print(f"  Line {line_num + 1}: {line}")
++
++# Verify ordering
++import_statements = [(n, l) for n, l in import_lines if l.startswith('import ')]
++from_statements = [(n, l) for n, l in import_lines if l.startswith('from ')]
++
++print(f"\nNumber of 'import' statements: {len(import_statements)}")
++print(f"Number of 'from' statements: {len(from_statements)}")
++
++if import_statements and from_statements:
++    last_import_line = max(n for n, _ in import_statements)
++    first_from_line = min(n for n, _ in from_statements)
++    
++    if last_import_line < first_from_line:
++        print("\n✓ PASS: All 'import' statements come before 'from' statements")
++    else:
++        print("\n✗ FAIL: 'import' and 'from' statements are mixed")
++else:
++    print("\nNot enough imports to verify ordering")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..eaa841c4da
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,95 @@
++"""Test that demonstrates the fix for the problem statement"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.db.migrations.operations import CreateModel
++import datetime
++import time
++
++# Create a migration that would generate the problematic import order
++# mentioned in the problem statement
++class TestMigration(Migration):
++    dependencies = []
++    operations = [
++        CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(primary_key=True)),
++                ('created', models.DateTimeField(default=datetime.datetime.now)),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++
++# Add operations that will generate the imports mentioned in problem statement
++TestMigration.operations.append(
++    type('TimeOperation', (), {
++        '__module__': 'time',
++        '__init__': lambda self: None,
++        'deconstruct': lambda self: ('TimeOp', [], {}),
++        'serialization_expand_args': [],
++    })()
++)
++
++writer = MigrationWriter(TestMigration('0001_initial', 'testapp'))
++migration_string = writer.as_string()
++
++print("Problem statement mentioned this incorrect ordering:")
++print("  import datetime")
++print("  from django.db import migrations, models")
++print("  import time")
++
++print("\nOur fix produces this correct ordering:")
++# Extract imports from generated migration
++lines = migration_string.split('\n')
++for line in lines:
++    if line.strip() and (line.startswith('import ') or line.startswith('from ')):
++        print(f"  {line}")
++    elif line.strip() and not line.startswith('#') and not line.startswith('from ') and not line.startswith('import '):
++        break
++
++print("\nThis follows Django coding style: 'Place all import module statements before from module import objects'")
++
++# Verify the fix
++import_lines = []
++for line in lines:
++    if line.strip() and (line.startswith('import ') or line.startswith('from ')):
++        import_lines.append(line)
++
++import_statements = [l for l in import_lines if l.startswith('import ')]
++from_statements = [l for l in import_lines if l.startswith('from ')]
++
++if import_statements and from_statements:
++    import_indices = [import_lines.index(i) for i in import_statements]
++    from_indices = [import_lines.index(f) for f in from_statements]
++    
++    if max(import_indices) < min(from_indices):
++        print("\n✓ SUCCESS: The fix correctly places all import statements before from statements!")
++    else:
++        print("\n✗ FAIL: Import ordering is still incorrect")
+diff --git a/test_real_migration.py b/test_real_migration.py
+new file mode 100644
+index 0000000000..90596cdf0c
+--- /dev/null
++++ b/test_real_migration.py
+@@ -0,0 +1,119 @@
++"""Test with a real Django app"""
++import os
++import sys
++import tempfile
++import shutil
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.core.management import call_command
++
++# Create a temporary directory for our test app
++temp_dir = tempfile.mkdtemp()
++app_dir = os.path.join(temp_dir, 'testapp')
++os.makedirs(app_dir)
++
++# Create __init__.py
++with open(os.path.join(app_dir, '__init__.py'), 'w') as f:
++    f.write('')
++
++# Create models.py with various imports
++with open(os.path.join(app_dir, 'models.py'), 'w') as f:
++    f.write('''
++import datetime
++import time
++from django.db import models
++from django.contrib.auth.models import User
++from django.utils import timezone
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    created = models.DateTimeField(default=timezone.now)
++    modified = models.DateTimeField(auto_now=True)
++    user = models.ForeignKey(User, on_delete=models.CASCADE)
++    
++    def custom_method(self):
++        return datetime.datetime.now()
++    
++    def another_method(self):
++        return time.time()
++''')
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp',
++    ],
++    USE_TZ=True,
++)
++
++# Add temp dir to Python path
++sys.path.insert(0, temp_dir)
++
++django.setup()
++
++# Create migrations
++try:
++    call_command('makemigrations', 'testapp', verbosity=0)
++    
++    # Read the generated migration file
++    migrations_dir = os.path.join(app_dir, 'migrations')
++    migration_file = None
++    for f in os.listdir(migrations_dir):
++        if f.endswith('.py') and f != '__init__.py':
++            migration_file = f
++            break
++    
++    if migration_file:
++        migration_path = os.path.join(migrations_dir, migration_file)
++        with open(migration_path, 'r') as f:
++            content = f.read()
++        
++        print("Generated migration file:")
++        print("=" * 60)
++        print(content)
++        print("=" * 60)
++        
++        # Check import ordering
++        lines = content.split('\n')
++        import_lines = []
++        for line in lines:
++            if line.strip() and (line.startswith('import ') or line.startswith('from ')):
++                import_lines.append(line)
++            elif import_lines and line.strip() and not line.startswith('#'):
++                break
++        
++        print("\nImports found:")
++        for line in import_lines:
++            print(f"  {line}")
++        
++        # Verify ordering
++        import_statements = [l for l in import_lines if l.startswith('import ')]
++        from_statements = [l for l in import_lines if l.startswith('from ')]
++        
++        if import_statements and from_statements:
++            import_indices = [import_lines.index(i) for i in import_statements]
++            from_indices = [import_lines.index(f) for f in from_statements]
++            
++            if max(import_indices) < min(from_indices):
++                print("\n✓ PASS: All 'import' statements come before 'from' statements")
++            else:
++                print("\n✗ FAIL: 'import' and 'from' statements are mixed")
++    else:
++        print("No migration file generated")
++        
++finally:
++    # Clean up
++    shutil.rmtree(temp_dir)

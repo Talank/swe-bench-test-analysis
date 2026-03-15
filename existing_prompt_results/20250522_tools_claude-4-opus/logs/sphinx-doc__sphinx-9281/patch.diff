@@ -1,0 +1,486 @@
+diff --git a/debug_signature.py b/debug_signature.py
+new file mode 100644
+index 000000000..383007789
+--- /dev/null
++++ b/debug_signature.py
+@@ -0,0 +1,17 @@
++import enum
++import inspect
++from sphinx.util.inspect import stringify_signature
++
++class Color(enum.Enum):
++    RED = 1
++    GREEN = 2
++    BLUE = 3
++
++def func_with_enum_default(color: Color = Color.RED) -> None:
++    """Function with enum default value."""
++    pass
++
++sig = inspect.signature(func_with_enum_default)
++sig_str = stringify_signature(sig)
++print(f"Signature string: {sig_str}")
++print(f"Expected: (color: Color = Color.RED) -> None")
+diff --git a/sphinx/util/inspect.py b/sphinx/util/inspect.py
+index a415a7074..1e0bbba04 100644
+--- a/sphinx/util/inspect.py
++++ b/sphinx/util/inspect.py
+@@ -457,6 +457,11 @@ def object_description(object: Any) -> str:
+         else:
+             return "frozenset({%s})" % ", ".join(object_description(x)
+                                                  for x in sorted_values)
++    if isinstance(object, enum.Enum):
++        # For combined flags (e.g., Flag.A | Flag.B), name is None
++        if object.name is None:
++            return str(object)
++        return f"{object.__class__.__name__}.{object.name}"
+     try:
+         s = repr(object)
+     except Exception as exc:
+diff --git a/test_autodoc_enum.py b/test_autodoc_enum.py
+new file mode 100644
+index 000000000..6a2d84a07
+--- /dev/null
++++ b/test_autodoc_enum.py
+@@ -0,0 +1,83 @@
++"""Test autodoc with enum default values"""
++
++import tempfile
++import shutil
++import os
++from pathlib import Path
++
++# Create a test module with enum
++test_module_content = '''
++"""Test module with enum"""
++
++from enum import Enum
++
++class MyEnum(Enum):
++    """An example enum."""
++    ValueA = 10
++    ValueB = 20
++
++def func_with_enum(e: MyEnum = MyEnum.ValueA) -> None:
++    """A function with an enum default value.
++    
++    :param e: An enum parameter
++    """
++    pass
++'''
++
++# Create conf.py content
++conf_content = '''
++import sys
++import os
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++'''
++
++# Create index.rst content
++index_content = '''
++Test Enum Documentation
++=======================
++
++.. automodule:: test_module
++   :members:
++'''
++
++# Create a temporary directory structure
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Create source directory
++    srcdir = Path(tmpdir) / "source"
++    srcdir.mkdir()
++    
++    # Write files
++    (srcdir / "test_module.py").write_text(test_module_content)
++    (srcdir / "conf.py").write_text(conf_content)
++    (srcdir / "index.rst").write_text(index_content)
++    
++    # Build the documentation
++    builddir = Path(tmpdir) / "build"
++    
++    import subprocess
++    result = subprocess.run(
++        ["sphinx-build", "-b", "text", str(srcdir), str(builddir)],
++        capture_output=True,
++        text=True
++    )
++    
++    print("Build output:")
++    print(result.stdout)
++    if result.stderr:
++        print("Build errors:")
++        print(result.stderr)
++    
++    # Check the output
++    output_file = builddir / "index.txt"
++    if output_file.exists():
++        output = output_file.read_text()
++        print("\nGenerated documentation:")
++        print(output)
++        
++        # Check if the enum is rendered correctly
++        if "MyEnum.ValueA" in output and "<MyEnum.ValueA: 10>" not in output:
++            print("\n✓ SUCCESS: Enum is rendered correctly!")
++        else:
++            print("\n✗ FAIL: Enum is not rendered correctly!")
+diff --git a/test_combined_flags.py b/test_combined_flags.py
+new file mode 100644
+index 000000000..309bf2b62
+--- /dev/null
++++ b/test_combined_flags.py
+@@ -0,0 +1,16 @@
++"""Test combined enum flags"""
++
++import enum
++
++class IntFlag(enum.IntFlag):
++    READ = 1
++    WRITE = 2
++    EXECUTE = 4
++
++# Test combined flags
++combined = IntFlag.READ | IntFlag.WRITE
++print("Combined value:", combined)
++print("Combined name:", combined.name)
++print("Combined repr:", repr(combined))
++print("Combined str:", str(combined))
++print("Is instance of IntFlag:", isinstance(combined, enum.Enum))
+diff --git a/test_enum_edge_cases.py b/test_enum_edge_cases.py
+new file mode 100644
+index 000000000..98820fb7f
+--- /dev/null
++++ b/test_enum_edge_cases.py
+@@ -0,0 +1,31 @@
++"""Test edge cases for enum rendering"""
++
++import enum
++from sphinx.util.inspect import object_description
++
++class Status(enum.Enum):
++    PENDING = "pending"
++    APPROVED = "approved"
++    REJECTED = "rejected"
++
++class IntFlag(enum.IntFlag):
++    READ = 1
++    WRITE = 2
++    EXECUTE = 4
++
++class AutoEnum(enum.auto):
++    pass
++
++class Color(enum.Enum):
++    RED = enum.auto()
++    GREEN = enum.auto()
++    BLUE = enum.auto()
++
++# Test various enum types
++print("String enum:", object_description(Status.PENDING))
++print("IntFlag enum:", object_description(IntFlag.READ))
++print("Auto enum:", object_description(Color.RED))
++
++# Test combined flags
++combined = IntFlag.READ | IntFlag.WRITE
++print("Combined flags:", object_description(combined))
+diff --git a/test_enum_fix.py b/test_enum_fix.py
+new file mode 100644
+index 000000000..57e93c8ec
+--- /dev/null
++++ b/test_enum_fix.py
+@@ -0,0 +1,21 @@
++"""Test that enum values are rendered nicely in function signatures"""
++
++import enum
++from sphinx.util.inspect import object_description
++
++class MyEnum(enum.Enum):
++    ValueA = 10
++    ValueB = 20
++
++# Test the object_description function
++print("Testing object_description:")
++print(f"MyEnum.ValueA: {object_description(MyEnum.ValueA)}")
++print(f"MyEnum.ValueB: {object_description(MyEnum.ValueB)}")
++
++# Test with different types to ensure we didn't break anything
++print(f"\nTesting other types:")
++print(f"dict: {object_description({'a': 1, 'b': 2})}")
++print(f"set: {object_description({1, 2, 3})}")
++print(f"frozenset: {object_description(frozenset([1, 2, 3]))}")
++print(f"string: {object_description('hello')}")
++print(f"int: {object_description(42)}")
+diff --git a/test_enum_object_description.py b/test_enum_object_description.py
+new file mode 100644
+index 000000000..64f4c2cd5
+--- /dev/null
++++ b/test_enum_object_description.py
+@@ -0,0 +1,49 @@
++"""Test enum rendering in object_description"""
++
++import pytest
++import enum
++from sphinx.util.inspect import object_description
++
++
++class MyEnum(enum.Enum):
++    ValueA = 10
++    ValueB = 20
++    ValueC = "string_value"
++
++
++class MyIntFlag(enum.IntFlag):
++    READ = 1
++    WRITE = 2
++    EXECUTE = 4
++
++
++def test_enum_object_description():
++    """Test that enum values are rendered as EnumClass.ValueName"""
++    assert object_description(MyEnum.ValueA) == "MyEnum.ValueA"
++    assert object_description(MyEnum.ValueB) == "MyEnum.ValueB"
++    assert object_description(MyEnum.ValueC) == "MyEnum.ValueC"
++
++
++def test_intflag_object_description():
++    """Test that IntFlag values are rendered correctly"""
++    assert object_description(MyIntFlag.READ) == "MyIntFlag.READ"
++    assert object_description(MyIntFlag.WRITE) == "MyIntFlag.WRITE"
++    
++    # Combined flags should use str() representation
++    combined = MyIntFlag.READ | MyIntFlag.WRITE
++    assert object_description(combined) == "MyIntFlag.WRITE|READ"
++
++
++def test_non_enum_object_description():
++    """Test that non-enum objects still work as before"""
++    assert object_description(42) == "42"
++    assert object_description("hello") == "'hello'"
++    assert object_description([1, 2, 3]) == "[1, 2, 3]"
++    assert object_description({'a': 1}) == "{'a': 1}"
++
++
++if __name__ == "__main__":
++    test_enum_object_description()
++    test_intflag_object_description()
++    test_non_enum_object_description()
++    print("All tests passed!")
+diff --git a/test_enum_repr.py b/test_enum_repr.py
+new file mode 100644
+index 000000000..c6d99bcd2
+--- /dev/null
++++ b/test_enum_repr.py
+@@ -0,0 +1,16 @@
++"""Test script to reproduce the enum rendering issue"""
++
++from enum import Enum
++
++class MyEnum(Enum):
++    ValueA = 10
++    ValueB = 20
++
++def ugly_enum_func(e: MyEnum = MyEnum.ValueA) -> None:
++    """A function with an enum default value."""
++    pass
++
++# Test how the enum is represented
++print("Default repr:", repr(MyEnum.ValueA))
++print("String repr:", str(MyEnum.ValueA))
++print("Name only:", MyEnum.ValueA.name)
+diff --git a/test_enum_signature.py b/test_enum_signature.py
+new file mode 100644
+index 000000000..c39539cd2
+--- /dev/null
++++ b/test_enum_signature.py
+@@ -0,0 +1,24 @@
++"""Test enum rendering in function signatures"""
++
++import enum
++import inspect
++from sphinx.util.inspect import stringify_signature
++
++class MyEnum(enum.Enum):
++    ValueA = 10
++    ValueB = 20
++
++def func_with_enum(e: MyEnum = MyEnum.ValueA) -> None:
++    """A function with an enum default value."""
++    pass
++
++# Get the signature
++sig = inspect.signature(func_with_enum)
++print("Original signature:", sig)
++
++# Test stringify_signature
++stringified = stringify_signature(sig)
++print("Stringified signature:", stringified)
++
++# Expected output should be: (e: MyEnum = MyEnum.ValueA) -> None
++# Not: (e: MyEnum = <MyEnum.ValueA: 10>) -> None
+diff --git a/test_inspect_enum_fix.py b/test_inspect_enum_fix.py
+new file mode 100644
+index 000000000..c584c45e7
+--- /dev/null
++++ b/test_inspect_enum_fix.py
+@@ -0,0 +1,122 @@
++"""
++Test for enum default value rendering fix.
++
++This test should be added to the test suite to ensure enum values
++are rendered nicely in function signatures.
++"""
++
++import enum
++import inspect
++import pytest
++from sphinx.util.inspect import object_description, stringify_signature
++
++
++class Color(enum.Enum):
++    RED = 1
++    GREEN = 2
++    BLUE = 3
++
++
++class Status(enum.Enum):
++    PENDING = "pending"
++    APPROVED = "approved"
++    REJECTED = "rejected"
++
++
++class Permission(enum.IntFlag):
++    READ = 1
++    WRITE = 2
++    EXECUTE = 4
++
++
++def func_with_enum_default(color: Color = Color.RED) -> None:
++    """Function with enum default value."""
++    pass
++
++
++def func_with_string_enum_default(status: Status = Status.PENDING) -> None:
++    """Function with string enum default value."""
++    pass
++
++
++def func_with_flag_default(perm: Permission = Permission.READ) -> None:
++    """Function with flag enum default value."""
++    pass
++
++
++def func_with_combined_flag_default(perm: Permission = Permission.READ | Permission.WRITE) -> None:
++    """Function with combined flag enum default value."""
++    pass
++
++
++class TestEnumObjectDescription:
++    """Test object_description for enum values."""
++    
++    def test_simple_enum(self):
++        assert object_description(Color.RED) == "Color.RED"
++        assert object_description(Color.GREEN) == "Color.GREEN"
++        assert object_description(Color.BLUE) == "Color.BLUE"
++    
++    def test_string_enum(self):
++        assert object_description(Status.PENDING) == "Status.PENDING"
++        assert object_description(Status.APPROVED) == "Status.APPROVED"
++        assert object_description(Status.REJECTED) == "Status.REJECTED"
++    
++    def test_int_flag_enum(self):
++        assert object_description(Permission.READ) == "Permission.READ"
++        assert object_description(Permission.WRITE) == "Permission.WRITE"
++        assert object_description(Permission.EXECUTE) == "Permission.EXECUTE"
++    
++    def test_combined_flags(self):
++        combined = Permission.READ | Permission.WRITE
++        # Combined flags have no name, so we use str()
++        assert object_description(combined) == "Permission.WRITE|READ"
++
++
++class TestEnumInSignatures:
++    """Test enum rendering in function signatures."""
++    
++    def test_enum_default_in_signature(self):
++        sig = inspect.signature(func_with_enum_default)
++        sig_str = stringify_signature(sig)
++        # Check that the enum is rendered nicely (not with angle brackets)
++        assert "Color.RED" in sig_str
++        assert "<Color.RED: 1>" not in sig_str
++    
++    def test_string_enum_default_in_signature(self):
++        sig = inspect.signature(func_with_string_enum_default)
++        sig_str = stringify_signature(sig)
++        # Check that the enum is rendered nicely (not with angle brackets)
++        assert "Status.PENDING" in sig_str
++        assert "<Status.PENDING: 'pending'>" not in sig_str
++    
++    def test_flag_enum_default_in_signature(self):
++        sig = inspect.signature(func_with_flag_default)
++        sig_str = stringify_signature(sig)
++        # Check that the enum is rendered nicely (not with angle brackets)
++        assert "Permission.READ" in sig_str
++        assert "<Permission.READ: 1>" not in sig_str
++    
++    def test_combined_flag_default_in_signature(self):
++        sig = inspect.signature(func_with_combined_flag_default)
++        sig_str = stringify_signature(sig)
++        # Check that the enum is rendered nicely (not with angle brackets)
++        assert "Permission.WRITE|READ" in sig_str
++        assert "<Permission.WRITE|READ: 3>" not in sig_str
++
++
++if __name__ == "__main__":
++    # Run tests manually
++    test_obj = TestEnumObjectDescription()
++    test_obj.test_simple_enum()
++    test_obj.test_string_enum()
++    test_obj.test_int_flag_enum()
++    test_obj.test_combined_flags()
++    
++    test_sig = TestEnumInSignatures()
++    test_sig.test_enum_default_in_signature()
++    test_sig.test_string_enum_default_in_signature()
++    test_sig.test_flag_enum_default_in_signature()
++    test_sig.test_combined_flag_default_in_signature()
++    
++    print("All tests passed!")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 000000000..d67ca5d5d
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,31 @@
++"""Test the exact scenario from the problem statement"""
++
++import enum
++import inspect
++from sphinx.util.inspect import stringify_signature
++
++class MyEnum(enum.Enum):
++    ValueA = 10
++    ValueB = 20
++
++def ugly_enum_func(e: MyEnum = MyEnum.ValueA) -> None:
++    """A function with an enum default value."""
++    pass
++
++# Test the signature rendering
++sig = inspect.signature(ugly_enum_func)
++sig_str = stringify_signature(sig)
++
++print(f"Rendered signature: {sig_str}")
++
++# Check that it doesn't contain the ugly representation
++if "<MyEnum.ValueA: 10>" in sig_str:
++    print("FAIL: Signature contains ugly enum representation")
++else:
++    print("SUCCESS: Signature does not contain ugly enum representation")
++
++# Check that it contains the nice representation
++if "MyEnum.ValueA" in sig_str:
++    print("SUCCESS: Signature contains nice enum representation")
++else:
++    print("FAIL: Signature does not contain nice enum representation")

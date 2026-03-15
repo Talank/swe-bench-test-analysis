@@ -1,0 +1,861 @@
+diff --git a/demonstrate_fix.py b/demonstrate_fix.py
+new file mode 100644
+index 0000000000..bd19e5f16d
+--- /dev/null
++++ b/demonstrate_fix.py
+@@ -0,0 +1,50 @@
++"""
++Demonstrate that list_editable processing is now wrapped in a transaction.
++"""
++import os
++import sys
++
++# Add the testbed directory to Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++import django
++django.setup()
++
++print("Checking if list_editable processing is wrapped in a transaction...")
++print()
++
++# Read the source file
++with open('/testbed/django/contrib/admin/options.py', 'r') as f:
++    lines = f.readlines()
++
++# Find the list_editable processing section
++print("List editable processing code (lines 2012-2023):")
++print("=" * 60)
++for i in range(2011, 2023):
++    print(f"{i+1}: {lines[i].rstrip()}")
++print("=" * 60)
++print()
++
++# Check for transaction.atomic
++transaction_found = False
++for i in range(2000, 2040):
++    if 'transaction.atomic' in lines[i] and 'list_editable' in ''.join(lines[i-10:i+10]):
++        transaction_found = True
++        print(f"✓ Found transaction.atomic wrapper at line {i+1}")
++        break
++
++if transaction_found:
++    print("\n✓ SUCCESS: list_editable processing is now properly wrapped in a transaction!")
++    print("  This ensures that if any error occurs during bulk editing, all changes")
++    print("  will be rolled back, preventing partial updates to the database.")
++else:
++    print("\n✗ FAILURE: transaction.atomic wrapper not found in list_editable processing!")
++
++print("\nFor comparison, changeform_view has always had transaction handling:")
++print("=" * 60)
++for i in range(1744, 1747):
++    print(f"{i+1}: {lines[i].rstrip()}")
++print("=" * 60)
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 5f07a4208a..088fec9f4d 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -2011,14 +2011,15 @@ class ModelAdmin(BaseModelAdmin):
+             )
+             if formset.is_valid():
+                 changecount = 0
+-                for form in formset.forms:
+-                    if form.has_changed():
+-                        obj = self.save_form(request, form, change=True)
+-                        self.save_model(request, obj, form, change=True)
+-                        self.save_related(request, form, formsets=[], change=True)
+-                        change_msg = self.construct_change_message(request, form, None)
+-                        self.log_change(request, obj, change_msg)
+-                        changecount += 1
++                with transaction.atomic(using=router.db_for_write(self.model)):
++                    for form in formset.forms:
++                        if form.has_changed():
++                            obj = self.save_form(request, form, change=True)
++                            self.save_model(request, obj, form, change=True)
++                            self.save_related(request, form, formsets=[], change=True)
++                            change_msg = self.construct_change_message(request, form, None)
++                            self.log_change(request, obj, change_msg)
++                            changecount += 1
+ 
+                 if changecount:
+                     msg = ngettext(
+diff --git a/test_admin_transaction.py b/test_admin_transaction.py
+new file mode 100644
+index 0000000000..3d4c64c056
+--- /dev/null
++++ b/test_admin_transaction.py
+@@ -0,0 +1,135 @@
++"""
++Test case for list_editable transaction handling.
++"""
++from django.contrib import admin
++from django.contrib.admin.sites import AdminSite
++from django.contrib.auth.models import User
++from django.db import IntegrityError, models, transaction
++from django.test import RequestFactory, TestCase, TransactionTestCase
++from django.urls import reverse
++
++
++class Band(models.Model):
++    name = models.CharField(max_length=100)
++    members = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'admin_changelist'
++
++
++class BandAdmin(admin.ModelAdmin):
++    list_display = ['name', 'members']
++    list_editable = ['members']
++    
++    def save_model(self, request, obj, form, change):
++        super().save_model(request, obj, form, change)
++        # Simulate an error for a specific value
++        if obj.members == 999:
++            raise IntegrityError("Simulated error during save")
++
++
++class ListEditableTransactionTest(TransactionTestCase):
++    """Test that list_editable changes are wrapped in a transaction."""
++    
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.site = AdminSite()
++        self.admin = BandAdmin(Band, self.site)
++        self.user = User.objects.create_superuser('admin', 'admin@test.com', 'password')
++        
++        # Create test bands
++        self.band1 = Band.objects.create(name='Band 1', members=1)
++        self.band2 = Band.objects.create(name='Band 2', members=2)
++        
++    def test_list_editable_rollback_on_error(self):
++        """Test that all changes are rolled back when an error occurs."""
++        # Prepare POST data - band1 gets valid update, band2 gets error-triggering value
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2', 
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            f'form-0-id': str(self.band1.id),
++            f'form-0-members': '10',  # Valid update
++            f'form-1-id': str(self.band2.id),
++            f'form-1-members': '999',  # This triggers error
++            '_save': 'Save',
++        }
++        
++        request = self.factory.post('/admin/admin_changelist/band/', data)
++        request.user = self.user
++        
++        # Add required middleware attributes
++        from django.contrib.sessions.backends.db import SessionStore
++        from django.contrib.messages.storage.fallback import FallbackStorage
++        request.session = SessionStore()
++        request._messages = FallbackStorage(request)
++        
++        # Execute changelist_view - should raise IntegrityError
++        with self.assertRaises(IntegrityError):
++            self.admin.changelist_view(request)
++            
++        # Refresh from database
++        self.band1.refresh_from_db()
++        self.band2.refresh_from_db()
++        
++        # Verify neither object was updated (transaction rolled back)
++        self.assertEqual(self.band1.members, 1, "Band 1 should not be updated")
++        self.assertEqual(self.band2.members, 2, "Band 2 should not be updated")
++        
++    def test_list_editable_success_commits(self):
++        """Test that successful updates are committed."""
++        # Prepare POST data with valid updates
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0', 
++            'form-MAX_NUM_FORMS': '1000',
++            f'form-0-id': str(self.band1.id),
++            f'form-0-members': '10',  # Valid update
++            f'form-1-id': str(self.band2.id),
++            f'form-1-members': '20',  # Valid update
++            '_save': 'Save',
++        }
++        
++        request = self.factory.post('/admin/admin_changelist/band/', data)
++        request.user = self.user
++        
++        # Add required middleware attributes
++        from django.contrib.sessions.backends.db import SessionStore
++        from django.contrib.messages.storage.fallback import FallbackStorage
++        request.session = SessionStore()
++        request._messages = FallbackStorage(request)
++        
++        # Execute changelist_view
++        response = self.admin.changelist_view(request)
++        
++        # Should redirect on success
++        self.assertEqual(response.status_code, 302)
++        
++        # Refresh from database
++        self.band1.refresh_from_db()
++        self.band2.refresh_from_db()
++        
++        # Verify both objects were updated
++        self.assertEqual(self.band1.members, 10, "Band 1 should be updated")
++        self.assertEqual(self.band2.members, 20, "Band 2 should be updated")
++
++
++if __name__ == '__main__':
++    import os
++    import sys
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++    django.setup()
++    
++    # Run the test
++    from django.test.runner import DiscoverRunner
++    runner = DiscoverRunner(verbosity=2)
++    test_module = sys.modules[__name__]
++    suite = runner.test_loader.loadTestsFromModule(test_module)
++    result = runner.run_tests(['__main__.ListEditableTransactionTest'])
++    sys.exit(0 if result == 0 else 1)
+diff --git a/test_list_editable_transaction.py b/test_list_editable_transaction.py
+new file mode 100644
+index 0000000000..edf184fc11
+--- /dev/null
++++ b/test_list_editable_transaction.py
+@@ -0,0 +1,148 @@
++"""
++Test to verify that list_editable processing in changelist_view is wrapped in a transaction.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings first
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='',
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Now import Django modules after setup
++from django.test import TestCase, TransactionTestCase
++from django.contrib.admin.sites import AdminSite
++from django.contrib.auth.models import User
++from django.db import models, transaction, connection
++from django.test import RequestFactory
++from django.contrib.admin import ModelAdmin
++from django.contrib import messages
++from unittest.mock import patch, Mock
++from django.core.exceptions import ValidationError
++
++# Define test models
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++class TestModelAdmin(ModelAdmin):
++    list_display = ['id', 'name', 'value']
++    list_editable = ['name', 'value']
++    
++    def save_model(self, request, obj, form, change):
++        # Simulate an error that should rollback the transaction
++        super().save_model(request, obj, form, change)
++        if obj.value == 999:  # Special value to trigger error
++            raise ValueError("Simulated error during save")
++
++class ListEditableTransactionTest(TransactionTestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.site = AdminSite()
++        self.admin = TestModelAdmin(TestModel, self.site)
++        
++        # Create test user
++        self.user = User.objects.create_superuser('admin', 'admin@test.com', 'password')
++        
++        # Create test objects
++        self.obj1 = TestModel.objects.create(name='Object 1', value=1)
++        self.obj2 = TestModel.objects.create(name='Object 2', value=2)
++        
++    def test_list_editable_transaction_rollback(self):
++        """Test that all changes are rolled back if an error occurs during list_editable processing."""
++        # Prepare POST data for list_editable
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            f'form-0-id': str(self.obj1.id),
++            f'form-0-name': 'Updated Object 1',
++            f'form-0-value': '10',  # Normal update
++            f'form-1-id': str(self.obj2.id), 
++            f'form-1-name': 'Updated Object 2',
++            f'form-1-value': '999',  # This will trigger an error
++            '_save': 'Save',
++        }
++        
++        request = self.factory.post('/admin/test_app/testmodel/', data)
++        request.user = self.user
++        
++        # Add session and messages middleware requirements
++        from django.contrib.sessions.backends.db import SessionStore
++        request.session = SessionStore()
++        request._messages = messages.storage.default_storage(request)
++        
++        # Get initial values
++        initial_obj1_name = self.obj1.name
++        initial_obj1_value = self.obj1.value
++        initial_obj2_name = self.obj2.name
++        initial_obj2_value = self.obj2.value
++        
++        # Execute changelist_view - it should raise an error
++        with self.assertRaises(ValueError):
++            self.admin.changelist_view(request)
++        
++        # Refresh objects from database
++        self.obj1.refresh_from_db()
++        self.obj2.refresh_from_db()
++        
++        # Without transaction, obj1 would be updated but obj2 would not
++        # With proper transaction handling, neither should be updated
++        print(f"Object 1 - Initial: name='{initial_obj1_name}', value={initial_obj1_value}")
++        print(f"Object 1 - After: name='{self.obj1.name}', value={self.obj1.value}")
++        print(f"Object 2 - Initial: name='{initial_obj2_name}', value={initial_obj2_value}")
++        print(f"Object 2 - After: name='{self.obj2.name}', value={self.obj2.value}")
++        
++        # This test will fail without transaction handling
++        # because obj1 will be updated even though obj2 failed
++        if self.obj1.name != initial_obj1_name or self.obj1.value != initial_obj1_value:
++            print("ERROR: Object 1 was modified even though the operation should have been rolled back!")
++            print("This indicates that list_editable processing is not wrapped in a transaction.")
++            return False
++        else:
++            print("SUCCESS: All changes were rolled back as expected.")
++            return True
++
++if __name__ == '__main__':
++    test = ListEditableTransactionTest()
++    test.setUp()
++    result = test.test_list_editable_transaction_rollback()
++    if not result:
++        sys.exit(1)
+diff --git a/test_list_editable_transaction_fix.py b/test_list_editable_transaction_fix.py
+new file mode 100644
+index 0000000000..fbea023612
+--- /dev/null
++++ b/test_list_editable_transaction_fix.py
+@@ -0,0 +1,139 @@
++"""
++Test to verify that list_editable transaction handling works correctly.
++"""
++import os
++import sys
++
++# Add the testbed directory to Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++import django
++django.setup()
++
++from django.test import TestCase, TransactionTestCase, override_settings
++from django.contrib.admin.sites import AdminSite
++from django.contrib.auth.models import User
++from django.db import models, transaction, IntegrityError
++from django.test import RequestFactory
++from django.contrib.admin import ModelAdmin
++from django.contrib import messages
++from django.contrib.admin.views.main import ChangeList
++from django.db import connection
++from django.contrib.contenttypes.models import ContentType
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'admin_changelist'
++        db_table = 'test_list_editable_model'
++
++# Create the table dynamically
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.delete_model(TestModel)
++    except:
++        pass
++    schema_editor.create_model(TestModel)
++
++class ErrorOnSaveModelAdmin(ModelAdmin):
++    list_display = ['id', 'name', 'value']
++    list_editable = ['name', 'value']
++    
++    def save_model(self, request, obj, form, change):
++        super().save_model(request, obj, form, change)
++        # Simulate an error on specific value
++        if obj.value == 999:
++            raise IntegrityError("Simulated database error")
++
++def test_transaction_rollback():
++    """Test that all changes are rolled back if an error occurs."""
++    print("Testing list_editable transaction rollback...")
++    
++    # Setup
++    site = AdminSite()
++    admin = ErrorOnSaveModelAdmin(TestModel, site)
++    factory = RequestFactory()
++    
++    # Create test objects
++    obj1 = TestModel.objects.create(name='Object 1', value=1)
++    obj2 = TestModel.objects.create(name='Object 2', value=2)
++    
++    # Create superuser
++    try:
++        user = User.objects.create_superuser('testadmin', 'admin@test.com', 'password')
++    except:
++        user = User.objects.get(username='testadmin')
++    
++    # Prepare POST data for list_editable
++    data = {
++        'form-TOTAL_FORMS': '2',
++        'form-INITIAL_FORMS': '2',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        f'form-0-id': str(obj1.id),
++        f'form-0-name': 'Updated Object 1',
++        f'form-0-value': '10',  # Normal update
++        f'form-1-id': str(obj2.id), 
++        f'form-1-name': 'Updated Object 2',
++        f'form-1-value': '999',  # This will trigger an error
++        '_save': 'Save',
++    }
++    
++    request = factory.post('/admin/admin_changelist/testmodel/', data)
++    request.user = user
++    
++    # Add session and messages middleware requirements
++    from django.contrib.sessions.backends.db import SessionStore
++    from django.contrib.messages.storage.fallback import FallbackStorage
++    request.session = SessionStore()
++    request._messages = FallbackStorage(request)
++    
++    # Get initial values
++    initial_obj1_name = obj1.name
++    initial_obj1_value = obj1.value
++    initial_obj2_name = obj2.name  
++    initial_obj2_value = obj2.value
++    
++    print(f"Initial state:")
++    print(f"  Object 1: name='{initial_obj1_name}', value={initial_obj1_value}")
++    print(f"  Object 2: name='{initial_obj2_name}', value={initial_obj2_value}")
++    
++    # Execute changelist_view - it should raise an error
++    try:
++        response = admin.changelist_view(request)
++        print("ERROR: No exception was raised!")
++        success = False
++    except IntegrityError as e:
++        print(f"Expected error occurred: {e}")
++        
++        # Refresh objects from database
++        obj1.refresh_from_db()
++        obj2.refresh_from_db()
++        
++        print(f"\nFinal state:")
++        print(f"  Object 1: name='{obj1.name}', value={obj1.value}")
++        print(f"  Object 2: name='{obj2.name}', value={obj2.value}")
++        
++        # Check if transaction rollback worked
++        if obj1.name == initial_obj1_name and obj1.value == initial_obj1_value:
++            print("\n✓ SUCCESS: Object 1 was NOT modified (transaction rolled back)")
++            success = True
++        else:
++            print("\n✗ FAILURE: Object 1 WAS modified (no transaction rollback)")
++            success = False
++            
++    # Cleanup
++    obj1.delete()
++    obj2.delete()
++    
++    return success
++
++if __name__ == '__main__':
++    success = test_transaction_rollback()
++    sys.exit(0 if success else 1)
+diff --git a/test_list_editable_transaction_test.py b/test_list_editable_transaction_test.py
+new file mode 100644
+index 0000000000..dbf5314c9b
+--- /dev/null
++++ b/test_list_editable_transaction_test.py
+@@ -0,0 +1,135 @@
++"""
++Test for list_editable transaction handling.
++"""
++from django.contrib import admin
++from django.contrib.admin.sites import AdminSite  
++from django.contrib.auth.models import User
++from django.db import IntegrityError, models, transaction
++from django.test import RequestFactory, TransactionTestCase
++from django.contrib.messages.storage.cookie import CookieStorage
++
++
++class TestBand(models.Model):
++    name = models.CharField(max_length=100)
++    members = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'admin_changelist'
++        db_table = 'test_band_transaction'
++
++
++class TestBandAdmin(admin.ModelAdmin):
++    list_display = ['name', 'members']
++    list_editable = ['members']
++    
++    def save_model(self, request, obj, form, change):
++        super().save_model(request, obj, form, change)
++        # Simulate an error for a specific value
++        if obj.members == 999:
++            raise IntegrityError("Simulated error during save")
++
++
++class ListEditableTransactionTest(TransactionTestCase):
++    """Test that list_editable changes are wrapped in a transaction."""
++    
++    def setUp(self):
++        # Create the table
++        from django.db import connection
++        with connection.schema_editor() as schema_editor:
++            try:
++                schema_editor.delete_model(TestBand)
++            except:
++                pass
++            schema_editor.create_model(TestBand)
++            
++        self.factory = RequestFactory()
++        self.site = AdminSite()
++        self.admin = TestBandAdmin(TestBand, self.site)
++        self.user = User.objects.create_superuser('admin', 'admin@test.com', 'password')
++        
++        # Create test bands
++        self.band1 = TestBand.objects.create(name='Band 1', members=1)
++        self.band2 = TestBand.objects.create(name='Band 2', members=2)
++        
++    def test_list_editable_rollback_on_error(self):
++        """Test that all changes are rolled back when an error occurs."""
++        # Prepare POST data - band1 gets valid update, band2 gets error-triggering value
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2', 
++            'form-MIN_NUM_FORMS': '0',
++            'form-MAX_NUM_FORMS': '1000',
++            f'form-0-id': str(self.band1.id),
++            f'form-0-members': '10',  # Valid update
++            f'form-1-id': str(self.band2.id),
++            f'form-1-members': '999',  # This triggers error
++            '_save': 'Save',
++        }
++        
++        request = self.factory.post('/admin/testband/', data)
++        request.user = self.user
++        request._messages = CookieStorage(request)
++        
++        # Execute changelist_view - should raise IntegrityError
++        with self.assertRaises(IntegrityError):
++            self.admin.changelist_view(request)
++            
++        # Refresh from database
++        self.band1.refresh_from_db()
++        self.band2.refresh_from_db()
++        
++        # Verify neither object was updated (transaction rolled back)
++        self.assertEqual(self.band1.members, 1, "Band 1 should not be updated")
++        self.assertEqual(self.band2.members, 2, "Band 2 should not be updated")
++        
++    def test_list_editable_success_commits(self):
++        """Test that successful updates are committed."""
++        # Prepare POST data with valid updates
++        data = {
++            'form-TOTAL_FORMS': '2',
++            'form-INITIAL_FORMS': '2',
++            'form-MIN_NUM_FORMS': '0', 
++            'form-MAX_NUM_FORMS': '1000',
++            f'form-0-id': str(self.band1.id),
++            f'form-0-members': '10',  # Valid update
++            f'form-1-id': str(self.band2.id),
++            f'form-1-members': '20',  # Valid update
++            '_save': 'Save',
++        }
++        
++        request = self.factory.post('/admin/testband/', data)
++        request.user = self.user
++        request._messages = CookieStorage(request)
++        
++        # Execute changelist_view
++        response = self.admin.changelist_view(request)
++        
++        # Should redirect on success
++        self.assertEqual(response.status_code, 302)
++        
++        # Refresh from database
++        self.band1.refresh_from_db()
++        self.band2.refresh_from_db()
++        
++        # Verify both objects were updated
++        self.assertEqual(self.band1.members, 10, "Band 1 should be updated")
++        self.assertEqual(self.band2.members, 20, "Band 2 should be updated")
++
++
++if __name__ == '__main__':
++    import os
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++    django.setup()
++    
++    # Run the test
++    from django.test.runner import DiscoverRunner
++    runner = DiscoverRunner(verbosity=2, interactive=False)
++    failures = runner.run_tests(['__main__.ListEditableTransactionTest'])
++    if failures:
++        print("\nTest failed!")
++    else:
++        print("\nAll tests passed!")
+diff --git a/test_transaction_issue.py b/test_transaction_issue.py
+new file mode 100644
+index 0000000000..833a9cb29f
+--- /dev/null
++++ b/test_transaction_issue.py
+@@ -0,0 +1,51 @@
++"""
++Simple script to demonstrate the transaction issue in list_editable processing.
++"""
++import os
++import sys
++
++# Add the testbed directory to Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++import django
++django.setup()
++
++from django.contrib.admin.options import ModelAdmin
++from django.db import transaction, connection
++
++# Check if list_editable processing is wrapped in a transaction
++print("Checking ModelAdmin.changelist_view source code...")
++print()
++
++# Read the source file
++with open('/testbed/django/contrib/admin/options.py', 'r') as f:
++    lines = f.readlines()
++
++# Find the list_editable processing section
++in_list_editable_section = False
++transaction_found = False
++for i, line in enumerate(lines[2000:2040], start=2001):
++    if 'if request.method == "POST" and cl.list_editable and "_save" in request.POST:' in line:
++        in_list_editable_section = True
++        print(f"Line {i}: Found list_editable processing section")
++        
++    if in_list_editable_section:
++        print(f"Line {i}: {line.rstrip()}")
++        if 'transaction.atomic' in line:
++            transaction_found = True
++            
++print()
++print(f"Transaction wrapping found in list_editable processing: {transaction_found}")
++print()
++
++# Compare with changeform_view which does have transaction handling
++print("For comparison, checking changeform_view...")
++for i, line in enumerate(lines[1744:1747], start=1745):
++    print(f"Line {i}: {line.rstrip()}")
++    
++print()
++print("The changeform_view properly wraps database operations in transaction.atomic()")
++print("but the list_editable processing in changelist_view does not!")
+diff --git a/test_transaction_simple.py b/test_transaction_simple.py
+new file mode 100644
+index 0000000000..edbccd5e40
+--- /dev/null
++++ b/test_transaction_simple.py
+@@ -0,0 +1,111 @@
++"""
++Simple test to verify the transaction fix works.
++"""
++import os
++import sys
++
++# Add the testbed directory to Python path
++sys.path.insert(0, '/testbed')
++
++# Set up Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++import django
++django.setup()
++
++from django.contrib.admin.options import ModelAdmin
++from django.db import transaction, connection, IntegrityError
++from django.db import models
++from django.contrib.admin.sites import AdminSite
++from django.contrib.auth.models import User
++from django.test import RequestFactory
++from django.contrib.messages.storage.cookie import CookieStorage
++
++# Create a simple test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'admin_changelist'
++        db_table = 'test_transaction_model'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.delete_model(TestModel)
++    except:
++        pass
++    schema_editor.create_model(TestModel)
++
++# Create test admin
++class TestModelAdmin(ModelAdmin):
++    list_display = ['id', 'name', 'value']
++    list_editable = ['name', 'value']
++    
++    def save_model(self, request, obj, form, change):
++        super().save_model(request, obj, form, change)
++        if obj.value == 999:
++            raise IntegrityError("Simulated error")
++
++# Test the transaction behavior
++def test_transaction():
++    print("Testing list_editable transaction behavior...")
++    
++    # Create objects
++    obj1 = TestModel.objects.create(name='Test 1', value=1)
++    obj2 = TestModel.objects.create(name='Test 2', value=2)
++    print(f"Created objects: {obj1.id}, {obj2.id}")
++    
++    # Setup admin
++    site = AdminSite()
++    admin = TestModelAdmin(TestModel, site)
++    factory = RequestFactory()
++    
++    # Create user
++    try:
++        user = User.objects.create_superuser('admin', 'admin@test.com', 'pass')
++    except:
++        user = User.objects.get(username='admin')
++    
++    # Create request
++    data = {
++        'form-TOTAL_FORMS': '2',
++        'form-INITIAL_FORMS': '2',
++        'form-MIN_NUM_FORMS': '0',
++        'form-MAX_NUM_FORMS': '1000',
++        f'form-0-id': str(obj1.id),
++        f'form-0-name': 'Updated 1',
++        f'form-0-value': '10',
++        f'form-1-id': str(obj2.id),
++        f'form-1-name': 'Updated 2',
++        f'form-1-value': '999',  # This triggers error
++        '_save': 'Save',
++    }
++    
++    request = factory.post('/admin/test/', data)
++    request.user = user
++    request._messages = CookieStorage(request)
++    
++    # Test
++    try:
++        response = admin.changelist_view(request)
++        print("ERROR: No exception raised!")
++        return False
++    except IntegrityError as e:
++        print(f"Good: IntegrityError raised: {e}")
++        
++        # Check if rollback worked
++        obj1.refresh_from_db()
++        obj2.refresh_from_db()
++        
++        if obj1.name == 'Test 1' and obj1.value == 1:
++            print("✓ SUCCESS: Transaction rolled back correctly!")
++            return True
++        else:
++            print(f"✗ FAILURE: Object 1 was modified: name='{obj1.name}', value={obj1.value}")
++            return False
++
++if __name__ == '__main__':
++    success = test_transaction()
++    sys.exit(0 if success else 1)
+diff --git a/tests/admin_changelist/tests.py b/tests/admin_changelist/tests.py
+index b85d5383cd..3d12ac6021 100644
+--- a/tests/admin_changelist/tests.py
++++ b/tests/admin_changelist/tests.py
+@@ -21,7 +21,7 @@ from django.db.models import F, Field, IntegerField
+ from django.db.models.functions import Upper
+ from django.db.models.lookups import Contains, Exact
+ from django.template import Context, Template, TemplateSyntaxError
+-from django.test import TestCase, override_settings
++from django.test import TestCase, TransactionTestCase, override_settings
+ from django.test.client import RequestFactory
+ from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
+ from django.urls import reverse
+@@ -1541,6 +1541,8 @@ class ChangeListTests(TestCase):
+         )
+ 
+ 
++
++
+ class GetAdminLogTests(TestCase):
+     def test_custom_user_pk_not_named_id(self):
+         """

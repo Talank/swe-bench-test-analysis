@@ -1,0 +1,186 @@
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..ffef5167
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,29 @@
++import xarray as xr
++import numpy as np
++
++# Test edge case: all scalars
++print("Test: All scalars with keep_attrs=True")
++try:
++    # This should work and return an array without attrs
++    result = xr.where(True, 1, 0, keep_attrs=True)
++    print(f"Success! Result: {result}")
++    print(f"Type: {type(result)}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTest: Numpy array condition with scalars")
++try:
++    result = xr.where(np.array([True, False, True]), 1, 0, keep_attrs=True)
++    print(f"Success! Result: {result}")
++    print(f"Type: {type(result)}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTest: Mixed types")
++try:
++    cond = xr.DataArray([True, False], attrs={"test": "cond"})
++    result = xr.where(cond, np.array([1, 2]), 0, keep_attrs=True)
++    print(f"Success! Result: {result}")
++    print(f"Attrs: {result.attrs}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_where_attrs.py b/test_where_attrs.py
+new file mode 100644
+index 00000000..41f4ec11
+--- /dev/null
++++ b/test_where_attrs.py
+@@ -0,0 +1,49 @@
++import xarray as xr
++import numpy as np
++
++# Test 1: Scalar x and y with keep_attrs=True
++print("Test 1: Scalar x and y with keep_attrs=True")
++cond = xr.DataArray([True, False, True], attrs={"cond_attr": "condition"})
++result = xr.where(cond, 1, 0, keep_attrs=True)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 2: DataArray x with attrs, scalar y
++print("Test 2: DataArray x with attrs, scalar y")
++x = xr.DataArray([10, 20, 30], attrs={"x_attr": "x_value"})
++result = xr.where(cond, x, 0, keep_attrs=True)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 3: Scalar x, DataArray y with attrs
++print("Test 3: Scalar x, DataArray y with attrs")
++y = xr.DataArray([100, 200, 300], attrs={"y_attr": "y_value"})
++result = xr.where(cond, 1, y, keep_attrs=True)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 4: All DataArrays with attrs
++print("Test 4: All DataArrays with attrs")
++result = xr.where(cond, x, y, keep_attrs=True)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 5: keep_attrs=False (should have no attrs)
++print("Test 5: keep_attrs=False")
++result = xr.where(cond, x, y, keep_attrs=False)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 6: Default keep_attrs behavior
++print("Test 6: Default keep_attrs behavior")
++result = xr.where(cond, x, y)
++print(f"Result attrs: {result.attrs}")
++print()
++
++# Test 7: Empty attrs
++print("Test 7: Empty attrs on all inputs")
++cond_no_attrs = xr.DataArray([True, False, True])
++x_no_attrs = xr.DataArray([10, 20, 30])
++y_no_attrs = xr.DataArray([100, 200, 300])
++result = xr.where(cond_no_attrs, x_no_attrs, y_no_attrs, keep_attrs=True)
++print(f"Result attrs: {result.attrs}")
+diff --git a/test_where_issue.py b/test_where_issue.py
+new file mode 100644
+index 00000000..e888a084
+--- /dev/null
++++ b/test_where_issue.py
+@@ -0,0 +1,33 @@
++import xarray as xr
++
++# Test case from the issue
++print("Testing the issue case:")
++try:
++    result = xr.where(xr.DataArray([1, 2, 3]) > 0, 1, 0)
++    print("Success! Result:", result)
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test with keep_attrs=False (workaround)
++print("\nTesting with keep_attrs=False:")
++try:
++    result = xr.where(xr.DataArray([1, 2, 3]) > 0, 1, 0, keep_attrs=False)
++    print("Success! Result:", result)
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test with keep_attrs=True explicitly
++print("\nTesting with keep_attrs=True:")
++try:
++    result = xr.where(xr.DataArray([1, 2, 3]) > 0, 1, 0, keep_attrs=True)
++    print("Success! Result:", result)
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test with DataArray as second argument
++print("\nTesting with DataArray as second argument:")
++try:
++    result = xr.where(xr.DataArray([1, 2, 3]) > 0, xr.DataArray([10, 20, 30]), 0, keep_attrs=True)
++    print("Success! Result:", result)
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 7676d8e5..dc5124c8 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1829,7 +1829,17 @@ def where(cond, x, y, keep_attrs=None):
+     if keep_attrs is True:
+         # keep the attributes of x, the second parameter, by default to
+         # be consistent with the `where` method of `DataArray` and `Dataset`
+-        keep_attrs = lambda attrs, context: attrs[1]
++        def _keep_attrs_from_second_arg(attrs, context):
++            # Handle case where second argument is a scalar and has no attrs
++            if len(attrs) > 1:
++                return attrs[1]
++            elif len(attrs) > 0:
++                # If we only have attrs from the condition, return those
++                return attrs[0]
++            else:
++                # No attrs available
++                return {}
++        keep_attrs = _keep_attrs_from_second_arg
+ 
+     # alignment for three arguments is complicated, so don't support it yet
+     return apply_ufunc(
+diff --git a/xarray/tests/test_computation.py b/xarray/tests/test_computation.py
+index 6a86738a..07b320f8 100644
+--- a/xarray/tests/test_computation.py
++++ b/xarray/tests/test_computation.py
+@@ -1929,6 +1929,29 @@ def test_where_attrs() -> None:
+     assert_identical(expected, actual)
+ 
+ 
++def test_where_attrs_scalar_args() -> None:
++    # Test scalar arguments with keep_attrs=True
++    # This was failing with IndexError before the fix
++    cond = xr.DataArray([True, False, True], attrs={"cond_attr": "condition"})
++    
++    # Test scalar x and y
++    actual = xr.where(cond, 1, 0, keep_attrs=True)
++    expected = xr.DataArray([1, 0, 1], attrs={"cond_attr": "condition"})
++    assert_identical(expected, actual)
++    
++    # Test DataArray x with scalar y
++    x = xr.DataArray([10, 20, 30], attrs={"x_attr": "x_value"})
++    actual = xr.where(cond, x, 0, keep_attrs=True)
++    expected = xr.DataArray([10, 0, 30], attrs={"x_attr": "x_value"})
++    assert_identical(expected, actual)
++    
++    # Test scalar x with DataArray y
++    y = xr.DataArray([100, 200, 300], attrs={"y_attr": "y_value"})
++    actual = xr.where(cond, 1, y, keep_attrs=True)
++    expected = xr.DataArray([1, 200, 1], attrs={"y_attr": "y_value"})
++    assert_identical(expected, actual)
++
++
+ @pytest.mark.parametrize("use_dask", [True, False])
+ @pytest.mark.parametrize("use_datetime", [True, False])
+ def test_polyval(use_dask, use_datetime) -> None:

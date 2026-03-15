@@ -1,0 +1,836 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5edbbd376f..559eb7055f 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -42,13 +42,29 @@ def construct_instance(form, instance, fields=None, exclude=None):
+         if not f.editable or isinstance(f, models.AutoField) \
+                 or f.name not in cleaned_data:
+             continue
+-        if fields is not None and f.name not in fields:
+-            continue
++        # Skip field if it's in the exclude list, UNLESS it was added to
++        # cleaned_data programmatically (not originally in form.fields)
+         if exclude and f.name in exclude:
+-            continue
++            # If the field is in form.fields, respect the exclude restriction
++            if f.name in form.fields:
++                continue
++            # Otherwise, the field was added to cleaned_data programmatically,
++            # so we should process it
++        # If fields list is specified, skip fields not in the list UNLESS
++        # the field was not originally in the form (form.fields) but was added
++        # to cleaned_data programmatically
++        if fields is not None and f.name not in fields:
++            # If the field is in form.fields, respect the fields restriction
++            if f.name in form.fields:
++                continue
++            # Otherwise, the field was added to cleaned_data programmatically,
++            # so we should process it
+         # Leave defaults for fields that aren't in POST data, except for
+         # checkbox inputs because they don't appear in POST data if not checked.
++        # Skip this check if the field is not in the form's fields but is in cleaned_data
++        # (i.e., it was added programmatically in the clean method).
+         if (f.has_default() and
++                f.name in form.fields and
+                 form[f.name].field.widget.value_omitted_from_data(form.data, form.files, form.add_prefix(f.name))):
+             continue
+         # Defer saving file-type fields until after the other fields, so a
+diff --git a/test_checkbox.py b/test_checkbox.py
+new file mode 100644
+index 0000000000..0cecd943c2
+--- /dev/null
++++ b/test_checkbox.py
+@@ -0,0 +1,77 @@
++"""Test checkbox fields with cleaned_data override."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    # Checkbox field included in form
++    checkbox_included = models.BooleanField(default=True)
++    # Checkbox field not in form
++    checkbox_excluded = models.BooleanField(default=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TestForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'checkbox_included']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Override checkbox that's not in the form
++        cleaned_data['checkbox_excluded'] = False
++        return cleaned_data
++
++
++def test_checkbox():
++    """Test checkbox handling."""
++    print("=== Testing checkbox fields ===")
++    
++    # Test 1: Checkbox unchecked (not in POST data)
++    form1 = TestForm(data={'name': 'Test1'})
++    if form1.is_valid():
++        instance1 = form1.save(commit=False)
++        print(f"Test 1 - checkbox_included (unchecked): {instance1.checkbox_included}")
++        print(f"Test 1 - checkbox_excluded (override): {instance1.checkbox_excluded}")
++        assert instance1.checkbox_included is False  # Unchecked
++        assert instance1.checkbox_excluded is False  # Overridden in clean()
++    
++    # Test 2: Checkbox checked (in POST data)
++    form2 = TestForm(data={'name': 'Test2', 'checkbox_included': 'on'})
++    if form2.is_valid():
++        instance2 = form2.save(commit=False)
++        print(f"Test 2 - checkbox_included (checked): {instance2.checkbox_included}")
++        print(f"Test 2 - checkbox_excluded (override): {instance2.checkbox_excluded}")
++        assert instance2.checkbox_included is True  # Checked
++        assert instance2.checkbox_excluded is False  # Overridden in clean()
++    
++    print("\nSUCCESS: Checkbox fields handled correctly!")
++
++
++if __name__ == '__main__':
++    test_checkbox()
+diff --git a/test_cleaned_data_default.py b/test_cleaned_data_default.py
+new file mode 100644
+index 0000000000..26812da8ce
+--- /dev/null
++++ b/test_cleaned_data_default.py
+@@ -0,0 +1,84 @@
++"""Test script to reproduce the cleaned_data default value issue."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.test import TestCase
++from django.forms import ModelForm
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create a form that excludes the computed_field
++class TestModelForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'status']  # computed_field is not included
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Try to set computed_field based on other fields
++        cleaned_data['computed_field'] = f"computed_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++def test_cleaned_data_override():
++    """Test that cleaned_data can override default values."""
++    # Create form data without computed_field
++    form_data = {
++        'name': 'Test Name',
++        'status': 'active'
++    }
++    
++    # Create form instance
++    form = TestModelForm(data=form_data)
++    
++    # Validate form
++    if form.is_valid():
++        # Save the instance
++        instance = form.save(commit=False)
++        
++        print(f"Form cleaned_data: {form.cleaned_data}")
++        print(f"Instance computed_field: {instance.computed_field}")
++        print(f"Expected computed_field: computed_Test Name")
++        
++        # Check if cleaned_data override worked
++        if instance.computed_field == 'computed_Test Name':
++            print("SUCCESS: cleaned_data override worked!")
++        else:
++            print("FAILURE: cleaned_data override did not work!")
++            print(f"Got '{instance.computed_field}' instead of 'computed_Test Name'")
++    else:
++        print(f"Form errors: {form.errors}")
++
++
++if __name__ == '__main__':
++    # Run the test
++    test_cleaned_data_override()
+diff --git a/test_cleaned_data_override.py b/test_cleaned_data_override.py
+new file mode 100644
+index 0000000000..cec7ae9188
+--- /dev/null
++++ b/test_cleaned_data_override.py
+@@ -0,0 +1,101 @@
++"""
++Test case for cleaned_data override functionality.
++This test should be added to Django's test suite.
++"""
++from django.db import models
++from django.forms import ModelForm
++from django.test import TestCase
++
++
++class CleanedDataOverrideModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    
++    class Meta:
++        app_label = 'model_forms'
++
++
++class CleanedDataOverrideTests(TestCase):
++    """Test that cleaned_data can override default field values."""
++    
++    def test_cleaned_data_override_with_fields_list(self):
++        """Test overriding default values via cleaned_data when field is not in fields list."""
++        class TestForm(ModelForm):
++            class Meta:
++                model = CleanedDataOverrideModel
++                fields = ['name', 'status']
++            
++            def clean(self):
++                cleaned_data = super().clean()
++                # Add a field that's not in the form
++                cleaned_data['computed_field'] = f"computed_{cleaned_data.get('name', '')}"
++                return cleaned_data
++        
++        form = TestForm(data={'name': 'Test', 'status': 'active'})
++        self.assertTrue(form.is_valid())
++        instance = form.save(commit=False)
++        
++        # The computed_field should have the value set in clean(), not the default
++        self.assertEqual(instance.computed_field, 'computed_Test')
++    
++    def test_cleaned_data_override_with_exclude(self):
++        """Test overriding default values via cleaned_data when field is in exclude list."""
++        class TestForm(ModelForm):
++            class Meta:
++                model = CleanedDataOverrideModel
++                exclude = ['computed_field']
++            
++            def clean(self):
++                cleaned_data = super().clean()
++                # Add a field that's excluded from the form
++                cleaned_data['computed_field'] = f"excluded_{cleaned_data.get('name', '')}"
++                return cleaned_data
++        
++        form = TestForm(data={'name': 'Test', 'status': 'active'})
++        self.assertTrue(form.is_valid())
++        instance = form.save(commit=False)
++        
++        # The computed_field should have the value set in clean(), not the default
++        self.assertEqual(instance.computed_field, 'excluded_Test')
++    
++    def test_cleaned_data_override_included_field(self):
++        """Test that cleaned_data can override values for fields that are in the form."""
++        class TestForm(ModelForm):
++            class Meta:
++                model = CleanedDataOverrideModel
++                fields = ['name', 'status', 'computed_field']
++            
++            def clean(self):
++                cleaned_data = super().clean()
++                # Override a field that's in the form
++                cleaned_data['computed_field'] = f"overridden_{cleaned_data.get('name', '')}"
++                return cleaned_data
++        
++        form = TestForm(data={
++            'name': 'Test',
++            'status': 'active',
++            'computed_field': 'original_value'
++        })
++        self.assertTrue(form.is_valid())
++        instance = form.save(commit=False)
++        
++        # The computed_field should have the overridden value
++        self.assertEqual(instance.computed_field, 'overridden_Test')
++    
++    def test_normal_field_behavior_unchanged(self):
++        """Test that normal field behavior is not affected."""
++        class TestForm(ModelForm):
++            class Meta:
++                model = CleanedDataOverrideModel
++                fields = ['name', 'status']
++        
++        form = TestForm(data={'name': 'Test', 'status': 'active'})
++        self.assertTrue(form.is_valid())
++        instance = form.save(commit=False)
++        
++        # Fields not in cleaned_data should keep their defaults
++        self.assertEqual(instance.computed_field, 'default_value')
++        # Normal fields should work as before
++        self.assertEqual(instance.name, 'Test')
++        self.assertEqual(instance.status, 'active')
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..e651694719
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,128 @@
++"""Comprehensive test for cleaned_data override functionality."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++
++
++# Create test models
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    optional_field = models.CharField(max_length=100, blank=True, default='optional_default')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test 1: Form that excludes fields but adds them in clean()
++class ExcludeFieldForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'status']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        cleaned_data['computed_field'] = f"computed_{cleaned_data.get('name', '')}"
++        cleaned_data['optional_field'] = f"optional_{cleaned_data.get('status', '')}"
++        return cleaned_data
++
++
++# Test 2: Form that includes a field but overrides it in clean()
++class IncludeFieldForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'status', 'computed_field']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Override the value even if it was in the form
++        cleaned_data['computed_field'] = f"overridden_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++# Test 3: Form with exclude instead of fields
++class ExcludeForm(ModelForm):
++    class Meta:
++        model = TestModel
++        exclude = ['computed_field']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        cleaned_data['computed_field'] = f"excluded_but_set_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++def run_tests():
++    """Run comprehensive tests."""
++    print("=== Test 1: Excluded field added in clean() ===")
++    form1 = ExcludeFieldForm(data={'name': 'Test1', 'status': 'active'})
++    if form1.is_valid():
++        instance1 = form1.save(commit=False)
++        print(f"computed_field: {instance1.computed_field}")
++        print(f"optional_field: {instance1.optional_field}")
++        assert instance1.computed_field == 'computed_Test1', f"Expected 'computed_Test1', got '{instance1.computed_field}'"
++        assert instance1.optional_field == 'optional_active', f"Expected 'optional_active', got '{instance1.optional_field}'"
++        print("PASS: Test 1 passed!")
++    else:
++        print(f"FAIL: Form errors: {form1.errors}")
++    
++    print("\n=== Test 2: Included field overridden in clean() ===")
++    form2 = IncludeFieldForm(data={'name': 'Test2', 'status': 'active', 'computed_field': 'original_value'})
++    if form2.is_valid():
++        instance2 = form2.save(commit=False)
++        print(f"computed_field: {instance2.computed_field}")
++        assert instance2.computed_field == 'overridden_Test2', f"Expected 'overridden_Test2', got '{instance2.computed_field}'"
++        print("PASS: Test 2 passed!")
++    else:
++        print(f"FAIL: Form errors: {form2.errors}")
++    
++    print("\n=== Test 3: Form with exclude instead of fields ===")
++    form3 = ExcludeForm(data={'name': 'Test3', 'status': 'active', 'optional_field': 'provided'})
++    if form3.is_valid():
++        instance3 = form3.save(commit=False)
++        print(f"computed_field: {instance3.computed_field}")
++        print(f"optional_field: {instance3.optional_field}")
++        assert instance3.computed_field == 'excluded_but_set_Test3', f"Expected 'excluded_but_set_Test3', got '{instance3.computed_field}'"
++        assert instance3.optional_field == 'provided', f"Expected 'provided', got '{instance3.optional_field}'"
++        print("PASS: Test 3 passed!")
++    else:
++        print(f"FAIL: Form errors: {form3.errors}")
++    
++    print("\n=== Test 4: Field with no default value ===")
++    # This should still work as before
++    form4 = ExcludeFieldForm(data={'name': 'Test4', 'status': 'active'})
++    if form4.is_valid():
++        instance4 = form4.save(commit=False)
++        print(f"name (no default): {instance4.name}")
++        assert instance4.name == 'Test4', f"Expected 'Test4', got '{instance4.name}'"
++        print("PASS: Test 4 passed!")
++    else:
++        print(f"FAIL: Form errors: {form4.errors}")
++    
++    print("\nSUCCESS: All tests passed!")
++
++
++if __name__ == '__main__':
++    run_tests()
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..79cd42b561
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,84 @@
++"""Debug script to understand the issue better."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create a form that excludes the computed_field
++class TestModelForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'status']  # computed_field is not included
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Try to set computed_field based on other fields
++        cleaned_data['computed_field'] = f"computed_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++def test_debug():
++    """Debug the issue."""
++    # Create form data without computed_field
++    form_data = {
++        'name': 'Test Name',
++        'status': 'active'
++    }
++    
++    # Create form instance
++    form = TestModelForm(data=form_data)
++    
++    # Validate form
++    if form.is_valid():
++        print(f"Form fields: {list(form.fields.keys())}")
++        print(f"Form cleaned_data: {form.cleaned_data}")
++        print(f"'computed_field' in form.fields: {'computed_field' in form.fields}")
++        print(f"'computed_field' in form.cleaned_data: {'computed_field' in form.cleaned_data}")
++        
++        # Check if we can access form['computed_field']
++        try:
++            field = form['computed_field']
++            print(f"form['computed_field'] exists: {field}")
++        except KeyError as e:
++            print(f"form['computed_field'] raises KeyError: {e}")
++            
++        # Save the instance
++        instance = form.save(commit=False)
++        print(f"\nInstance computed_field: {instance.computed_field}")
++    else:
++        print(f"Form errors: {form.errors}")
++
++
++if __name__ == '__main__':
++    test_debug()
+diff --git a/test_debug2.py b/test_debug2.py
+new file mode 100644
+index 0000000000..5a9468f885
+--- /dev/null
++++ b/test_debug2.py
+@@ -0,0 +1,107 @@
++"""Debug script to trace construct_instance."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++from django.forms.models import construct_instance
++
++
++# Monkey patch construct_instance to add debugging
++original_construct_instance = construct_instance
++
++def debug_construct_instance(form, instance, fields=None, exclude=None):
++    print(f"\n=== construct_instance called ===")
++    print(f"fields parameter: {fields}")
++    print(f"exclude parameter: {exclude}")
++    print(f"form.cleaned_data: {form.cleaned_data}")
++    
++    from django.db import models as django_models
++    opts = instance._meta
++    
++    cleaned_data = form.cleaned_data
++    for f in opts.fields:
++        if f.name == 'computed_field':
++            print(f"\nProcessing field: {f.name}")
++            print(f"  f.editable: {f.editable}")
++            print(f"  isinstance(f, AutoField): {isinstance(f, django_models.AutoField)}")
++            print(f"  f.name in cleaned_data: {f.name in cleaned_data}")
++            print(f"  fields is not None: {fields is not None}")
++            if fields is not None:
++                print(f"  f.name in fields: {f.name in fields}")
++            print(f"  f.has_default(): {f.has_default()}")
++            print(f"  f.name in form.fields: {f.name in form.fields}")
++            
++    result = original_construct_instance(form, instance, fields, exclude)
++    print(f"\nResult computed_field: {result.computed_field}")
++    return result
++
++# Apply the monkey patch
++import django.forms.models
++django.forms.models.construct_instance = debug_construct_instance
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create a form that excludes the computed_field
++class TestModelForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name', 'status']  # computed_field is not included
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Try to set computed_field based on other fields
++        cleaned_data['computed_field'] = f"computed_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++def test_debug():
++    """Debug the issue."""
++    # Create form data without computed_field
++    form_data = {
++        'name': 'Test Name',
++        'status': 'active'
++    }
++    
++    # Create form instance
++    form = TestModelForm(data=form_data)
++    
++    # Validate form
++    if form.is_valid():
++        # Save the instance
++        instance = form.save(commit=False)
++        print(f"\nFinal instance computed_field: {instance.computed_field}")
++    else:
++        print(f"Form errors: {form.errors}")
++
++
++if __name__ == '__main__':
++    test_debug()
+diff --git a/test_debug_exclude.py b/test_debug_exclude.py
+new file mode 100644
+index 0000000000..f55fce956d
+--- /dev/null
++++ b/test_debug_exclude.py
+@@ -0,0 +1,84 @@
++"""Debug exclude form."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++from django.forms.models import construct_instance
++
++
++# Monkey patch construct_instance to add debugging
++original_construct_instance = construct_instance
++
++def debug_construct_instance(form, instance, fields=None, exclude=None):
++    print(f"\n=== construct_instance called ===")
++    print(f"fields parameter: {fields}")
++    print(f"exclude parameter: {exclude}")
++    print(f"form._meta.fields: {getattr(form._meta, 'fields', 'N/A')}")
++    print(f"form._meta.exclude: {getattr(form._meta, 'exclude', 'N/A')}")
++    print(f"form.fields.keys(): {list(form.fields.keys())}")
++    print(f"form.cleaned_data: {form.cleaned_data}")
++    
++    result = original_construct_instance(form, instance, fields, exclude)
++    print(f"\nResult computed_field: {result.computed_field}")
++    return result
++
++# Apply the monkey patch
++import django.forms.models
++django.forms.models.construct_instance = debug_construct_instance
++
++
++# Create test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=50, default='pending')
++    computed_field = models.CharField(max_length=100, default='default_value')
++    optional_field = models.CharField(max_length=100, blank=True, default='optional_default')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Form with exclude instead of fields
++class ExcludeForm(ModelForm):
++    class Meta:
++        model = TestModel
++        exclude = ['computed_field']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        cleaned_data['computed_field'] = f"excluded_but_set_{cleaned_data.get('name', '')}"
++        return cleaned_data
++
++
++def test_debug():
++    """Debug the issue."""
++    form = ExcludeForm(data={'name': 'Test3', 'status': 'active', 'optional_field': 'provided'})
++    if form.is_valid():
++        instance = form.save(commit=False)
++        print(f"\nFinal computed_field: {instance.computed_field}")
++    else:
++        print(f"Form errors: {form.errors}")
++
++
++if __name__ == '__main__':
++    test_debug()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..483765b330
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,86 @@
++"""Test edge cases for cleaned_data override."""
++import django
++from django.conf import settings
++
++# Setup Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django import forms
++from django.db import models
++from django.forms import ModelForm
++
++
++# Test with different field types
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    # Field with no default
++    no_default = models.CharField(max_length=100)
++    # Field with callable default
++    callable_default = models.CharField(max_length=100, default=lambda: 'callable_default')
++    # Boolean field with default
++    bool_field = models.BooleanField(default=True)
++    # Integer field with default
++    int_field = models.IntegerField(default=42)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TestForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['name']
++    
++    def clean(self):
++        cleaned_data = super().clean()
++        # Add fields not in the form
++        cleaned_data['no_default'] = 'set_in_clean'
++        cleaned_data['callable_default'] = 'override_callable'
++        cleaned_data['bool_field'] = False
++        cleaned_data['int_field'] = 99
++        return cleaned_data
++
++
++def test_edge_cases():
++    """Test edge cases."""
++    print("=== Testing edge cases ===")
++    
++    form = TestForm(data={'name': 'Test'})
++    if form.is_valid():
++        instance = form.save(commit=False)
++        
++        print(f"name: {instance.name}")
++        print(f"no_default: {instance.no_default}")
++        print(f"callable_default: {instance.callable_default}")
++        print(f"bool_field: {instance.bool_field}")
++        print(f"int_field: {instance.int_field}")
++        
++        # Verify all fields were set correctly
++        assert instance.name == 'Test'
++        assert instance.no_default == 'set_in_clean'
++        assert instance.callable_default == 'override_callable'
++        assert instance.bool_field is False
++        assert instance.int_field == 99
++        
++        print("\nSUCCESS: All edge cases handled correctly!")
++    else:
++        print(f"Form errors: {form.errors}")
++
++
++if __name__ == '__main__':
++    test_edge_cases()

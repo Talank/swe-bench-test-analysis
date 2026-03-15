@@ -1,0 +1,281 @@
+diff --git a/lib/matplotlib/pyplot.py b/lib/matplotlib/pyplot.py
+index 58ce4c03fa..6742bfeeb6 100644
+--- a/lib/matplotlib/pyplot.py
++++ b/lib/matplotlib/pyplot.py
+@@ -2278,9 +2278,11 @@ def set_cmap(cmap: Colormap | str) -> None:
+     matplotlib.cm.register_cmap
+     matplotlib.cm.get_cmap
+     """
++    # Store the original input to preserve registered names
++    cmap_name = cmap if isinstance(cmap, str) else cmap.name
+     cmap = get_cmap(cmap)
+ 
+-    rc('image', cmap=cmap.name)
++    rc('image', cmap=cmap_name)
+     im = gci()
+ 
+     if im is not None:
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d8d049244a
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,27 @@
++from matplotlib import cm
++from matplotlib.colors import LinearSegmentedColormap
++import matplotlib.pyplot as plt
++import matplotlib
++
++print(f"matplotlib version: {matplotlib.__version__}")
++
++# Create a colormap with one name
++my_cmap_data = [[1.5e-03, 4.7e-04, 1.4e-02],
++                 [2.3e-03, 1.3e-03, 1.8e-02],
++                 [3.3e-03, 2.3e-03, 2.4e-02]]
++my_cmap = LinearSegmentedColormap.from_list('some_cmap_name', my_cmap_data)
++
++# Register it with a different name
++cm.register_cmap(name='my_cmap_name', cmap=my_cmap)
++
++# Try to use it
++try:
++    plt.set_cmap('my_cmap_name')  # This should work
++    print("set_cmap succeeded")
++    
++    # This should fail with the error mentioned in the issue
++    plt.imshow([[1, 1], [2, 2]])
++    print("imshow succeeded - BUG IS FIXED!")
++except ValueError as e:
++    print(f"Error occurred as expected: {e}")
++    print(f"The error mentions '{my_cmap.name}' instead of 'my_cmap_name'")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..a0dba69068
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,61 @@
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import colormaps, cm
++from matplotlib.colors import LinearSegmentedColormap, ListedColormap
++import numpy as np
++
++print(f"matplotlib version: {matplotlib.__version__}")
++
++# Test 1: Original issue - colormap with different internal and registered names
++print("\nTest 1: Colormap with different internal and registered names")
++my_cmap_data = [[1.5e-03, 4.7e-04, 1.4e-02],
++                 [2.3e-03, 1.3e-03, 1.8e-02],
++                 [3.3e-03, 2.3e-03, 2.4e-02]]
++my_cmap = LinearSegmentedColormap.from_list('internal_name', my_cmap_data)
++colormaps.register(my_cmap, name='registered_name')
++
++plt.set_cmap('registered_name')
++try:
++    plt.imshow([[1, 1], [2, 2]])
++    print("✓ Test 1 passed: Can use registered name")
++except ValueError as e:
++    print(f"✗ Test 1 failed: {e}")
++
++# Test 2: Using a built-in colormap name
++print("\nTest 2: Using built-in colormap name")
++plt.set_cmap('viridis')
++try:
++    plt.imshow([[3, 3], [4, 4]])
++    print("✓ Test 2 passed: Built-in colormaps still work")
++except ValueError as e:
++    print(f"✗ Test 2 failed: {e}")
++
++# Test 3: Passing a Colormap instance directly
++print("\nTest 3: Passing Colormap instance directly")
++custom_cmap = ListedColormap(['red', 'green', 'blue'], name='custom_listed')
++plt.set_cmap(custom_cmap)
++try:
++    plt.imshow([[5, 5], [6, 6]])
++    print("✓ Test 3 passed: Can pass Colormap instance")
++except ValueError as e:
++    print(f"✗ Test 3 failed: {e}")
++
++# Test 4: Check that rcParams has the correct value
++print("\nTest 4: Check rcParams value")
++plt.set_cmap('registered_name')
++rc_cmap = matplotlib.rcParams['image.cmap']
++print(f"rcParams['image.cmap'] = {rc_cmap}")
++if rc_cmap == 'registered_name':
++    print("✓ Test 4 passed: rcParams has the registered name")
++else:
++    print(f"✗ Test 4 failed: rcParams has '{rc_cmap}' instead of 'registered_name'")
++
++# Test 5: Verify get_cmap works with the registered name
++print("\nTest 5: Verify get_cmap works")
++try:
++    retrieved_cmap = cm.get_cmap('registered_name')
++    print(f"✓ Test 5 passed: get_cmap('registered_name') returns {type(retrieved_cmap).__name__}")
++except Exception as e:
++    print(f"✗ Test 5 failed: {e}")
++
++print("\nAll tests completed!")
+diff --git a/test_new_api.py b/test_new_api.py
+new file mode 100644
+index 0000000000..0d86255259
+--- /dev/null
++++ b/test_new_api.py
+@@ -0,0 +1,27 @@
++from matplotlib import colormaps
++from matplotlib.colors import LinearSegmentedColormap
++import matplotlib.pyplot as plt
++import matplotlib
++
++print(f"matplotlib version: {matplotlib.__version__}")
++
++# Create a colormap with one name
++my_cmap_data = [[1.5e-03, 4.7e-04, 1.4e-02],
++                 [2.3e-03, 1.3e-03, 1.8e-02],
++                 [3.3e-03, 2.3e-03, 2.4e-02]]
++my_cmap = LinearSegmentedColormap.from_list('some_cmap_name', my_cmap_data)
++
++# Register it with a different name using the new API
++colormaps.register(my_cmap, name='my_cmap_name')
++
++# Try to use it
++try:
++    plt.set_cmap('my_cmap_name')  # This should work
++    print("set_cmap succeeded")
++    
++    # This should now work with our fix
++    plt.imshow([[1, 1], [2, 2]])
++    print("imshow succeeded - BUG IS FIXED!")
++except ValueError as e:
++    print(f"Error occurred: {e}")
++    print(f"The error mentions '{my_cmap.name}' instead of 'my_cmap_name'")
+diff --git a/test_pyplot_set_cmap.py b/test_pyplot_set_cmap.py
+new file mode 100644
+index 0000000000..8021c32734
+--- /dev/null
++++ b/test_pyplot_set_cmap.py
+@@ -0,0 +1,53 @@
++"""
++Test for pyplot.set_cmap() to ensure it correctly handles registered colormap names.
++This test should be added to matplotlib's test suite.
++"""
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import colormaps
++from matplotlib.colors import LinearSegmentedColormap
++import pytest
++
++
++def test_set_cmap_registered_name():
++    """Test that set_cmap preserves registered colormap names in rcParams.
++    
++    This addresses the issue where a colormap registered with a different name
++    than its internal name would cause errors when used with pyplot.set_cmap().
++    """
++    # Create a colormap with an internal name
++    cmap_data = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
++    cmap = LinearSegmentedColormap.from_list('internal_cmap_name', cmap_data)
++    
++    # Register it with a different name
++    registered_name = 'test_registered_cmap_name'
++    colormaps.register(cmap, name=registered_name)
++    
++    try:
++        # Store original rcParam value
++        orig_cmap = matplotlib.rcParams['image.cmap']
++        
++        # Set the colormap using the registered name
++        plt.set_cmap(registered_name)
++        
++        # Verify that rcParams stores the registered name, not the internal name
++        assert matplotlib.rcParams['image.cmap'] == registered_name
++        
++        # Verify that imshow works without raising ValueError
++        fig, ax = plt.subplots()
++        im = ax.imshow([[1, 2], [3, 4]])
++        
++        # The actual colormap object still has its internal name
++        assert im.get_cmap().name == 'internal_cmap_name'
++        
++        plt.close(fig)
++        
++    finally:
++        # Restore original rcParam and clean up
++        matplotlib.rcParams['image.cmap'] = orig_cmap
++        colormaps.unregister(registered_name)
++
++
++if __name__ == "__main__":
++    test_set_cmap_registered_name()
++    print("Test passed!")
+diff --git a/test_set_cmap_fix.py b/test_set_cmap_fix.py
+new file mode 100644
+index 0000000000..f6d8150b42
+--- /dev/null
++++ b/test_set_cmap_fix.py
+@@ -0,0 +1,66 @@
++import pytest
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import colormaps
++from matplotlib.colors import LinearSegmentedColormap
++import numpy as np
++
++def test_set_cmap_with_registered_name():
++    """Test that set_cmap preserves the registered name in rcParams."""
++    # Create a colormap with one internal name
++    cmap_data = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
++    cmap = LinearSegmentedColormap.from_list('internal_name', cmap_data)
++    
++    # Register it with a different name
++    registered_name = 'test_registered_name'
++    colormaps.register(cmap, name=registered_name)
++    
++    try:
++        # Set it as the default colormap
++        plt.set_cmap(registered_name)
++        
++        # Check that rcParams has the registered name, not the internal name
++        assert matplotlib.rcParams['image.cmap'] == registered_name
++        
++        # Check that imshow works without error
++        fig, ax = plt.subplots()
++        im = ax.imshow([[1, 2], [3, 4]])
++        
++        # The image should use our colormap
++        assert im.get_cmap().name == 'internal_name'  # The colormap object still has its internal name
++        
++        plt.close(fig)
++        
++    finally:
++        # Clean up
++        colormaps.unregister(registered_name)
++
++def test_set_cmap_with_builtin():
++    """Test that set_cmap still works with built-in colormaps."""
++    plt.set_cmap('viridis')
++    assert matplotlib.rcParams['image.cmap'] == 'viridis'
++    
++    fig, ax = plt.subplots()
++    im = ax.imshow([[1, 2], [3, 4]])
++    assert im.get_cmap().name == 'viridis'
++    plt.close(fig)
++
++def test_set_cmap_with_instance():
++    """Test that set_cmap works when passed a Colormap instance."""
++    cmap = LinearSegmentedColormap.from_list('test_cmap', [[0, 0, 0], [1, 1, 1]])
++    
++    # When passing an instance, it should use the instance's name
++    plt.set_cmap(cmap)
++    assert matplotlib.rcParams['image.cmap'] == 'test_cmap'
++
++if __name__ == "__main__":
++    test_set_cmap_with_registered_name()
++    print("✓ test_set_cmap_with_registered_name passed")
++    
++    test_set_cmap_with_builtin()
++    print("✓ test_set_cmap_with_builtin passed")
++    
++    test_set_cmap_with_instance()
++    print("✓ test_set_cmap_with_instance passed")
++    
++    print("\nAll tests passed!")

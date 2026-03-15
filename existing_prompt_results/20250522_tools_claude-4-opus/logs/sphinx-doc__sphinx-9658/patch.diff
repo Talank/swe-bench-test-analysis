@@ -1,0 +1,490 @@
+diff --git a/sphinx/util/typing.py b/sphinx/util/typing.py
+index 87707d48f..fbf75a3cb 100644
+--- a/sphinx/util/typing.py
++++ b/sphinx/util/typing.py
+@@ -192,10 +192,17 @@ def _restify_py37(cls: Optional[Type]) -> str:
+     elif isinstance(cls, typing._SpecialForm):
+         return ':py:obj:`~%s.%s`' % (cls.__module__, cls._name)
+     elif hasattr(cls, '__qualname__'):
++        qualname = cls.__qualname__
++        # Handle empty __qualname__ (e.g., for mocked objects)
++        if not qualname and hasattr(cls, '__name__'):
++            qualname = cls.__name__
++        if not qualname:
++            qualname = type(cls).__name__
++            
+         if cls.__module__ == 'typing':
+-            return ':py:class:`~%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`~%s.%s`' % (cls.__module__, qualname)
+         else:
+-            return ':py:class:`%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`%s.%s`' % (cls.__module__, qualname)
+     elif isinstance(cls, ForwardRef):
+         return ':py:class:`%s`' % cls.__forward_arg__
+     else:
+@@ -274,10 +281,17 @@ def _restify_py36(cls: Optional[Type]) -> str:
+         else:
+             return ':py:obj:`Union`'
+     elif hasattr(cls, '__qualname__'):
++        qualname = cls.__qualname__
++        # Handle empty __qualname__ (e.g., for mocked objects)
++        if not qualname and hasattr(cls, '__name__'):
++            qualname = cls.__name__
++        if not qualname:
++            qualname = type(cls).__name__
++            
+         if cls.__module__ == 'typing':
+-            return ':py:class:`~%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`~%s.%s`' % (cls.__module__, qualname)
+         else:
+-            return ':py:class:`%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`%s.%s`' % (cls.__module__, qualname)
+     elif hasattr(cls, '_name'):
+         # SpecialForm
+         if cls.__module__ == 'typing':
+diff --git a/test_direct_autodoc.py b/test_direct_autodoc.py
+new file mode 100644
+index 000000000..782374c67
+--- /dev/null
++++ b/test_direct_autodoc.py
+@@ -0,0 +1,56 @@
++"""Direct test of autodoc with mocked inheritance."""
++
++import sys
++from io import StringIO
++from docutils.statemachine import StringList
++from sphinx.ext.autodoc import ClassDocumenter, Options
++from sphinx.ext.autodoc.mock import mock
++from sphinx.testing.fixtures import make_app, test_params
++from sphinx.util.docutils import LoggingReporter
++from docutils.parsers.rst import directives
++from sphinx.application import Sphinx
++
++
++def test_direct_autodoc():
++    """Test ClassDocumenter directly with a mocked base class."""
++    
++    # Create a mock torch module
++    with mock(['torch']):
++        # Create a test module with a class inheriting from torch.nn.Module
++        test_code = '''
++import torch
++
++class DeepKernel(torch.nn.Module):
++    """A kernel that uses deep learning."""
++    def __init__(self):
++        super().__init__()
++'''
++        
++        # Execute the code to create the class
++        namespace = {}
++        exec(test_code, namespace)
++        DeepKernel = namespace['DeepKernel']
++        
++        # Simulate what autodoc does
++        print("DeepKernel.__bases__:", DeepKernel.__bases__)
++        print("Base class type:", type(DeepKernel.__bases__[0]))
++        
++        # Test restify directly
++        from sphinx.util.typing import restify
++        base_class = DeepKernel.__bases__[0]
++        print(f"\nDirect restify of base class: {restify(base_class)}")
++        
++        # Check the base class attributes
++        print(f"\nBase class attributes:")
++        print(f"  __module__: {base_class.__module__}")
++        print(f"  __qualname__: '{base_class.__qualname__}'")
++        print(f"  __name__: {getattr(base_class, '__name__', 'N/A')}")
++        print(f"  type().__name__: {type(base_class).__name__}")
++        
++        # The fix should make this work
++        assert restify(base_class) == ':py:class:`torch.nn.Module`'
++        print("\nSuccess! Base class is correctly restified as :py:class:`torch.nn.Module`")
++
++
++if __name__ == '__main__':
++    test_direct_autodoc()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..5f61cd784
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,49 @@
++"""Test edge cases for the mock inheritance fix."""
++
++from sphinx.ext.autodoc.mock import mock, _MockObject
++from sphinx.util.typing import restify
++
++
++def test_mock_without_proper_name():
++    """Test mocked objects that might not have proper __name__ attribute."""
++    
++    # Create a mock object manually
++    class BadMock(_MockObject):
++        __module__ = 'test.module'
++        __qualname__ = ''
++        # Intentionally not setting __name__
++    
++    # The fix should handle this by using type().__name__
++    result = restify(BadMock)
++    print(f"restify(BadMock): {result}")
++    assert 'test.module.BadMock' in result
++    
++    # Test with an instance
++    bad_instance = BadMock()
++    bad_instance.__module__ = 'test.module'
++    bad_instance.__qualname__ = ''
++    result = restify(bad_instance)
++    print(f"restify(bad_instance): {result}")
++    
++
++def test_mock_with_weird_name_attribute():
++    """Test mocked objects with weird __name__ attributes."""
++    
++    with mock(['weird']):
++        import weird
++        
++        # Mock objects have a weird __name__ that returns another mock
++        obj = weird.Module
++        print(f"obj.__name__: {obj.__name__}")
++        print(f"type(obj.__name__): {type(obj.__name__)}")
++        
++        # Our fix should still work
++        result = restify(obj)
++        print(f"restify(obj): {result}")
++        assert result == ':py:class:`weird.Module`'
++
++
++if __name__ == '__main__':
++    test_mock_without_proper_name()
++    test_mock_with_weird_name_attribute()
++    print("\nAll edge case tests passed!")
+diff --git a/test_mock_inheritance.py b/test_mock_inheritance.py
+new file mode 100644
+index 000000000..044d3ad56
+--- /dev/null
++++ b/test_mock_inheritance.py
+@@ -0,0 +1,34 @@
++"""Test script to reproduce the mock inheritance issue."""
++
++import sys
++from sphinx.ext.autodoc.mock import mock, _MockObject, _MockModule, ismock
++from sphinx.util.typing import restify
++
++# Test 1: Direct mock object
++print("Test 1: Direct mock object")
++with mock(['torch']):
++    import torch
++    print(f"torch type: {type(torch)}")
++    print(f"torch.nn type: {type(torch.nn)}")
++    print(f"torch.nn.Module type: {type(torch.nn.Module)}")
++    
++    # Check attributes
++    print(f"torch.nn.__display_name__: {getattr(torch.nn, '__display_name__', 'N/A')}")
++    print(f"torch.nn.Module.__display_name__: {getattr(torch.nn.Module, '__display_name__', 'N/A')}")
++    print(f"torch.nn.Module.__module__: {getattr(torch.nn.Module, '__module__', 'N/A')}")
++    print(f"torch.nn.Module.__qualname__: '{getattr(torch.nn.Module, '__qualname__', 'N/A')}'")
++    print(f"torch.nn.Module.__name__: {getattr(torch.nn.Module, '__name__', 'N/A')}")
++    print(f"type(torch.nn.Module).__name__: {type(torch.nn.Module).__name__}")
++    print(f"ismock(torch.nn.Module): {ismock(torch.nn.Module)}")
++    print(f"torch.nn.Module.__sphinx_mock__: {getattr(torch.nn.Module, '__sphinx_mock__', 'N/A')}")
++    print(f"type(torch.nn.Module).__mro__: {type(torch.nn.Module).__mro__}")
++    
++    # Test restify
++    print(f"\nrestify(torch.nn.Module): {restify(torch.nn.Module)}")
++    
++    # Create a class that inherits from mock
++    class TestClass(torch.nn.Module):
++        pass
++    
++    print(f"\nTestClass.__bases__: {TestClass.__bases__}")
++    print(f"restify on bases: {[restify(base) for base in TestClass.__bases__]}")
+diff --git a/test_mock_inheritance_comprehensive.py b/test_mock_inheritance_comprehensive.py
+new file mode 100644
+index 000000000..584c8b3c7
+--- /dev/null
++++ b/test_mock_inheritance_comprehensive.py
+@@ -0,0 +1,88 @@
++"""Comprehensive test for mock inheritance issue."""
++
++import sys
++from sphinx.ext.autodoc.mock import mock, _MockObject, _MockModule, ismock
++from sphinx.util.typing import restify
++
++def test_mock_bases():
++    """Test that mocked base classes are correctly represented."""
++    print("=== Testing Mock Base Classes ===")
++    
++    with mock(['torch', 'tensorflow']):
++        import torch
++        import tensorflow as tf
++        
++        # Test different mock objects
++        test_cases = [
++            ("torch.nn.Module", torch.nn.Module),
++            ("tf.keras.Model", tf.keras.Model),
++            ("torch.optim.Optimizer", torch.optim.Optimizer),
++        ]
++        
++        for name, obj in test_cases:
++            print(f"\nTesting {name}:")
++            print(f"  __qualname__: '{getattr(obj, '__qualname__', 'N/A')}'")
++            print(f"  __name__: {getattr(obj, '__name__', 'N/A')}")
++            print(f"  type().__name__: {type(obj).__name__}")
++            print(f"  restify(): {restify(obj)}")
++            
++        # Test inheritance
++        print("\n=== Testing Inheritance ===")
++        
++        class MyModel(torch.nn.Module):
++            pass
++            
++        class MyKerasModel(tf.keras.Model):
++            pass
++            
++        print(f"\nMyModel.__bases__: {MyModel.__bases__}")
++        print(f"Base classes restified: {[restify(base) for base in MyModel.__bases__]}")
++        
++        print(f"\nMyKerasModel.__bases__: {MyKerasModel.__bases__}")
++        print(f"Base classes restified: {[restify(base) for base in MyKerasModel.__bases__]}")
++
++
++def test_real_classes():
++    """Test that real classes still work correctly."""
++    print("\n\n=== Testing Real Classes ===")
++    
++    class RealBase:
++        """A real base class."""
++        pass
++        
++    class RealDerived(RealBase):
++        """A real derived class."""
++        pass
++        
++    print(f"\nRealBase:")
++    print(f"  __qualname__: '{getattr(RealBase, '__qualname__', 'N/A')}'")
++    print(f"  __name__: {getattr(RealBase, '__name__', 'N/A')}")
++    print(f"  restify(): {restify(RealBase)}")
++    
++    print(f"\nRealDerived.__bases__: {RealDerived.__bases__}")
++    print(f"Base classes restified: {[restify(base) for base in RealDerived.__bases__]}")
++
++
++def test_edge_cases():
++    """Test edge cases."""
++    print("\n\n=== Testing Edge Cases ===")
++    
++    with mock(['edgecase']):
++        import edgecase
++        
++        # Test nested mocks
++        obj = edgecase.module.submodule.Class
++        print(f"\nedgecase.module.submodule.Class:")
++        print(f"  __qualname__: '{getattr(obj, '__qualname__', 'N/A')}'")
++        print(f"  restify(): {restify(obj)}")
++        
++        # Test mock with custom __qualname__
++        obj.__qualname__ = 'CustomQualname'
++        print(f"\nAfter setting __qualname__ = 'CustomQualname':")
++        print(f"  restify(): {restify(obj)}")
++
++
++if __name__ == '__main__':
++    test_mock_bases()
++    test_real_classes()
++    test_edge_cases()
+diff --git a/test_mock_inheritance_fix.py b/test_mock_inheritance_fix.py
+new file mode 100644
+index 000000000..db3999d1d
+--- /dev/null
++++ b/test_mock_inheritance_fix.py
+@@ -0,0 +1,87 @@
++"""Test to verify the fix for mock inheritance issue."""
++
++import pytest
++from sphinx.ext.autodoc.mock import mock
++from sphinx.util.typing import restify
++
++
++def test_mock_inheritance_bases_display():
++    """Test that mocked base classes are displayed correctly in documentation."""
++    
++    # Test with common mocked modules
++    with mock(['torch', 'tensorflow', 'numpy']):
++        import torch
++        import tensorflow as tf
++        import numpy as np
++        
++        # Test torch.nn.Module
++        assert restify(torch.nn.Module) == ':py:class:`torch.nn.Module`'
++        
++        # Test tensorflow.keras.Model
++        assert restify(tf.keras.Model) == ':py:class:`tensorflow.keras.Model`'
++        
++        # Test numpy.ndarray
++        assert restify(np.ndarray) == ':py:class:`numpy.ndarray`'
++        
++        # Test inheritance
++        class MyTorchModel(torch.nn.Module):
++            pass
++            
++        class MyKerasModel(tf.keras.Model):
++            pass
++            
++        # Verify bases are correctly restified
++        assert len(MyTorchModel.__bases__) == 1
++        assert restify(MyTorchModel.__bases__[0]) == ':py:class:`torch.nn.Module`'
++        
++        assert len(MyKerasModel.__bases__) == 1
++        assert restify(MyKerasModel.__bases__[0]) == ':py:class:`tensorflow.keras.Model`'
++
++
++def test_mock_empty_qualname():
++    """Test that mocked objects with empty __qualname__ are handled correctly."""
++    
++    with mock(['mockmodule']):
++        import mockmodule
++        
++        # Create a mock object and verify it has empty __qualname__
++        mock_obj = mockmodule.submodule.MyClass
++        assert mock_obj.__qualname__ == ''
++        assert mock_obj.__module__ == 'mockmodule.submodule'
++        assert type(mock_obj).__name__ == 'MyClass'
++        
++        # Verify restify works correctly
++        assert restify(mock_obj) == ':py:class:`mockmodule.submodule.MyClass`'
++
++
++def test_real_classes_unaffected():
++    """Test that real classes are not affected by the fix."""
++    
++    class RealClass:
++        """A real class with proper __qualname__."""
++        pass
++        
++    assert RealClass.__qualname__ == 'test_real_classes_unaffected.<locals>.RealClass'
++    assert restify(RealClass) == ':py:class:`__main__.test_real_classes_unaffected.<locals>.RealClass`'
++
++
++def test_mock_with_custom_qualname():
++    """Test mocked objects with custom __qualname__ set."""
++    
++    with mock(['custommod']):
++        import custommod
++        
++        obj = custommod.MyClass
++        # Set a custom qualname
++        obj.__qualname__ = 'CustomQualname'
++        
++        # Should use the custom qualname
++        assert restify(obj) == ':py:class:`custommod.CustomQualname`'
++
++
++if __name__ == '__main__':
++    test_mock_inheritance_bases_display()
++    test_mock_empty_qualname()
++    test_real_classes_unaffected()
++    test_mock_with_custom_qualname()
++    print("All tests passed!")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 000000000..908769536
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,79 @@
++"""Test the specific scenario from the problem statement."""
++
++from sphinx.ext.autodoc import ClassDocumenter, Options
++from sphinx.ext.autodoc.mock import mock
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from sphinx.util.docutils import LoggingReporter
++from docutils.statemachine import StringList
++import tempfile
++import os
++
++
++def test_mocked_inheritance_display():
++    """Test that a class inheriting from torch.nn.Module shows correct base class."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = path(tmpdir)
++        
++        # Create a simple conf.py
++        (srcdir / 'conf.py').write_text('''
++extensions = ['sphinx.ext.autodoc']
++autodoc_mock_imports = ['torch']
++''', encoding='utf-8')
++        
++        # Create a module with a class that inherits from torch.nn.Module
++        (srcdir / 'mymodule.py').write_text('''
++import torch
++
++class DeepKernel(torch.nn.Module):
++    """A kernel that uses deep learning."""
++    def __init__(self):
++        super().__init__()
++''', encoding='utf-8')
++        
++        # Create index.rst
++        (srcdir / 'index.rst').write_text('''
++Test Module
++===========
++
++.. autoclass:: mymodule.DeepKernel
++   :show-inheritance:
++''', encoding='utf-8')
++        
++        # Build the documentation
++        app = SphinxTestApp('html', srcdir=srcdir)
++        app.build()
++        
++        # Read the generated HTML
++        html_file = app.outdir / 'index.html'
++        html_content = html_file.read_text(encoding='utf-8')
++        
++        # Check that the base class is correctly displayed
++        print("Generated HTML content (relevant part):")
++        lines = html_content.split('\n')
++        found_bases = False
++        for i, line in enumerate(lines):
++            if 'Bases:' in line or 'torch.nn' in line:
++                found_bases = True
++                print(f"Line {i}: {line.strip()}")
++                # Also print a few lines around it for context
++                for j in range(max(0, i-2), min(len(lines), i+3)):
++                    print(f"  {j}: {lines[j].strip()}")
++                print("---")
++        
++        if not found_bases:
++            print("No 'Bases:' or 'torch.nn' found in HTML. Saving full HTML for inspection...")
++            with open('/tmp/test_output.html', 'w') as f:
++                f.write(html_content)
++        
++        # The fix should ensure that "torch.nn.Module" appears, not just "torch.nn."
++        assert 'torch.nn.Module' in html_content, "Base class torch.nn.Module not found in HTML"
++        assert 'Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">torch.nn.</span></code>' not in html_content, "Found incomplete base class reference"
++        
++        print("\nTest passed! Base class is correctly displayed as torch.nn.Module")
++
++
++if __name__ == '__main__':
++    test_mocked_inheritance_display()
+diff --git a/test_simple_mock.py b/test_simple_mock.py
+new file mode 100644
+index 000000000..340cca837
+--- /dev/null
++++ b/test_simple_mock.py
+@@ -0,0 +1,11 @@
++"""Simple test of mock fix."""
++
++from sphinx.ext.autodoc.mock import mock
++from sphinx.util.typing import restify
++
++with mock(['torch']):
++    import torch
++    obj = torch.nn.Module
++    print(f"__qualname__: '{obj.__qualname__}'")
++    print(f"type().__name__: {type(obj).__name__}")
++    print(f"restify: {restify(obj)}")

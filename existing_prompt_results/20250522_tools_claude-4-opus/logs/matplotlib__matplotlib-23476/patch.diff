@@ -1,0 +1,362 @@
+diff --git a/lib/matplotlib/backend_bases.py b/lib/matplotlib/backend_bases.py
+index 9ae2982c62..543448379b 100644
+--- a/lib/matplotlib/backend_bases.py
++++ b/lib/matplotlib/backend_bases.py
+@@ -1653,7 +1653,10 @@ class FigureCanvasBase:
+         self.toolbar = None  # NavigationToolbar2 will set me
+         self._is_idle_drawing = False
+         # We don't want to scale up the figure DPI more than once.
+-        figure._original_dpi = figure.dpi
++        # If the figure already has an _original_dpi attribute (e.g., from unpickling),
++        # preserve it instead of overwriting it with the potentially scaled DPI.
++        if not hasattr(figure, '_original_dpi'):
++            figure._original_dpi = figure.dpi
+         self._device_pixel_ratio = 1
+         super().__init__()  # Typically the GUI widget init (if any).
+ 
+diff --git a/lib/matplotlib/tests/test_pickle.py b/lib/matplotlib/tests/test_pickle.py
+index 0d0a5e5977..bec6cc8c92 100644
+--- a/lib/matplotlib/tests/test_pickle.py
++++ b/lib/matplotlib/tests/test_pickle.py
+@@ -237,3 +237,22 @@ def test_dynamic_norm():
+ def test_vertexselector():
+     line, = plt.plot([0, 1], picker=True)
+     pickle.loads(pickle.dumps(VertexSelector(line)))
++
++
++def test_figure_dpi_preservation():
++    """Test that figure DPI is preserved through pickle/unpickle cycles."""
++    # Test for issue where DPI doubles on M1 Mac after unpickling
++    fig = plt.figure(dpi=100)
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3])
++    
++    original_dpi = fig.dpi
++    original_original_dpi = fig._original_dpi
++    
++    # Multiple pickle/unpickle cycles should preserve DPI
++    for i in range(5):
++        pickled = pickle.dumps(fig)
++        fig = pickle.loads(pickled)
++        assert fig.dpi == original_dpi, f"DPI changed after {i+1} pickle cycles"
++        assert fig._original_dpi == original_original_dpi, \
++            f"_original_dpi changed after {i+1} pickle cycles"
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..4b951a54e7
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,35 @@
++import numpy as np
++import matplotlib
++import matplotlib.pyplot as plt
++import pickle
++import platform
++
++print(matplotlib.get_backend())
++print('Matplotlib ver:', matplotlib.__version__)
++print('Platform:', platform.platform())
++print('System:', platform.system())
++print('Release:', platform.release())
++print('Python ver:', platform.python_version())
++
++
++def dump_load_get_dpi(fig):
++    with open('sinus.pickle','wb') as file:
++        pickle.dump(fig, file)
++
++    with open('sinus.pickle', 'rb') as blob:
++        fig2 = pickle.load(blob)
++    return fig2, fig2.dpi
++
++
++def run():
++    fig = plt.figure()
++    x = np.linspace(0,2*np.pi)
++    y = np.sin(x)
++
++    for i in range(32):
++        print(f'{i}: {fig.dpi}')
++        fig, dpi = dump_load_get_dpi(fig)
++
++
++if __name__ == '__main__':
++    run()
+diff --git a/sinus.pickle b/sinus.pickle
+new file mode 100644
+index 0000000000..023d4f7d36
+Binary files /dev/null and b/sinus.pickle differ
+diff --git a/test.pickle b/test.pickle
+new file mode 100644
+index 0000000000..00a778a648
+Binary files /dev/null and b/test.pickle differ
+diff --git a/test2.pickle b/test2.pickle
+new file mode 100644
+index 0000000000..7165cfaaea
+Binary files /dev/null and b/test2.pickle differ
+diff --git a/test_dpi_pickle.py b/test_dpi_pickle.py
+new file mode 100644
+index 0000000000..1f15c2b9eb
+--- /dev/null
++++ b/test_dpi_pickle.py
+@@ -0,0 +1,33 @@
++import matplotlib.pyplot as plt
++import pickle
++import numpy as np
++
++# Create a figure
++fig = plt.figure(dpi=100)
++ax = fig.add_subplot(111)
++ax.plot([1, 2, 3], [1, 2, 3])
++
++print(f"Original DPI: {fig.dpi}")
++print(f"Original _original_dpi: {getattr(fig, '_original_dpi', 'Not set')}")
++
++# Pickle and unpickle
++with open('test.pickle', 'wb') as f:
++    pickle.dump(fig, f)
++
++with open('test.pickle', 'rb') as f:
++    fig2 = pickle.load(f)
++
++print(f"\nAfter unpickling:")
++print(f"DPI: {fig2.dpi}")
++print(f"_original_dpi: {getattr(fig2, '_original_dpi', 'Not set')}")
++
++# Try again
++with open('test2.pickle', 'wb') as f:
++    pickle.dump(fig2, f)
++
++with open('test2.pickle', 'rb') as f:
++    fig3 = pickle.load(f)
++
++print(f"\nAfter second unpickling:")
++print(f"DPI: {fig3.dpi}")
++print(f"_original_dpi: {getattr(fig3, '_original_dpi', 'Not set')}")
+diff --git a/test_macosx_dpi_pickle.py b/test_macosx_dpi_pickle.py
+new file mode 100644
+index 0000000000..8702d1ec20
+--- /dev/null
++++ b/test_macosx_dpi_pickle.py
+@@ -0,0 +1,54 @@
++import matplotlib
++matplotlib.use('Agg')  # Use non-interactive backend for testing
++import matplotlib.pyplot as plt
++import pickle
++import numpy as np
++
++def test_dpi_preservation():
++    """Test that DPI is preserved correctly during pickling/unpickling."""
++    # Create a figure with a specific DPI
++    fig = plt.figure(dpi=100)
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3])
++    
++    # Simulate what happens on a high-DPI display
++    # The _original_dpi should be set to 100
++    assert hasattr(fig, '_original_dpi')
++    assert fig._original_dpi == 100
++    
++    # Simulate device pixel ratio scaling
++    fig._set_dpi(200, forward=False)  # Simulate 2x scaling
++    
++    print(f"Before pickling - DPI: {fig.dpi}, _original_dpi: {fig._original_dpi}")
++    
++    # Pickle and unpickle
++    with open('test.pickle', 'wb') as f:
++        pickle.dump(fig, f)
++    
++    with open('test.pickle', 'rb') as f:
++        fig2 = pickle.load(f)
++    
++    print(f"After unpickling - DPI: {fig2.dpi}, _original_dpi: {fig2._original_dpi}")
++    
++    # The _original_dpi should be preserved
++    assert hasattr(fig2, '_original_dpi')
++    assert fig2._original_dpi == 100
++    assert fig2.dpi == 200
++    
++    # Pickle and unpickle again
++    with open('test2.pickle', 'wb') as f:
++        pickle.dump(fig2, f)
++    
++    with open('test2.pickle', 'rb') as f:
++        fig3 = pickle.load(f)
++    
++    print(f"After second unpickling - DPI: {fig3.dpi}, _original_dpi: {fig3._original_dpi}")
++    
++    # The values should remain the same
++    assert fig3._original_dpi == 100
++    assert fig3.dpi == 200
++    
++    print("Test passed!")
++
++if __name__ == '__main__':
++    test_dpi_preservation()
+diff --git a/test_macosx_simulation.py b/test_macosx_simulation.py
+new file mode 100644
+index 0000000000..4894d69229
+--- /dev/null
++++ b/test_macosx_simulation.py
+@@ -0,0 +1,76 @@
++"""Simulate the MacOSX backend behavior to test the DPI doubling fix."""
++import matplotlib
++matplotlib.use('Agg')  # Use non-interactive backend
++import matplotlib.pyplot as plt
++from matplotlib.backend_bases import FigureCanvasBase
++import pickle
++
++
++def simulate_macosx_canvas_creation(figure, device_pixel_ratio=2.0):
++    """Simulate what happens when MacOSX backend creates a canvas."""
++    # This simulates the canvas creation
++    canvas = FigureCanvasBase(figure)
++    
++    # Simulate the MacOSX backend calling _set_device_pixel_ratio
++    # This is what happens in the C code when the window is created
++    canvas._set_device_pixel_ratio(device_pixel_ratio)
++    
++    return canvas
++
++
++def test_macosx_pickle_dpi():
++    """Test that simulates the MacOSX backend DPI handling during pickle/unpickle."""
++    # Create a figure
++    fig = plt.figure(dpi=100)
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3])
++    
++    # Simulate MacOSX canvas creation with retina display (2x scaling)
++    canvas = simulate_macosx_canvas_creation(fig, device_pixel_ratio=2.0)
++    
++    print(f"Initial state:")
++    print(f"  fig.dpi = {fig.dpi}")
++    print(f"  fig._original_dpi = {fig._original_dpi}")
++    print(f"  canvas._device_pixel_ratio = {canvas._device_pixel_ratio}")
++    
++    # The DPI should be scaled
++    assert fig.dpi == 200  # 100 * 2
++    assert fig._original_dpi == 100
++    
++    # Pickle the figure
++    pickled = pickle.dumps(fig)
++    
++    # Unpickle the figure
++    fig2 = pickle.loads(pickled)
++    
++    # Simulate MacOSX canvas recreation during unpickling
++    canvas2 = simulate_macosx_canvas_creation(fig2, device_pixel_ratio=2.0)
++    
++    print(f"\nAfter first unpickle:")
++    print(f"  fig2.dpi = {fig2.dpi}")
++    print(f"  fig2._original_dpi = {fig2._original_dpi}")
++    print(f"  canvas2._device_pixel_ratio = {canvas2._device_pixel_ratio}")
++    
++    # The DPI should NOT be doubled
++    assert fig2.dpi == 200  # Should stay at 200, not become 400
++    assert fig2._original_dpi == 100  # Should be preserved
++    
++    # Try another cycle
++    pickled2 = pickle.dumps(fig2)
++    fig3 = pickle.loads(pickled2)
++    canvas3 = simulate_macosx_canvas_creation(fig3, device_pixel_ratio=2.0)
++    
++    print(f"\nAfter second unpickle:")
++    print(f"  fig3.dpi = {fig3.dpi}")
++    print(f"  fig3._original_dpi = {fig3._original_dpi}")
++    print(f"  canvas3._device_pixel_ratio = {canvas3._device_pixel_ratio}")
++    
++    # The DPI should still not be doubled
++    assert fig3.dpi == 200
++    assert fig3._original_dpi == 100
++    
++    print("\nTest passed! DPI is correctly preserved through pickle/unpickle cycles.")
++
++
++if __name__ == '__main__':
++    test_macosx_pickle_dpi()
+diff --git a/test_pickle_dpi.py b/test_pickle_dpi.py
+new file mode 100644
+index 0000000000..301f302add
+--- /dev/null
++++ b/test_pickle_dpi.py
+@@ -0,0 +1,79 @@
++"""Test for the DPI doubling bug fix when pickling/unpickling figures."""
++import pickle
++import pytest
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++
++
++def test_pickle_figure_dpi_preservation():
++    """Test that figure DPI is preserved correctly through pickle/unpickle cycles."""
++    # Create a figure with a specific DPI
++    original_dpi = 150
++    fig = plt.figure(dpi=original_dpi)
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3])
++    
++    # Check initial state
++    assert fig.dpi == original_dpi
++    assert hasattr(fig, '_original_dpi')
++    assert fig._original_dpi == original_dpi
++    
++    # First pickle/unpickle cycle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # DPI should be preserved
++    assert fig2.dpi == original_dpi
++    assert hasattr(fig2, '_original_dpi')
++    assert fig2._original_dpi == original_dpi
++    
++    # Second pickle/unpickle cycle
++    pickled2 = pickle.dumps(fig2)
++    fig3 = pickle.loads(pickled2)
++    
++    # DPI should still be preserved
++    assert fig3.dpi == original_dpi
++    assert hasattr(fig3, '_original_dpi')
++    assert fig3._original_dpi == original_dpi
++    
++    plt.close('all')
++
++
++def test_pickle_figure_with_scaled_dpi():
++    """Test pickling a figure that has been scaled by device pixel ratio."""
++    # Create a figure
++    original_dpi = 100
++    fig = plt.figure(dpi=original_dpi)
++    ax = fig.add_subplot(111)
++    ax.plot([1, 2, 3], [1, 2, 3])
++    
++    # Simulate high-DPI scaling (2x)
++    scaled_dpi = original_dpi * 2
++    fig._set_dpi(scaled_dpi, forward=False)
++    
++    # Check state after scaling
++    assert fig.dpi == scaled_dpi
++    assert fig._original_dpi == original_dpi
++    
++    # Pickle and unpickle
++    pickled = pickle.dumps(fig)
++    fig2 = pickle.loads(pickled)
++    
++    # Both DPI values should be preserved
++    assert fig2.dpi == scaled_dpi
++    assert fig2._original_dpi == original_dpi
++    
++    # Another cycle should not change the values
++    pickled2 = pickle.dumps(fig2)
++    fig3 = pickle.loads(pickled2)
++    
++    assert fig3.dpi == scaled_dpi
++    assert fig3._original_dpi == original_dpi
++    
++    plt.close('all')
++
++
++if __name__ == '__main__':
++    test_pickle_figure_dpi_preservation()
++    test_pickle_figure_with_scaled_dpi()
++    print("All tests passed!")

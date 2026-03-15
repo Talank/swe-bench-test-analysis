@@ -1,0 +1,919 @@
+diff --git a/django/contrib/contenttypes/management/__init__.py b/django/contrib/contenttypes/management/__init__.py
+index 2b5f688136..563cba2fdf 100644
+--- a/django/contrib/contenttypes/management/__init__.py
++++ b/django/contrib/contenttypes/management/__init__.py
+@@ -24,7 +24,7 @@ class RenameContentType(migrations.RunPython):
+             content_type.model = new_model
+             try:
+                 with transaction.atomic(using=db):
+-                    content_type.save(update_fields={'model'})
++                    content_type.save(using=db, update_fields={'model'})
+             except IntegrityError:
+                 # Gracefully fallback if a stale content type causes a
+                 # conflict as remove_stale_contenttypes will take care of
+diff --git a/test_core_issue.py b/test_core_issue.py
+new file mode 100644
+index 0000000000..8ac64c1d35
+--- /dev/null
++++ b/test_core_issue.py
+@@ -0,0 +1,122 @@
++"""Demonstrate the core issue in RenameContentType._rename()"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_default.db',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
++
++from django.db import connections, transaction
++from django.contrib.contenttypes.models import ContentType
++from django.contrib.contenttypes.management import RenameContentType
++from django.apps import apps
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', '--database=default', verbosity=0)
++call_command('migrate', '--database=other', verbosity=0)
++
++print("Testing RenameContentType._rename() method...")
++print("="*60)
++
++# Create content type only in 'other' database
++ct = ContentType.objects.using('other').create(
++    app_label='test_app',
++    model='oldmodel'
++)
++print(f"Created ContentType in 'other' db: {ct.app_label}.{ct.model}")
++
++# Mock schema editor
++class MockSchemaEditor:
++    def __init__(self, db_alias):
++        self.connection = type('MockConnection', (), {'alias': db_alias})()
++
++# Create RenameContentType operation
++rename_op = RenameContentType('test_app', 'oldmodel', 'newmodel')
++
++# Execute rename - this should update the 'other' database
++schema_editor = MockSchemaEditor('other')
++
++# Let's trace what happens in _rename
++db = schema_editor.connection.alias  # This will be 'other'
++print(f"\nschema_editor.connection.alias = '{db}'")
++
++# The code does this:
++try:
++    content_type = ContentType.objects.db_manager(db).get_by_natural_key('test_app', 'oldmodel')
++    print(f"Found content type: {content_type}")
++    
++    # Check which database the instance is associated with
++    print(f"content_type._state.db = {content_type._state.db}")
++    
++    content_type.model = 'newmodel'
++    
++    # The problematic code
++    print("\nExecuting: with transaction.atomic(using=db): content_type.save(update_fields={'model'})")
++    print(f"Transaction database: '{db}'")
++    
++    # Let's check what database Django will use for save
++    from django.db import router
++    write_db = router.db_for_write(ContentType, instance=content_type)
++    print(f"router.db_for_write() returns: '{write_db}'")
++    
++    # Since we didn't set up a custom router, it should use the instance's db
++    # But the issue is when there IS a custom router that returns a different db
++    
++    with transaction.atomic(using=db):
++        content_type.save(update_fields={'model'})
++    
++    print("\nChecking results...")
++    # Check both databases
++    try:
++        ct_other = ContentType.objects.using('other').get(app_label='test_app')
++        print(f"'other' db has: {ct_other.model}")
++    except:
++        print("No matching ContentType in 'other' db")
++    
++    try:
++        ct_default = ContentType.objects.using('default').get(app_label='test_app')
++        print(f"'default' db has: {ct_default.model}")
++    except:
++        print("No matching ContentType in 'default' db")
++        
++except ContentType.DoesNotExist:
++    print("ContentType not found")
++
++print("\n" + "="*60)
++print("ANALYSIS:")
++print("- The transaction is on the 'other' database")
++print("- But save() without 'using' parameter relies on router.db_for_write()")
++print("- With custom routers, this can return a different database")
++print("- This causes the save to go to the wrong database")
++print("\nFIX: Add using=db to the save() call")
++print("="*60)
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..338abf5d7a
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,121 @@
++"""Test to verify the fix for RenameContentType database routing issue"""
++
++import os
++import django
++from django.conf import settings
++from django.test import TestCase, override_settings
++from unittest import mock
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_default.db',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import connections, transaction, router
++from django.contrib.contenttypes.models import ContentType
++from django.contrib.contenttypes.management import RenameContentType
++from django.apps import apps
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', '--database=default', verbosity=0)
++call_command('migrate', '--database=other', verbosity=0)
++
++print("Testing the fix with a custom router that returns wrong database...")
++print("="*70)
++
++# Create a mock router that always returns 'default' for writes
++class BadRouter:
++    def db_for_read(self, model, **hints):
++        return None
++    
++    def db_for_write(self, model, **hints):
++        # This simulates the problematic router behavior
++        return 'default'
++    
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        return True
++
++# Create content type in 'other' database
++ct = ContentType.objects.using('other').create(
++    app_label='test_app',
++    model='oldmodel'
++)
++print(f"Created ContentType in 'other' db: {ct.app_label}.{ct.model}")
++
++# Mock schema editor
++class MockSchemaEditor:
++    def __init__(self, db_alias):
++        self.connection = type('MockConnection', (), {'alias': db_alias})()
++
++# Temporarily install the bad router
++old_routers = router.routers
++router.routers = [BadRouter()]
++
++try:
++    # Create RenameContentType operation
++    rename_op = RenameContentType('test_app', 'oldmodel', 'newmodel')
++    
++    # Execute rename with schema editor pointing to 'other'
++    schema_editor = MockSchemaEditor('other')
++    
++    print(f"\nExecuting rename with schema_editor.connection.alias = 'other'")
++    print(f"BadRouter.db_for_write() returns: 'default'")
++    
++    # Execute the rename
++    rename_op._rename(apps, schema_editor, 'oldmodel', 'newmodel')
++    
++    print("\nChecking results after rename...")
++    
++    # Check 'other' database (where the change SHOULD be)
++    try:
++        ct_other = ContentType.objects.using('other').get(app_label='test_app')
++        print(f"'other' database has model: '{ct_other.model}'")
++        if ct_other.model == 'newmodel':
++            print("SUCCESS: The model was renamed in the 'other' database!")
++        else:
++            print("FAILURE: The model was NOT renamed in the 'other' database!")
++    except ContentType.DoesNotExist:
++        print("FAILURE: ContentType not found in 'other' database!")
++    
++    # Check 'default' database (should NOT have the content type)
++    try:
++        ct_default = ContentType.objects.using('default').get(app_label='test_app')
++        print(f"FAILURE: 'default' database incorrectly has model: '{ct_default.model}'")
++    except ContentType.DoesNotExist:
++        print("SUCCESS: 'default' database correctly has no matching ContentType")
++        
++finally:
++    # Restore original routers
++    router.routers = old_routers
++
++print("\n" + "="*70)
++print("CONCLUSION: With the fix, save(using=db, ...) ensures the correct")
++print("database is used regardless of what the router returns.")
++print("="*70)
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
+diff --git a/test_multiple_db.py b/test_multiple_db.py
+new file mode 100644
+index 0000000000..f501a9e33a
+--- /dev/null
++++ b/test_multiple_db.py
+@@ -0,0 +1,104 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings first
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import connections, router
++from django.test import TransactionTestCase
++from django.contrib.contenttypes.management import RenameContentType
++from django.contrib.contenttypes.models import ContentType
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++from django.apps import apps
++
++# Create a custom router that routes contenttypes to 'other' database
++class TestRouter:
++    def db_for_read(self, model, **hints):
++        if model._meta.app_label == 'contenttypes':
++            return 'other'
++        return None
++    
++    def db_for_write(self, model, **hints):
++        if model._meta.app_label == 'contenttypes':
++            return 'other'
++        return None
++    
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        if app_label == 'contenttypes':
++            return db == 'other'
++        return db == 'default'
++
++# Test the issue
++def test_rename_content_type_with_router():
++    # Set up the router
++    old_routers = router.routers
++    router.routers = [TestRouter()]
++    
++    try:
++        # Create tables in both databases
++        from django.core.management import call_command
++        call_command('migrate', '--database=default', verbosity=0)
++        call_command('migrate', '--database=other', verbosity=0)
++        
++        # Create a content type in the 'other' database
++        ContentType.objects.using('other').create(
++            app_label='test_app',
++            model='oldmodel'
++        )
++        
++        # Create a mock schema editor for the 'other' database
++        from django.db import connection
++        from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++        
++        class MockSchemaEditor:
++            def __init__(self, connection):
++                self.connection = connection
++        
++        schema_editor = MockSchemaEditor(connections['other'])
++        
++        # Create the RenameContentType operation
++        operation = RenameContentType('test_app', 'oldmodel', 'newmodel')
++        
++        # Execute the rename
++        from django.apps.registry import Apps
++        test_apps = Apps(['django.contrib.contenttypes'])
++        
++        print("Before rename:")
++        print(f"Content types in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('model'))}")
++        
++        try:
++            operation.rename_forward(test_apps, schema_editor)
++            print("\nAfter rename:")
++            print(f"Content types in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('model'))}")
++        except Exception as e:
++            print(f"\nError occurred: {type(e).__name__}: {e}")
++            import traceback
++            traceback.print_exc()
++            
++    finally:
++        # Restore original routers
++        router.routers = old_routers
++
++if __name__ == '__main__':
++    test_rename_content_type_with_router()
+diff --git a/test_rename_db_issue.py b/test_rename_db_issue.py
+new file mode 100644
+index 0000000000..fc349b50ed
+--- /dev/null
++++ b/test_rename_db_issue.py
+@@ -0,0 +1,87 @@
++"""Test script to demonstrate the database routing issue in RenameContentType._rename()"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_default.db',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import connections, transaction
++from django.contrib.contenttypes.models import ContentType
++from django.contrib.contenttypes.management import RenameContentType
++
++# Clean up any existing test databases
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
++
++# Create tables in both databases
++from django.core.management import call_command
++print("Creating tables in 'default' database...")
++call_command('migrate', '--database=default', verbosity=0)
++print("Creating tables in 'other' database...")
++call_command('migrate', '--database=other', verbosity=0)
++
++# Create a content type in the 'other' database
++print("\nCreating test content type in 'other' database...")
++ct = ContentType.objects.using('other').create(
++    app_label='test_app',
++    model='oldmodel'
++)
++print(f"Created ContentType: {ct.app_label}.{ct.model} with id={ct.id}")
++
++# Mock schema editor that specifies 'other' database
++class MockSchemaEditor:
++    def __init__(self, db_alias):
++        self.connection = type('MockConnection', (), {'alias': db_alias})()
++
++# Test the rename operation
++print("\nTesting RenameContentType operation...")
++rename_op = RenameContentType('test_app', 'oldmodel', 'newmodel')
++
++# Get the apps registry
++from django.apps import apps
++
++# Execute rename with schema editor pointing to 'other' database
++schema_editor = MockSchemaEditor('other')
++
++print("\nBefore rename:")
++print(f"ContentTypes in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('id', 'model'))}")
++print(f"ContentTypes in 'default' db: {list(ContentType.objects.using('default').filter(app_label='test_app').values('id', 'model'))}")
++
++try:
++    # This should use the 'other' database but currently tries to use 'default'
++    rename_op._rename(apps, schema_editor, 'oldmodel', 'newmodel')
++    print("\nRename succeeded!")
++except Exception as e:
++    print(f"\nRename failed with error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\nAfter rename attempt:")
++print(f"ContentTypes in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('id', 'model'))}")
++print(f"ContentTypes in 'default' db: {list(ContentType.objects.using('default').filter(app_label='test_app').values('id', 'model'))}")
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
+diff --git a/test_rename_with_router.py b/test_rename_with_router.py
+new file mode 100644
+index 0000000000..39f4b5b8af
+--- /dev/null
++++ b/test_rename_with_router.py
+@@ -0,0 +1,102 @@
++"""Test script to demonstrate the database routing issue with custom router"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',  # This simulates the non-existent default DB
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++    DATABASE_ROUTERS=['test_rename_with_router.TestRouter'],
++)
++
++django.setup()
++
++from django.db import connections, transaction, router
++from django.contrib.contenttypes.models import ContentType
++from django.contrib.contenttypes.management import RenameContentType
++
++# Custom router that routes everything to 'other' database
++class TestRouter:
++    def db_for_read(self, model, **hints):
++        return 'other'
++    
++    def db_for_write(self, model, **hints):
++        return 'other'
++    
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        return db == 'other'
++
++# Clean up any existing test database
++if os.path.exists('/tmp/test_other.db'):
++    os.remove('/tmp/test_other.db')
++
++# Create tables only in 'other' database
++from django.core.management import call_command
++print("Creating tables in 'other' database...")
++call_command('migrate', '--database=other', verbosity=0)
++
++# Note: We're NOT creating tables in 'default' database to simulate the issue
++
++# Create a content type in the 'other' database
++print("\nCreating test content type in 'other' database...")
++ct = ContentType.objects.using('other').create(
++    app_label='test_app',
++    model='oldmodel'
++)
++print(f"Created ContentType: {ct.app_label}.{ct.model} with id={ct.id}")
++
++# Mock schema editor that specifies 'other' database
++class MockSchemaEditor:
++    def __init__(self, db_alias):
++        self.connection = type('MockConnection', (), {'alias': db_alias})()
++
++# Test the rename operation
++print("\nTesting RenameContentType operation...")
++rename_op = RenameContentType('test_app', 'oldmodel', 'newmodel')
++
++# Get the apps registry
++from django.apps import apps
++
++# Execute rename with schema editor pointing to 'other' database
++schema_editor = MockSchemaEditor('other')
++
++print("\nBefore rename:")
++print(f"ContentTypes in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('id', 'model'))}")
++
++# Check if default database has the table
++try:
++    list(ContentType.objects.using('default').all())
++    print("Default database has contenttypes table")
++except Exception as e:
++    print(f"Default database error (expected): {type(e).__name__}: {e}")
++
++try:
++    # This should use the 'other' database but might try to use 'default'
++    rename_op._rename(apps, schema_editor, 'oldmodel', 'newmodel')
++    print("\nRename succeeded!")
++except Exception as e:
++    print(f"\nRename failed with error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\nAfter rename attempt:")
++print(f"ContentTypes in 'other' db: {list(ContentType.objects.using('other').filter(app_label='test_app').values('id', 'model'))}")
++
++# Clean up
++if os.path.exists('/tmp/test_other.db'):
++    os.remove('/tmp/test_other.db')
+diff --git a/test_router_issue.py b/test_router_issue.py
+new file mode 100644
+index 0000000000..4c3c8c39e8
+--- /dev/null
++++ b/test_router_issue.py
+@@ -0,0 +1,124 @@
++"""Test to demonstrate the issue with custom router"""
++
++import os
++import django
++from django.conf import settings
++
++# Clean up any existing test databases
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
++
++# Configure Django settings with a custom router
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_default.db',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++    DATABASE_ROUTERS=['test_router_issue.CustomRouter'],
++)
++
++# Define custom router BEFORE django.setup()
++class CustomRouter:
++    """Router that always returns 'default' for writes"""
++    def db_for_read(self, model, **hints):
++        return None  # Let Django decide
++    
++    def db_for_write(self, model, **hints):
++        # This simulates the issue - router always returns 'default' for writes
++        return 'default'
++    
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        return True
++
++django.setup()
++
++from django.db import connections, transaction, router
++from django.contrib.contenttypes.models import ContentType
++
++# Create tables in both databases
++from django.core.management import call_command
++print("Creating tables...")
++call_command('migrate', '--database=default', verbosity=0)
++call_command('migrate', '--database=other', verbosity=0)
++
++# Create a content type in the 'other' database
++print("\nCreating test content type in 'other' database...")
++# We need to bypass the router for creation
++ct = ContentType(
++    id=100,
++    app_label='test_app',
++    model='model_in_other'
++)
++ct.save(using='other')  # Explicitly save to 'other'
++
++print(f"Created in 'other' db: {ct.model}")
++
++# Now simulate what happens in RenameContentType._rename()
++print("\nSimulating RenameContentType._rename() behavior...")
++
++# This is what the code does: fetch from the specified db
++db = 'other'  # This comes from schema_editor.connection.alias
++ct = ContentType.objects.db_manager(db).get(id=100)
++print(f"Fetched from '{db}' db: {ct.model}")
++
++# Change the model
++ct.model = 'renamed_model'
++
++# This is the problematic code - it doesn't specify 'using'
++print(f"\nRouter says to write to: '{router.db_for_write(ContentType, instance=ct)}'")
++
++with transaction.atomic(using=db):
++    ct.save(update_fields={'model'})  # No 'using' parameter!
++
++# Check which database was actually updated
++try:
++    ct_default = ContentType.objects.using('default').get(id=100)
++    print(f"\nModel in 'default' db: {ct_default.model}")
++except ContentType.DoesNotExist:
++    print(f"\nNo ContentType with id=100 in 'default' db")
++
++try:
++    ct_other = ContentType.objects.using('other').get(id=100)
++    print(f"Model in 'other' db: {ct_other.model}")
++except ContentType.DoesNotExist:
++    print(f"No ContentType with id=100 in 'other' db")
++
++print("\n" + "="*50)
++print("ISSUE: Even though we're in a transaction on 'other' db,")
++print("the save() went to 'default' db because of the router!")
++print("="*50)
++
++# Now test the fix
++print("\n\nTesting the fix with explicit 'using' parameter...")
++ct2 = ContentType(
++    id=101,
++    app_label='test_app',
++    model='another_model'
++)
++ct2.save(using='other')
++
++ct2 = ContentType.objects.db_manager(db).get(id=101)
++ct2.model = 'renamed_with_using'
++
++with transaction.atomic(using=db):
++    ct2.save(using=db, update_fields={'model'})  # With explicit 'using'
++
++ct2_after = ContentType.objects.using('other').get(id=101)
++print(f"Model in 'other' db after save with using='{db}': {ct2_after.model}")
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
+diff --git a/test_router_regression.py b/test_router_regression.py
+new file mode 100644
+index 0000000000..2aa43d0213
+--- /dev/null
++++ b/test_router_regression.py
+@@ -0,0 +1,91 @@
++"""
++Test case for the RenameContentType database routing fix.
++This could be added to the Django test suite.
++"""
++
++import django
++from django.conf import settings
++
++# Configure settings first
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.contrib.contenttypes.management import RenameContentType
++from django.contrib.contenttypes.models import ContentType
++from django.db import router, connections
++from django.test import TestCase, TransactionTestCase, override_settings
++from django.apps import apps
++
++
++class RouterThatAlwaysReturnsDefault:
++    """A router that always returns 'default' for writes, simulating the issue."""
++    def db_for_read(self, model, **hints):
++        return None
++    
++    def db_for_write(self, model, **hints):
++        return 'default'
++    
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        return True
++
++
++@override_settings(DATABASE_ROUTERS=[RouterThatAlwaysReturnsDefault()])
++class RenameContentTypeRouterTests(TransactionTestCase):
++    """Test that RenameContentType respects the schema editor's database."""
++    
++    databases = {'default', 'other'}
++    
++    def test_rename_with_router_override(self):
++        """
++        Test that RenameContentType saves to the correct database even when
++        a router returns a different database for writes.
++        """
++        # Create a content type in the 'other' database
++        ct = ContentType.objects.using('other').create(
++            app_label='test_app',
++            model='oldmodel'
++        )
++        
++        # Create a mock schema editor for the 'other' database
++        class MockSchemaEditor:
++            class connection:
++                alias = 'other'
++        
++        schema_editor = MockSchemaEditor()
++        
++        # Create and execute the rename operation
++        rename_op = RenameContentType('test_app', 'oldmodel', 'newmodel')
++        rename_op._rename(apps, schema_editor, 'oldmodel', 'newmodel')
++        
++        # Verify the content type was renamed in the 'other' database
++        ct_other = ContentType.objects.using('other').get(app_label='test_app')
++        self.assertEqual(ct_other.model, 'newmodel')
++        
++        # Verify no content type was created in the 'default' database
++        with self.assertRaises(ContentType.DoesNotExist):
++            ContentType.objects.using('default').get(app_label='test_app')
++
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    
++    # Run the test
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.RenameContentTypeRouterTests"])
+diff --git a/test_save_issue.py b/test_save_issue.py
+new file mode 100644
+index 0000000000..50b412ca47
+--- /dev/null
++++ b/test_save_issue.py
+@@ -0,0 +1,107 @@
++"""Test to demonstrate that save() doesn't respect the transaction database"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_default.db',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_other.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import connections, transaction
++from django.contrib.contenttypes.models import ContentType
++
++# Clean up any existing test databases
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)
++
++# Create tables in both databases
++from django.core.management import call_command
++print("Creating tables...")
++call_command('migrate', '--database=default', verbosity=0)
++call_command('migrate', '--database=other', verbosity=0)
++
++# Create content types in both databases with same id but different models
++print("\nCreating test content types...")
++ct_default = ContentType.objects.using('default').create(
++    id=100,
++    app_label='test_app',
++    model='model_in_default'
++)
++ct_other = ContentType.objects.using('other').create(
++    id=100,
++    app_label='test_app', 
++    model='model_in_other'
++)
++
++print(f"Created in default: {ct_default.model}")
++print(f"Created in other: {ct_other.model}")
++
++# Now test the issue: fetch from 'other' db and save within transaction
++print("\nTesting save within transaction...")
++ct = ContentType.objects.using('other').get(id=100)
++print(f"Fetched from 'other' db: {ct.model}")
++
++# Change the model name
++ct.model = 'updated_model'
++
++# Save within a transaction on 'other' database
++print("\nSaving within transaction.atomic(using='other')...")
++with transaction.atomic(using='other'):
++    ct.save(update_fields={'model'})  # This is the problematic line
++
++# Check which database was actually updated
++print("\nChecking results...")
++ct_default_after = ContentType.objects.using('default').get(id=100)
++ct_other_after = ContentType.objects.using('other').get(id=100)
++
++print(f"Model in 'default' db after save: {ct_default_after.model}")
++print(f"Model in 'other' db after save: {ct_other_after.model}")
++
++if ct_other_after.model == 'updated_model':
++    print("\nSUCCESS: The 'other' database was correctly updated")
++else:
++    print("\nFAILURE: The 'other' database was NOT updated")
++    
++if ct_default_after.model == 'model_in_default':
++    print("SUCCESS: The 'default' database was NOT modified")
++else:
++    print("FAILURE: The 'default' database was incorrectly modified")
++
++# Now test with explicit using parameter
++print("\n\nTesting with explicit using parameter...")
++ct2 = ContentType.objects.using('other').create(
++    id=101,
++    app_label='test_app',
++    model='another_model'
++)
++
++ct2.model = 'updated_with_using'
++with transaction.atomic(using='other'):
++    ct2.save(using='other', update_fields={'model'})  # With explicit using
++
++ct2_after = ContentType.objects.using('other').get(id=101)
++print(f"Model after save with using='other': {ct2_after.model}")
++
++# Clean up
++for db_file in ['/tmp/test_default.db', '/tmp/test_other.db']:
++    if os.path.exists(db_file):
++        os.remove(db_file)

@@ -1,0 +1,284 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..8d0769d89
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,27 @@
++from sklearn.mixture import GaussianMixture
++from sklearn.utils.testing import assert_array_equal
++import numpy as np
++
++np.random.seed(42)
++X = np.random.randn(1000, 5)
++
++print('no n_init')
++gm = GaussianMixture(n_components=5)
++c1 = gm.fit_predict(X)
++c2 = gm.predict(X)
++try:
++    assert_array_equal(c1, c2)
++    print("PASS: Arrays are equal")
++except AssertionError as e:
++    print(f"FAIL: {e}")
++
++print('\nn_init=5')
++gm = GaussianMixture(n_components=5, n_init=5)
++c1 = gm.fit_predict(X)
++c2 = gm.predict(X)
++try:
++    assert_array_equal(c1, c2)
++    print("PASS: Arrays are equal")
++except AssertionError as e:
++    print(f"FAIL: {e}")
++    print(f"Number of mismatches: {np.sum(c1 != c2)}")
+diff --git a/sklearn/mixture/base.py b/sklearn/mixture/base.py
+index bd34333c0..8920bef18 100644
+--- a/sklearn/mixture/base.py
++++ b/sklearn/mixture/base.py
+@@ -257,11 +257,6 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
+                 best_params = self._get_parameters()
+                 best_n_iter = n_iter
+ 
+-        # Always do a final e-step to guarantee that the labels returned by
+-        # fit_predict(X) are always consistent with fit(X).predict(X)
+-        # for any value of max_iter and tol (and any random_state).
+-        _, log_resp = self._e_step(X)
+-
+         if not self.converged_:
+             warnings.warn('Initialization %d did not converge. '
+                           'Try different init parameters, '
+@@ -273,6 +268,11 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
+         self.n_iter_ = best_n_iter
+         self.lower_bound_ = max_lower_bound
+ 
++        # Always do a final e-step to guarantee that the labels returned by
++        # fit_predict(X) are always consistent with fit(X).predict(X)
++        # for any value of max_iter and tol (and any random_state).
++        _, log_resp = self._e_step(X)
++
+         return log_resp.argmax(axis=1)
+ 
+     def _e_step(self, X):
+diff --git a/sklearn/mixture/tests/test_gaussian_mixture.py b/sklearn/mixture/tests/test_gaussian_mixture.py
+index 4d549ccd7..8e340daa2 100644
+--- a/sklearn/mixture/tests/test_gaussian_mixture.py
++++ b/sklearn/mixture/tests/test_gaussian_mixture.py
+@@ -1033,3 +1033,18 @@ def test_init():
+                                max_iter=1, random_state=random_state).fit(X)
+ 
+         assert gmm2.lower_bound_ >= gmm1.lower_bound_
++
++
++def test_gaussian_mixture_fit_predict_n_init():
++    """Test that fit_predict and predict are consistent when n_init > 1."""
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 100, 5
++    X = rng.randn(n_samples, n_features)
++    
++    for n_init in [1, 5, 10]:
++        for covar_type in COVARIANCE_TYPE:
++            gm = GaussianMixture(n_components=3, n_init=n_init, 
++                                covariance_type=covar_type, random_state=42)
++            labels_fit_predict = gm.fit_predict(X)
++            labels_predict = gm.predict(X)
++            assert_array_equal(labels_fit_predict, labels_predict)
+diff --git a/test_default_case.py b/test_default_case.py
+new file mode 100644
+index 000000000..18e81ffd1
+--- /dev/null
++++ b/test_default_case.py
+@@ -0,0 +1,25 @@
++import numpy as np
++from sklearn.mixture import GaussianMixture
++from sklearn.utils.testing import assert_array_equal
++
++# Test with default n_init=1
++rng = np.random.RandomState(42)
++n_samples, n_features = 100, 5
++X = rng.randn(n_samples, n_features)
++
++gm = GaussianMixture(n_components=3)  # n_init defaults to 1
++labels_fit_predict = gm.fit_predict(X)
++labels_predict = gm.predict(X)
++
++assert_array_equal(labels_fit_predict, labels_predict)
++print("Default case (n_init=1): PASS")
++
++# Also test that the fix doesn't affect the case when best_params is not defined
++# This happens when warm_start=True and the model was already fitted
++gm2 = GaussianMixture(n_components=3, warm_start=True)
++gm2.fit(X)  # First fit
++labels_fit_predict2 = gm2.fit_predict(X)  # Second fit with warm start
++labels_predict2 = gm2.predict(X)
++
++assert_array_equal(labels_fit_predict2, labels_predict2)
++print("Warm start case: PASS")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..48cade9c7
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,57 @@
++import numpy as np
++from sklearn.mixture import GaussianMixture
++from sklearn.utils.testing import assert_array_equal
++
++def test_warm_start_with_n_init():
++    """Test that warm_start works correctly with our fix."""
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 100, 5
++    X = rng.randn(n_samples, n_features)
++    
++    # With warm_start=True, n_init should be ignored after first fit
++    gm = GaussianMixture(n_components=3, n_init=5, warm_start=True, random_state=42)
++    
++    # First fit
++    labels1 = gm.fit_predict(X)
++    predict1 = gm.predict(X)
++    assert_array_equal(labels1, predict1)
++    print("First fit: PASS")
++    
++    # Second fit with warm start
++    labels2 = gm.fit_predict(X)
++    predict2 = gm.predict(X)
++    assert_array_equal(labels2, predict2)
++    print("Second fit with warm_start: PASS")
++
++def test_single_component():
++    """Test with single component (edge case)."""
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 100, 5
++    X = rng.randn(n_samples, n_features)
++    
++    gm = GaussianMixture(n_components=1, n_init=5, random_state=42)
++    labels = gm.fit_predict(X)
++    predict = gm.predict(X)
++    assert_array_equal(labels, predict)
++    # With single component, all labels should be 0
++    assert np.all(labels == 0)
++    print("Single component: PASS")
++
++def test_convergence_warning_case():
++    """Test when convergence is not reached."""
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 100, 5
++    X = rng.randn(n_samples, n_features)
++    
++    # Use very low max_iter to force non-convergence
++    gm = GaussianMixture(n_components=5, n_init=2, max_iter=1, random_state=42)
++    labels = gm.fit_predict(X)
++    predict = gm.predict(X)
++    assert_array_equal(labels, predict)
++    print("Non-convergence case: PASS")
++
++if __name__ == "__main__":
++    test_warm_start_with_n_init()
++    test_single_component()
++    test_convergence_warning_case()
++    print("\nAll edge case tests passed!")
+diff --git a/test_fix_comprehensive.py b/test_fix_comprehensive.py
+new file mode 100644
+index 000000000..8563b3ae0
+--- /dev/null
++++ b/test_fix_comprehensive.py
+@@ -0,0 +1,72 @@
++import numpy as np
++from sklearn.mixture import GaussianMixture, BayesianGaussianMixture
++from sklearn.utils.testing import assert_array_equal
++
++def test_fit_predict_consistency(estimator_class, n_init_values, covariance_types, n_components_values):
++    """Test that fit_predict and predict give the same results."""
++    n_samples = 100
++    n_features = 5
++    
++    for n_init in n_init_values:
++        for covariance_type in covariance_types:
++            for n_components in n_components_values:
++                print(f"Testing {estimator_class.__name__} with n_init={n_init}, "
++                      f"covariance_type={covariance_type}, n_components={n_components}")
++                
++                # Generate random data
++                np.random.seed(42)
++                X = np.random.randn(n_samples, n_features)
++                
++                # Create and fit model
++                if estimator_class == GaussianMixture:
++                    model = estimator_class(
++                        n_components=n_components,
++                        n_init=n_init,
++                        covariance_type=covariance_type,
++                        random_state=42
++                    )
++                else:  # BayesianGaussianMixture
++                    model = estimator_class(
++                        n_components=n_components,
++                        n_init=n_init,
++                        covariance_type=covariance_type,
++                        random_state=42
++                    )
++                
++                # Get labels from fit_predict
++                labels_fit_predict = model.fit_predict(X)
++                
++                # Get labels from predict
++                labels_predict = model.predict(X)
++                
++                # Check they are the same
++                try:
++                    assert_array_equal(labels_fit_predict, labels_predict)
++                    print("  PASS")
++                except AssertionError as e:
++                    print(f"  FAIL: {np.sum(labels_fit_predict != labels_predict)} mismatches")
++                    raise
++
++# Test GaussianMixture
++print("=" * 60)
++print("Testing GaussianMixture")
++print("=" * 60)
++test_fit_predict_consistency(
++    GaussianMixture,
++    n_init_values=[1, 2, 5, 10],
++    covariance_types=['full', 'tied', 'diag', 'spherical'],
++    n_components_values=[2, 3, 5]
++)
++
++# Test BayesianGaussianMixture
++print("\n" + "=" * 60)
++print("Testing BayesianGaussianMixture")
++print("=" * 60)
++test_fit_predict_consistency(
++    BayesianGaussianMixture,
++    n_init_values=[1, 2, 5],
++    covariance_types=['full', 'tied', 'diag', 'spherical'],
++    n_components_values=[2, 3, 5]
++)
++
++print("\nAll tests passed!")
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 000000000..cac5eeddb
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,22 @@
++"""
++This test reproduces the exact issue from the problem statement.
++"""
++from sklearn.mixture import GaussianMixture
++from sklearn.utils.testing import assert_array_equal
++import numpy
++
++# Use the exact code from the problem statement
++X = numpy.random.randn(1000,5)
++print('no n_init')
++gm = GaussianMixture(n_components=5)
++c1 = gm.fit_predict(X)
++c2 = gm.predict(X)
++assert_array_equal(c1,c2)
++
++print('n_init=5')
++gm = GaussianMixture(n_components=5, n_init=5)
++c1 = gm.fit_predict(X)
++c2 = gm.predict(X)
++assert_array_equal(c1,c2)
++
++print("\nBoth tests passed! The issue has been fixed.")

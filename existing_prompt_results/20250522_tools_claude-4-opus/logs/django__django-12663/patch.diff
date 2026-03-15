@@ -1,0 +1,299 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index caa03665ea..7e9f1efe62 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -21,7 +21,7 @@ from django.utils.dateparse import (
+     parse_date, parse_datetime, parse_duration, parse_time,
+ )
+ from django.utils.duration import duration_microseconds, duration_string
+-from django.utils.functional import Promise, cached_property
++from django.utils.functional import Promise, cached_property, LazyObject, empty
+ from django.utils.ipv6 import clean_ipv6_address
+ from django.utils.itercompat import is_iterable
+ from django.utils.text import capfirst
+@@ -804,6 +804,11 @@ class Field(RegisterLookupMixin):
+         """Perform preliminary non-db specific value checks and conversions."""
+         if isinstance(value, Promise):
+             value = value._proxy____cast()
++        elif isinstance(value, LazyObject):
++            # Force evaluation of lazy objects by accessing the wrapped value
++            if value._wrapped is empty:
++                value._setup()
++            value = value._wrapped
+         return value
+ 
+     def get_db_prep_value(self, value, connection, prepared=False):
+@@ -1768,6 +1773,13 @@ class IntegerField(Field):
+         value = super().get_prep_value(value)
+         if value is None:
+             return None
++        # If value is a model instance, try to extract its primary key
++        # This handles cases where a model instance is passed to an IntegerField
++        # that represents a foreign key value (e.g., from a subquery annotation)
++        if hasattr(value, '_meta'):
++            pk = value._meta.pk
++            if pk:
++                value = getattr(value, pk.attname)
+         try:
+             return int(value)
+         except (TypeError, ValueError) as e:
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index 5ce7fac420..ed9a4d60c9 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -970,6 +970,11 @@ class ForeignKey(ForeignObject):
+         return self.target_field.get_db_prep_value(value, connection, prepared)
+ 
+     def get_prep_value(self, value):
++        if value is None:
++            return None
++        # If value is a model instance, extract the value of the target field
++        if isinstance(value, self.remote_field.model):
++            value = getattr(value, self.target_field.attname)
+         return self.target_field.get_prep_value(value)
+ 
+     def contribute_to_related_class(self, cls, related):
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..29b2ec8488
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,161 @@
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.contrib.auth.models import User
++from django.db import models
++from django.db.models import OuterRef, Subquery
++from django.utils.functional import SimpleLazyObject, lazy
++
++# Define models
++class A(models.Model):
++    class Meta:
++        app_label = 'test_app'
++
++class B(models.Model):
++    a = models.ForeignKey(A, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'test_app'
++
++class C(models.Model):
++    owner = models.ForeignKey(User, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(A)
++    schema_editor.create_model(B)
++    schema_editor.create_model(C)
++
++def test_simple_lazy_object():
++    """Test that SimpleLazyObject works with subquery annotations"""
++    print("Testing SimpleLazyObject with subquery annotations...")
++    
++    owner_user = (
++        B.objects.filter(a=OuterRef("pk"))
++        .annotate(owner_user=Subquery(C.objects.values("owner")))
++        .values("owner_user")
++    )
++    
++    # Test with SimpleLazyObject
++    user = SimpleLazyObject(lambda: User.objects.create_user("testuser"))
++    try:
++        result = A.objects.annotate(owner_user=Subquery(owner_user)).filter(
++            owner_user=user
++        )
++        # Force evaluation
++        list(result)
++        print("PASS: SimpleLazyObject test passed!")
++    except Exception as e:
++        print(f"FAIL: SimpleLazyObject test failed: {e}")
++        return False
++    
++    return True
++
++def test_lazy_function():
++    """Test that lazy() function works with subquery annotations"""
++    print("\nTesting lazy() function with subquery annotations...")
++    
++    owner_user = (
++        B.objects.filter(a=OuterRef("pk"))
++        .annotate(owner_user=Subquery(C.objects.values("owner")))
++        .values("owner_user")
++    )
++    
++    # Test with lazy() function
++    def get_user():
++        return User.objects.create_user("testuser2")
++    
++    lazy_get_user = lazy(get_user, User)
++    lazy_user = lazy_get_user()
++    try:
++        result = A.objects.annotate(owner_user=Subquery(owner_user)).filter(
++            owner_user=lazy_user
++        )
++        # Force evaluation
++        list(result)
++        print("PASS: lazy() function test passed!")
++    except Exception as e:
++        print(f"FAIL: lazy() function test failed: {e}")
++        return False
++    
++    return True
++
++def test_regular_model_instance():
++    """Test that regular model instances still work"""
++    print("\nTesting regular model instances...")
++    
++    owner_user = (
++        B.objects.filter(a=OuterRef("pk"))
++        .annotate(owner_user=Subquery(C.objects.values("owner")))
++        .values("owner_user")
++    )
++    
++    # Test with regular model instance
++    user = User.objects.create_user("testuser3")
++    try:
++        result = A.objects.annotate(owner_user=Subquery(owner_user)).filter(
++            owner_user=user
++        )
++        # Force evaluation
++        list(result)
++        print("PASS: Regular model instance test passed!")
++    except Exception as e:
++        print(f"FAIL: Regular model instance test failed: {e}")
++        return False
++    
++    return True
++
++def test_foreign_key_with_lazy_object():
++    """Test that ForeignKey fields work with lazy objects"""
++    print("\nTesting ForeignKey fields with lazy objects...")
++    
++    # Create test data
++    a = A.objects.create()
++    user = SimpleLazyObject(lambda: User.objects.create_user("testuser4"))
++    
++    try:
++        # Test filtering by ForeignKey with lazy object
++        c = C.objects.create(owner=user)
++        result = C.objects.filter(owner=user)
++        assert result.count() == 1
++        print("PASS: ForeignKey with SimpleLazyObject test passed!")
++    except Exception as e:
++        print(f"FAIL: ForeignKey with SimpleLazyObject test failed: {e}")
++        return False
++    
++    return True
++
++if __name__ == "__main__":
++    all_passed = True
++    all_passed &= test_simple_lazy_object()
++    all_passed &= test_lazy_function()
++    all_passed &= test_regular_model_instance()
++    all_passed &= test_foreign_key_with_lazy_object()
++    
++    print("\n" + "="*50)
++    if all_passed:
++        print("All tests passed!")
++    else:
++        print("Some tests failed!")
+diff --git a/test_lazy_issue.py b/test_lazy_issue.py
+new file mode 100644
+index 0000000000..6be9523497
+--- /dev/null
++++ b/test_lazy_issue.py
+@@ -0,0 +1,71 @@
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.contrib.auth.models import User
++from django.db import models
++from django.db.models import OuterRef, Subquery
++from django.test import TestCase
++from django.utils.functional import SimpleLazyObject
++
++# Define models
++class A(models.Model):
++    class Meta:
++        app_label = 'test_app'
++
++class B(models.Model):
++    a = models.ForeignKey(A, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'test_app'
++
++class C(models.Model):
++    owner = models.ForeignKey(User, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++    schema_editor.create_model(A)
++    schema_editor.create_model(B)
++    schema_editor.create_model(C)
++
++# Test the issue
++def test_bug():
++    owner_user = (
++        B.objects.filter(a=OuterRef("pk"))
++        .annotate(owner_user=Subquery(C.objects.values("owner")))
++        .values("owner_user")
++    )
++    user = SimpleLazyObject(lambda: User.objects.create_user("testuser"))
++    try:
++        A.objects.annotate(owner_user=Subquery(owner_user)).filter(
++            owner_user=user
++        )
++        print("Test passed!")
++    except TypeError as e:
++        print(f"Error occurred: {e}")
++        import traceback
++        traceback.print_exc()
++
++if __name__ == "__main__":
++    test_bug()

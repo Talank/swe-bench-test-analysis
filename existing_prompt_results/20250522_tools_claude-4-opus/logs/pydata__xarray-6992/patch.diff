@@ -1,0 +1,199 @@
+diff --git a/debug_issue.py b/debug_issue.py
+new file mode 100644
+index 00000000..dfe3dd36
+--- /dev/null
++++ b/debug_issue.py
+@@ -0,0 +1,20 @@
++import xarray as xr
++
++# Debug the issue step by step
++ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++print("Initial dataset:")
++print(f"  _variables: {list(ds._variables.keys())}")
++print(f"  _coord_names: {ds._coord_names}")
++print(f"  data_vars length: {len(ds._variables) - len(ds._coord_names)}")
++
++ds_indexed = ds.set_index(z=['a', 'b'])
++print("\nAfter set_index:")
++print(f"  _variables: {list(ds_indexed._variables.keys())}")
++print(f"  _coord_names: {ds_indexed._coord_names}")
++print(f"  data_vars length: {len(ds_indexed._variables) - len(ds_indexed._coord_names)}")
++
++ds_reset = ds_indexed.reset_index("z", drop=True)
++print("\nAfter reset_index with drop=True:")
++print(f"  _variables: {list(ds_reset._variables.keys())}")
++print(f"  _coord_names: {ds_reset._coord_names}")
++print(f"  data_vars length would be: {len(ds_reset._variables) - len(ds_reset._coord_names)}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..af2f0fb2
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,11 @@
++import xarray as xr
++
++# Reproduce the issue
++try:
++    ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++    result = ds.set_index(z=['a', 'b']).reset_index("z", drop=True)
++    print("Result:", result)
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 00000000..20fe6f35
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,55 @@
++import xarray as xr
++import numpy as np
++
++# Test 1: Original issue
++print("Test 1: Original issue")
++ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++result = ds.set_index(z=['a', 'b']).reset_index("z", drop=True)
++print(f"  Success! Result: {result}")
++print()
++
++# Test 2: Reset index without drop
++print("Test 2: Reset index without drop")
++ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++result = ds.set_index(z=['a', 'b']).reset_index("z", drop=False)
++print(f"  Success! Result has variables: {list(result.variables)}")
++print(f"  Coord names: {result._coord_names}")
++print()
++
++# Test 3: Dataset with data variables
++print("Test 3: Dataset with data variables")
++ds = xr.Dataset(
++    {"data": ("x", [10, 20, 30])},
++    coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])}
++)
++result = ds.set_index(z=['a', 'b']).reset_index("z", drop=True)
++print(f"  Success! Data vars: {list(result.data_vars)}")
++print()
++
++# Test 4: Multiple index operations
++print("Test 4: Multiple index operations")
++ds = xr.Dataset(
++    coords={
++        "a": ("x", [1, 2, 3]),
++        "b": ("x", ['a', 'b', 'c']),
++        "c": ("y", [10, 20]),
++        "d": ("y", ['X', 'Y'])
++    }
++)
++ds_indexed = ds.set_index(z1=['a', 'b']).set_index(z2=['c', 'd'])
++result = ds_indexed.reset_index("z1", drop=True).reset_index("z2", drop=True)
++print(f"  Success! Variables: {list(result.variables)}")
++print(f"  Coord names: {result._coord_names}")
++print()
++
++# Test 5: Partial reset of multi-index
++print("Test 5: Partial reset of multi-index")
++ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++ds_indexed = ds.set_index(z=['a', 'b'])
++# This should keep the multi-index but drop one level
++try:
++    result = ds_indexed.reset_index("a", drop=True)
++    print(f"  Success! Variables: {list(result.variables)}")
++    print(f"  Coord names: {result._coord_names}")
++except Exception as e:
++    print(f"  Error (expected for partial reset): {e}")
+diff --git a/test_reset_index_drop.py b/test_reset_index_drop.py
+new file mode 100644
+index 00000000..aa309039
+--- /dev/null
++++ b/test_reset_index_drop.py
+@@ -0,0 +1,77 @@
++import pytest
++import xarray as xr
++
++
++def test_reset_index_drop_coord_names():
++    """Test that reset_index with drop=True correctly removes coordinate names."""
++    # Original issue from GitHub
++    ds = xr.Dataset(coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])})
++    result = ds.set_index(z=['a', 'b']).reset_index("z", drop=True)
++    
++    # Check that the result is valid
++    assert "z" not in result.variables
++    assert "z" not in result._coord_names
++    assert len(result.data_vars) == 0  # Should have no data variables
++    
++    # Check that repr works (this was failing before)
++    repr_str = repr(result)
++    assert "Data variables:" in repr_str
++    assert "*empty*" in repr_str
++
++
++def test_reset_index_drop_multiple():
++    """Test reset_index with drop=True on multiple indexes."""
++    ds = xr.Dataset(
++        coords={
++            "a": ("x", [1, 2, 3]),
++            "b": ("x", ['a', 'b', 'c']),
++            "c": ("y", [10, 20]),
++            "d": ("y", ['X', 'Y'])
++        }
++    )
++    ds_indexed = ds.set_index(z1=['a', 'b']).set_index(z2=['c', 'd'])
++    result = ds_indexed.reset_index("z1", drop=True).reset_index("z2", drop=True)
++    
++    # Check that dropped indexes are not in coord_names
++    assert "z1" not in result._coord_names
++    assert "z2" not in result._coord_names
++    assert len(result.data_vars) == 0
++
++
++def test_reset_index_drop_with_data_vars():
++    """Test reset_index with drop=True when there are data variables."""
++    ds = xr.Dataset(
++        {"data": ("x", [10, 20, 30])},
++        coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])}
++    )
++    result = ds.set_index(z=['a', 'b']).reset_index("z", drop=True)
++    
++    # Check that data variables are preserved
++    assert "data" in result.data_vars
++    assert len(result.data_vars) == 1
++    assert "z" not in result._coord_names
++
++
++def test_dataarray_reset_index_drop():
++    """Test that DataArray.reset_index with drop=True also works correctly."""
++    da = xr.DataArray(
++        [1, 2, 3],
++        coords={"a": ("x", [1, 2, 3]), "b": ("x", ['a', 'b', 'c'])},
++        dims=["x"]
++    )
++    result = da.set_index(z=['a', 'b']).reset_index("z", drop=True)
++    
++    # Check the underlying dataset
++    assert "z" not in result._to_temp_dataset()._coord_names
++    
++    # Check that repr works
++    repr_str = repr(result)
++    assert "array([1, 2, 3])" in repr_str
++
++
++if __name__ == "__main__":
++    test_reset_index_drop_coord_names()
++    test_reset_index_drop_multiple()
++    test_reset_index_drop_with_data_vars()
++    test_dataarray_reset_index_drop()
++    print("All tests passed!")
+diff --git a/xarray/core/dataset.py b/xarray/core/dataset.py
+index 620f32f8..3e3ef6d4 100644
+--- a/xarray/core/dataset.py
++++ b/xarray/core/dataset.py
+@@ -4178,6 +4178,8 @@ class Dataset(
+         variables.update(new_variables)
+ 
+         coord_names = set(new_variables) | self._coord_names
++        if drop:
++            coord_names = coord_names - set(drop_variables)
+ 
+         return self._replace(variables, coord_names=coord_names, indexes=indexes)

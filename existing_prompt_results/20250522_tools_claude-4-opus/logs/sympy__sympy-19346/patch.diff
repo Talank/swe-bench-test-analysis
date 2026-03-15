@@ -1,0 +1,440 @@
+diff --git a/sympy/printing/repr.py b/sympy/printing/repr.py
+index c936a692c0..f55650ed34 100644
+--- a/sympy/printing/repr.py
++++ b/sympy/printing/repr.py
+@@ -11,6 +11,7 @@
+ 
+ from sympy.core.function import AppliedUndef
+ from sympy.core.mul import Mul
++from sympy.core.compatibility import default_sort_key
+ from mpmath.libmp import repr_dps, to_str as mlib_to_str
+ 
+ from .printer import Printer
+@@ -250,6 +251,17 @@ def _print_tuple(self, expr):
+         else:
+             return "(%s)" % self.reprify(expr, ", ")
+ 
++    def _print_dict(self, expr):
++        items = []
++        for key, value in expr.items():
++            items.append("%s: %s" % (self._print(key), self._print(value)))
++        return "{%s}" % ", ".join(items)
++
++    def _print_set(self, expr):
++        if not expr:
++            return "set()"
++        return "{%s}" % self.reprify(sorted(expr, key=default_sort_key), ", ")
++
+     def _print_WildFunction(self, expr):
+         return "%s('%s')" % (expr.__class__.__name__, expr.name)
+ 
+diff --git a/sympy/printing/tests/test_repr.py b/sympy/printing/tests/test_repr.py
+index f749683ff7..8107dc4ea9 100644
+--- a/sympy/printing/tests/test_repr.py
++++ b/sympy/printing/tests/test_repr.py
+@@ -193,6 +193,35 @@ def test_tuple():
+     sT((x, y), "(Symbol('x'), Symbol('y'))")
+ 
+ 
++def test_dict():
++    # Test empty dict
++    sT({}, "{}")
++    # Test single item dict
++    sT({x: y}, "{Symbol('x'): Symbol('y')}")
++    # Test multi-item dict - note: dict order is preserved in Python 3.7+
++    sT({x: y, y: x}, "{Symbol('x'): Symbol('y'), Symbol('y'): Symbol('x')}")
++    # Test with integer keys/values
++    sT({x: Integer(1)}, "{Symbol('x'): Integer(1)}")
++    sT({Integer(1): x}, "{Integer(1): Symbol('x')}")
++    # Test with Python integers (should remain as is)
++    sT({x: 1}, "{Symbol('x'): 1}")
++
++
++def test_set():
++    # Test empty set
++    sT(set(), "set()")
++    # Test single item set
++    sT({x}, "{Symbol('x')}")
++    # Test multi-item set - order should be consistent
++    sT({x, y}, "{Symbol('x'), Symbol('y')}")
++    # Test with integers
++    sT({x, Integer(1)}, "{Integer(1), Symbol('x')}")
++    # Test with Python integers (should remain as is)
++    sT({x, 1}, "{1, Symbol('x')}")
++    # Test with more complex expressions
++    sT({x + y, x - y}, "{Add(Symbol('x'), Mul(Integer(-1), Symbol('y'))), Add(Symbol('x'), Symbol('y'))}")
++
++
+ def test_WildFunction():
+     sT(WildFunction('w'), "WildFunction('w')")
+ 
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..6991c18012
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,71 @@
++"""
++Comprehensive test for srepr with dict and set
++"""
++from sympy import srepr, Symbol, Integer, Rational, Float, sin, cos, exp
++from sympy.abc import x, y, z
++
++def test_srepr_eval(expr, env=None):
++    """Test that eval(srepr(expr)) == expr"""
++    if env is None:
++        env = {}
++        exec("from sympy import *", env)
++    
++    repr_str = srepr(expr)
++    try:
++        result = eval(repr_str, env)
++        if result == expr:
++            print(f"✓ {repr_str}")
++            return True
++        else:
++            print(f"✗ {repr_str} evaluated to {result}, expected {expr}")
++            return False
++    except Exception as e:
++        print(f"✗ Failed to eval {repr_str}: {e}")
++        return False
++
++print("Testing sets:")
++print("-" * 50)
++test_srepr_eval(set())  # empty set
++test_srepr_eval({x})  # single element
++test_srepr_eval({x, y})  # multiple symbols
++test_srepr_eval({x, y, z})  # three symbols
++test_srepr_eval({Integer(1), Integer(2), Integer(3)})  # integers
++test_srepr_eval({Rational(1, 2), Rational(3, 4)})  # rationals
++test_srepr_eval({x + y, x - y, x * y})  # expressions
++test_srepr_eval({sin(x), cos(x), exp(x)})  # functions
++test_srepr_eval({1, 2, 3})  # Python integers
++test_srepr_eval({1.5, 2.5})  # Python floats
++
++print("\nTesting dicts:")
++print("-" * 50)
++test_srepr_eval({})  # empty dict
++test_srepr_eval({x: y})  # single item
++test_srepr_eval({x: y, y: z, z: x})  # multiple items
++test_srepr_eval({Integer(1): x, Integer(2): y})  # integer keys
++test_srepr_eval({x: Integer(1), y: Integer(2)})  # integer values
++test_srepr_eval({x + y: z, x - y: z})  # expression keys
++test_srepr_eval({x: sin(y), y: cos(z)})  # function values
++test_srepr_eval({(x, y): z})  # tuple key
++test_srepr_eval({x: [y, z]})  # list value
++test_srepr_eval({x: {y, z}})  # set value
++test_srepr_eval({x: {y: z}})  # dict value
++test_srepr_eval({1: 'hello', 2: 'world'})  # Python types
++
++print("\nTesting mixed structures:")
++print("-" * 50)
++test_srepr_eval([{x, y}, {z}])  # list of sets
++test_srepr_eval({x: {y, z}, y: {x, z}})  # dict of sets
++test_srepr_eval(({x, y}, {x: y}))  # tuple of set and dict
++test_srepr_eval({frozenset([x, y]): z})  # frozenset key (if supported)
++
++print("\nTesting special cases:")
++print("-" * 50)
++test_srepr_eval({None})  # None in set
++test_srepr_eval({x: None})  # None as value
++test_srepr_eval({None: x})  # None as key
++test_srepr_eval({'string_key': x})  # string key
++test_srepr_eval({x: 'string_value'})  # string value
++test_srepr_eval({True, False})  # booleans
++test_srepr_eval({x: True, y: False})  # boolean values
++
++print("\nAll tests completed!")
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..11b4988a7e
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,18 @@
++from sympy import srepr, Integer
++from sympy.abc import x, y
++
++# Test what the actual output is
++print("Dict tests:")
++print(f"srepr({{x: 1}}) = '{srepr({x: 1})}'")
++print(f"Expected: '{{Symbol('x'): Integer(1)}}'")
++print()
++
++print(f"srepr({{x: Integer(1)}}) = '{srepr({x: Integer(1)})}'")
++print()
++
++print("Set tests:")
++print(f"srepr({{x, 1}}) = '{srepr({x, 1})}'")
++print(f"Expected: '{{Integer(1), Symbol('x')}}'")
++print()
++
++print(f"srepr({{x, Integer(1)}}) = '{srepr({x, Integer(1)})}'")
+diff --git a/test_dict_order.py b/test_dict_order.py
+new file mode 100644
+index 0000000000..822e640611
+--- /dev/null
++++ b/test_dict_order.py
+@@ -0,0 +1,14 @@
++from sympy import srepr
++from sympy.abc import x, y
++
++# Test dict order
++d1 = {x: 1}
++print(f"srepr({d1}) = {srepr(d1)}")
++
++d2 = {x: y, y: x}
++print(f"srepr({d2}) = {srepr(d2)}")
++
++# Check the order of dict iteration
++print("\nDict items order:")
++for k, v in d2.items():
++    print(f"  {k}: {v}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..668c4c8a1c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,45 @@
++from sympy import srepr, Symbol
++from sympy.abc import x, y, z
++
++# Test nested structures
++print("Nested structures:")
++print(f"srepr([{{x, y}}, {{z}}]) = {srepr([{x, y}, {z}])}")
++print(f"srepr({{x: [y, z]}}) = {srepr({x: [y, z]})}")
++print(f"srepr({{(x, y): z}}) = {srepr({(x, y): z})}")
++print()
++
++# Test with None
++print("With None:")
++print(f"srepr({{x: None}}) = {srepr({x: None})}")
++print(f"srepr({{None, x}}) = {srepr({None, x})}")
++print()
++
++# Test with strings
++print("With strings:")
++print(f"srepr({{x: 'hello'}}) = {srepr({x: 'hello'})}")
++print(f"srepr({{'key': x}}) = {srepr({'key': x})}")
++print()
++
++# Test evaluation of all edge cases
++ENV = {}
++exec("from sympy import *", ENV)
++
++test_cases = [
++    [{x, y}, {z}],
++    {x: [y, z]},
++    {(x, y): z},
++    {x: None},
++    {None, x},
++    {x: 'hello'},
++    {'key': x}
++]
++
++print("Evaluation tests for edge cases:")
++for test_case in test_cases:
++    repr_str = srepr(test_case)
++    try:
++        result = eval(repr_str, ENV)
++        passed = result == test_case
++        print(f"eval(srepr({test_case})) == original: {passed}")
++    except Exception as e:
++        print(f"Failed to eval {repr_str}: {e}")
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 0000000000..9fbbdc6115
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,47 @@
++from sympy import srepr, Symbol, Integer
++from sympy.abc import x, y
++
++# Test cases from the problem statement
++print("Original problem cases:")
++print(f"srepr([x,y]) = {srepr([x,y])}")
++print(f"srepr((x,y)) = {srepr((x,y))}")
++print(f"srepr({{x, y}}) = {srepr({x, y})}")
++print(f"srepr({{x: y}}) = {srepr({x: y})}")
++print()
++
++# Test evaluation
++print("Evaluation tests:")
++ENV = {}
++exec("from sympy import *", ENV)
++
++# Test list
++list_repr = srepr([x, y])
++list_eval = eval(list_repr, ENV)
++print(f"eval(srepr([x, y])) == [x, y]: {list_eval == [x, y]}")
++
++# Test tuple
++tuple_repr = srepr((x, y))
++tuple_eval = eval(tuple_repr, ENV)
++print(f"eval(srepr((x, y))) == (x, y): {tuple_eval == (x, y)}")
++
++# Test set
++set_repr = srepr({x, y})
++set_eval = eval(set_repr, ENV)
++print(f"eval(srepr({{x, y}})) == {{x, y}}: {set_eval == {x, y}}")
++
++# Test dict
++dict_repr = srepr({x: y})
++dict_eval = eval(dict_repr, ENV)
++print(f"eval(srepr({{x: y}})) == {{x: y}}: {dict_eval == {x: y}}")
++print()
++
++# Additional tests
++print("Additional tests:")
++print(f"srepr(set()) = {srepr(set())}")
++print(f"srepr({{}}) = {srepr({})}")
++print(f"srepr({{x}}) = {srepr({x})}")
++print(f"srepr({{x: Integer(1)}}) = {srepr({x: Integer(1)})}")
++print(f"srepr({{x, Integer(1)}}) = {srepr({x, Integer(1)})}")
++
++# Complex expressions
++print(f"srepr({{x + y, x - y}}) = {srepr({x + y, x - y})}")
+diff --git a/test_list_debug.py b/test_list_debug.py
+new file mode 100644
+index 0000000000..322652320b
+--- /dev/null
++++ b/test_list_debug.py
+@@ -0,0 +1,10 @@
++from sympy import srepr, Integer
++from sympy.abc import x
++
++# Test list with Python int
++print(f"srepr([x, 1]) = '{srepr([x, 1])}'")
++print(f"srepr([x, Integer(1)]) = '{srepr([x, Integer(1)])}'")
++
++# Check type
++print(f"\ntype(1) = {type(1)}")
++print(f"type(Integer(1)) = {type(Integer(1))}")
+diff --git a/test_list_int.py b/test_list_int.py
+new file mode 100644
+index 0000000000..b32e02dc28
+--- /dev/null
++++ b/test_list_int.py
+@@ -0,0 +1,6 @@
++from sympy import srepr
++from sympy.abc import x
++
++# Test list with integer
++print(f"srepr([x, 1]) = {srepr([x, 1])}")
++print(f"srepr({{x, 1}}) = {srepr({x, 1})}")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..6fe9ca8cb7
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,51 @@
++"""
++Test the exact examples from the problem statement
++"""
++from sympy import srepr
++from sympy.abc import x, y
++
++print("Examples from problem statement:")
++print("=" * 60)
++
++# Working examples (list and tuple)
++print("List (already working):")
++print(f">>> srepr([x,y])")
++print(f"{srepr([x,y])}")
++print()
++
++print("Tuple (already working):")
++print(f">>> srepr((x,y))")
++print(f"{srepr((x,y))}")
++print()
++
++# Previously broken examples (dict and set) - now fixed
++print("Set (was broken, now fixed):")
++print(f">>> srepr({{x, y}})")
++print(f"{srepr({x, y})}")
++print("Expected: {Symbol('x'), Symbol('y')} or similar with proper srepr of elements")
++print()
++
++print("Dict (was broken, now fixed):")
++print(f">>> srepr({{x: y}})")
++print(f"{srepr({x: y})}")
++print("Expected: {Symbol('x'): Symbol('y')}")
++print()
++
++# Verify evaluation works
++print("Verification that eval(srepr(expr)) == expr:")
++print("=" * 60)
++
++ENV = {}
++exec("from sympy import *", ENV)
++
++exprs = [
++    [x, y],
++    (x, y),
++    {x, y},
++    {x: y}
++]
++
++for expr in exprs:
++    repr_str = srepr(expr)
++    result = eval(repr_str, ENV)
++    print(f"eval(srepr({expr})) == {expr}: {result == expr}")
+diff --git a/test_srepr_issue.py b/test_srepr_issue.py
+new file mode 100644
+index 0000000000..4c2098258f
+--- /dev/null
++++ b/test_srepr_issue.py
+@@ -0,0 +1,54 @@
++from sympy import srepr
++from sympy.abc import x, y
++
++# Test list and tuple (these should work correctly)
++print("List test:")
++print(f"srepr([x, y]) = {srepr([x, y])}")
++print(f"Expected: [Symbol('x'), Symbol('y')]")
++print()
++
++print("Tuple test:")
++print(f"srepr((x, y)) = {srepr((x, y))}")
++print(f"Expected: (Symbol('x'), Symbol('y'))")
++print()
++
++# Test set (this is broken)
++print("Set test:")
++print(f"srepr({{x, y}}) = {srepr({x, y})}")
++print(f"Expected: {{Symbol('x'), Symbol('y')}}")
++print()
++
++# Test dict (this is broken)
++print("Dict test:")
++print(f"srepr({{x: y}}) = {srepr({x: y})}")
++print(f"Expected: {{Symbol('x'): Symbol('y')}}")
++print()
++
++# Test evaluation
++print("Evaluation test:")
++try:
++    from sympy import Symbol
++    list_eval = eval(srepr([x, y]))
++    print(f"eval(srepr([x, y])) == [x, y]: {list_eval == [x, y]}")
++    
++    tuple_eval = eval(srepr((x, y)))
++    print(f"eval(srepr((x, y))) == (x, y): {tuple_eval == (x, y)}")
++    
++    # These will fail because the srepr output is wrong
++    set_repr = srepr({x, y})
++    print(f"Trying to eval: {set_repr}")
++    try:
++        set_eval = eval(set_repr)
++        print(f"eval(srepr({{x, y}})) == {{x, y}}: {set_eval == {x, y}}")
++    except:
++        print("Failed to eval set repr")
++    
++    dict_repr = srepr({x: y})
++    print(f"Trying to eval: {dict_repr}")
++    try:
++        dict_eval = eval(dict_repr)
++        print(f"eval(srepr({{x: y}})) == {{x: y}}: {dict_eval == {x: y}}")
++    except:
++        print("Failed to eval dict repr")
++except Exception as e:
++    print(f"Error: {e}")

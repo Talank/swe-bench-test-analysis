@@ -1,0 +1,547 @@
+diff --git a/sklearn/decomposition/dict_learning.py b/sklearn/decomposition/dict_learning.py
+index a318c957f..0df62d79b 100644
+--- a/sklearn/decomposition/dict_learning.py
++++ b/sklearn/decomposition/dict_learning.py
+@@ -865,7 +865,8 @@ class SparseCodingMixin(TransformerMixin):
+                                   transform_algorithm='omp',
+                                   transform_n_nonzero_coefs=None,
+                                   transform_alpha=None, split_sign=False,
+-                                  n_jobs=None, positive_code=False):
++                                  n_jobs=None, positive_code=False,
++                                  transform_max_iter=1000):
+         self.n_components = n_components
+         self.transform_algorithm = transform_algorithm
+         self.transform_n_nonzero_coefs = transform_n_nonzero_coefs
+@@ -873,6 +874,7 @@ class SparseCodingMixin(TransformerMixin):
+         self.split_sign = split_sign
+         self.n_jobs = n_jobs
+         self.positive_code = positive_code
++        self.transform_max_iter = transform_max_iter
+ 
+     def transform(self, X):
+         """Encode the data as a sparse combination of the dictionary atoms.
+@@ -900,7 +902,7 @@ class SparseCodingMixin(TransformerMixin):
+             X, self.components_, algorithm=self.transform_algorithm,
+             n_nonzero_coefs=self.transform_n_nonzero_coefs,
+             alpha=self.transform_alpha, n_jobs=self.n_jobs,
+-            positive=self.positive_code)
++            positive=self.positive_code, max_iter=self.transform_max_iter)
+ 
+         if self.split_sign:
+             # feature vector is split into a positive and negative side
+@@ -974,6 +976,11 @@ class SparseCoder(BaseEstimator, SparseCodingMixin):
+ 
+         .. versionadded:: 0.20
+ 
++    transform_max_iter : int, 1000 by default
++        Maximum number of iterations to perform if `transform_algorithm='lasso_cd'`.
++
++        .. versionadded:: 0.22
++
+     Attributes
+     ----------
+     components_ : array, [n_components, n_features]
+@@ -991,12 +998,13 @@ class SparseCoder(BaseEstimator, SparseCodingMixin):
+ 
+     def __init__(self, dictionary, transform_algorithm='omp',
+                  transform_n_nonzero_coefs=None, transform_alpha=None,
+-                 split_sign=False, n_jobs=None, positive_code=False):
++                 split_sign=False, n_jobs=None, positive_code=False,
++                 transform_max_iter=1000):
+         self._set_sparse_coding_params(dictionary.shape[0],
+                                        transform_algorithm,
+                                        transform_n_nonzero_coefs,
+                                        transform_alpha, split_sign, n_jobs,
+-                                       positive_code)
++                                       positive_code, transform_max_iter)
+         self.components_ = dictionary
+ 
+     def fit(self, X, y=None):
+@@ -1157,7 +1165,7 @@ class DictionaryLearning(BaseEstimator, SparseCodingMixin):
+         self._set_sparse_coding_params(n_components, transform_algorithm,
+                                        transform_n_nonzero_coefs,
+                                        transform_alpha, split_sign, n_jobs,
+-                                       positive_code)
++                                       positive_code, transform_max_iter=1000)
+         self.alpha = alpha
+         self.max_iter = max_iter
+         self.tol = tol
+@@ -1346,7 +1354,7 @@ class MiniBatchDictionaryLearning(BaseEstimator, SparseCodingMixin):
+         self._set_sparse_coding_params(n_components, transform_algorithm,
+                                        transform_n_nonzero_coefs,
+                                        transform_alpha, split_sign, n_jobs,
+-                                       positive_code)
++                                       positive_code, transform_max_iter=1000)
+         self.alpha = alpha
+         self.n_iter = n_iter
+         self.fit_algorithm = fit_algorithm
+diff --git a/sklearn/decomposition/tests/test_dict_learning.py b/sklearn/decomposition/tests/test_dict_learning.py
+index f0bd4bedf..c33952f1e 100644
+--- a/sklearn/decomposition/tests/test_dict_learning.py
++++ b/sklearn/decomposition/tests/test_dict_learning.py
+@@ -451,3 +451,40 @@ def test_sparse_coder_parallel_mmap():
+ 
+     sc = SparseCoder(init_dict, transform_algorithm='omp', n_jobs=2)
+     sc.fit_transform(data)
++
++
++def test_sparse_coder_transform_max_iter():
++    # Test that SparseCoder respects transform_max_iter parameter
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 10, 64
++    n_components = 50
++    
++    # Create a normalized dictionary  
++    dictionary = rng.randn(n_components, n_features)
++    dictionary /= np.sqrt(np.sum(dictionary ** 2, axis=1))[:, np.newaxis]
++    
++    # Create data that requires many iterations to converge
++    X = rng.randn(n_samples, n_features) * 5
++    
++    # Test default value
++    coder = SparseCoder(dictionary=dictionary, transform_algorithm='lasso_cd',
++                       transform_alpha=0.001)
++    assert coder.transform_max_iter == 1000
++    
++    # Test custom value
++    coder = SparseCoder(dictionary=dictionary, transform_algorithm='lasso_cd',
++                       transform_alpha=0.001, transform_max_iter=5000)
++    assert coder.transform_max_iter == 5000
++    
++    # Test that it doesn't break transform
++    code = coder.transform(X)
++    assert code.shape == (n_samples, n_components)
++    
++    # Test that transform_max_iter doesn't affect other algorithms
++    for algo in ['lars', 'lasso_lars', 'omp', 'threshold']:
++        coder = SparseCoder(dictionary=dictionary, transform_algorithm=algo,
++                           transform_alpha=0.1, transform_n_nonzero_coefs=10,
++                           transform_max_iter=5000)
++        # Should work without errors
++        code = coder.transform(X[:5])
++        assert code.shape == (5, n_components)
+diff --git a/test_backward_compatibility.py b/test_backward_compatibility.py
+new file mode 100644
+index 000000000..74f3feb41
+--- /dev/null
++++ b/test_backward_compatibility.py
+@@ -0,0 +1,41 @@
++"""Test backward compatibility - existing code should still work"""
++import numpy as np
++from sklearn.decomposition import SparseCoder, DictionaryLearning, MiniBatchDictionaryLearning
++
++# Test data
++rng = np.random.RandomState(42)
++n_samples, n_features = 20, 10
++n_components = 8
++
++X = rng.randn(n_samples, n_features)
++dictionary = rng.randn(n_components, n_features)
++dictionary /= np.sqrt(np.sum(dictionary ** 2, axis=1))[:, np.newaxis]
++
++# Test SparseCoder without the new parameter (backward compatibility)
++print("Testing SparseCoder backward compatibility...")
++coder = SparseCoder(dictionary=dictionary, transform_algorithm='lasso_cd',
++                   transform_alpha=0.1)
++code = coder.transform(X)
++print(f"SparseCoder transform shape: {code.shape}")
++print(f"Default transform_max_iter: {coder.transform_max_iter}")
++
++# Test DictionaryLearning still works
++print("\nTesting DictionaryLearning...")
++dict_learner = DictionaryLearning(n_components=5, alpha=0.1, max_iter=10,
++                                 transform_algorithm='lasso_cd')
++dict_learner.fit(X)
++code = dict_learner.transform(X)
++print(f"DictionaryLearning transform shape: {code.shape}")
++print(f"Default transform_max_iter: {dict_learner.transform_max_iter}")
++
++# Test MiniBatchDictionaryLearning still works
++print("\nTesting MiniBatchDictionaryLearning...")
++mb_dict_learner = MiniBatchDictionaryLearning(n_components=5, alpha=0.1, 
++                                             n_iter=10, batch_size=5,
++                                             transform_algorithm='lasso_cd')
++mb_dict_learner.fit(X)
++code = mb_dict_learner.transform(X)
++print(f"MiniBatchDictionaryLearning transform shape: {code.shape}")
++print(f"Default transform_max_iter: {mb_dict_learner.transform_max_iter}")
++
++print("\nAll backward compatibility tests passed!")
+diff --git a/test_example_modified.py b/test_example_modified.py
+new file mode 100644
+index 000000000..55863a8d1
+--- /dev/null
++++ b/test_example_modified.py
+@@ -0,0 +1,79 @@
++"""
++Modified version of plot_sparse_coding.py to test the fix
++"""
++import numpy as np
++import warnings
++from sklearn.decomposition import SparseCoder
++from sklearn.exceptions import ConvergenceWarning
++
++
++def ricker_function(resolution, center, width):
++    """Discrete sub-sampled Ricker (Mexican hat) wavelet"""
++    x = np.linspace(0, resolution - 1, resolution)
++    x = ((2 / ((np.sqrt(3 * width) * np.pi ** 1 / 4)))
++         * (1 - ((x - center) ** 2 / width ** 2))
++         * np.exp((-(x - center) ** 2) / (2 * width ** 2)))
++    return x
++
++
++def ricker_matrix(width, resolution, n_components):
++    """Dictionary of Ricker (Mexican hat) wavelets"""
++    centers = np.linspace(0, resolution - 1, n_components)
++    D = np.empty((n_components, resolution))
++    for i, center in enumerate(centers):
++        D[i] = ricker_function(resolution, center, width)
++    D /= np.sqrt(np.sum(D ** 2, axis=1))[:, np.newaxis]
++    return D
++
++
++resolution = 1024
++subsampling = 3  # subsampling factor
++width = 100
++n_components = resolution // subsampling
++
++# Compute a wavelet dictionary
++D_fixed = ricker_matrix(width=width, resolution=resolution,
++                        n_components=n_components)
++
++# Generate a signal
++y = np.linspace(0, resolution - 1, resolution)
++first_quarter = y < resolution / 4
++y[first_quarter] = 3.
++y[np.logical_not(first_quarter)] = -1.
++
++# Test with lasso_lars (from the example)
++print("Testing with lasso_lars algorithm...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D_fixed, transform_algorithm='lasso_lars',
++                       transform_alpha=2)
++    x = coder.transform(y.reshape(1, -1))
++    convergence_warnings = [warning for warning in w 
++                          if issubclass(warning.category, ConvergenceWarning)]
++    print(f"Number of convergence warnings: {len(convergence_warnings)}")
++
++# Test with lasso_cd with default max_iter
++print("\nTesting with lasso_cd algorithm (default max_iter)...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D_fixed, transform_algorithm='lasso_cd',
++                       transform_alpha=2)
++    x = coder.transform(y.reshape(1, -1))
++    convergence_warnings = [warning for warning in w 
++                          if issubclass(warning.category, ConvergenceWarning)]
++    print(f"Number of convergence warnings: {len(convergence_warnings)}")
++    if convergence_warnings:
++        print("Warning message:", convergence_warnings[0].message)
++
++# Test with lasso_cd with higher max_iter
++print("\nTesting with lasso_cd algorithm (transform_max_iter=5000)...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D_fixed, transform_algorithm='lasso_cd',
++                       transform_alpha=2, transform_max_iter=5000)
++    x = coder.transform(y.reshape(1, -1))
++    convergence_warnings = [warning for warning in w 
++                          if issubclass(warning.category, ConvergenceWarning)]
++    print(f"Number of convergence warnings: {len(convergence_warnings)}")
++    if convergence_warnings:
++        print("Warning message:", convergence_warnings[0].message)
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 000000000..0f22c674b
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,77 @@
++import numpy as np
++import warnings
++from sklearn.decomposition import SparseCoder
++from sklearn.exceptions import ConvergenceWarning
++
++# Recreate a scenario similar to the example
++def ricker_function(resolution, center, width):
++    """Discrete sub-sampled Ricker (Mexican hat) wavelet"""
++    x = np.linspace(0, resolution - 1, resolution)
++    x = ((2 / ((np.sqrt(3 * width) * np.pi ** 1 / 4)))
++         * (1 - ((x - center) ** 2 / width ** 2))
++         * np.exp((-(x - center) ** 2) / (2 * width ** 2)))
++    return x
++
++def ricker_matrix(width, resolution, n_components):
++    """Dictionary of Ricker (Mexican hat) wavelets"""
++    centers = np.linspace(0, resolution - 1, n_components)
++    D = np.empty((n_components, resolution))
++    for i, center in enumerate(centers):
++        D[i] = ricker_function(resolution, center, width)
++    D /= np.sqrt(np.sum(D ** 2, axis=1))[:, np.newaxis]
++    return D
++
++resolution = 1024
++width = 100
++n_components = resolution // 3
++
++# Compute a wavelet dictionary
++D = ricker_matrix(width=width, resolution=resolution, n_components=n_components)
++
++# Generate a signal
++y = np.linspace(0, resolution - 1, resolution)
++first_quarter = y < resolution / 4
++y[first_quarter] = 3.
++y[np.logical_not(first_quarter)] = -1.
++
++# Test with default max_iter (should produce warning)
++print("Testing SparseCoder with lasso_cd and default max_iter...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D, transform_algorithm='lasso_cd',
++                       transform_alpha=2)
++    x = coder.transform(y.reshape(1, -1))
++    
++    convergence_warnings = [warning for warning in w if issubclass(warning.category, ConvergenceWarning)]
++    if convergence_warnings:
++        print("Got convergence warning (as expected):")
++        for warning in convergence_warnings:
++            print(f"  {warning.message}")
++    else:
++        print("No convergence warning found")
++
++# Test with higher max_iter (should not produce warning)
++print("\nTesting SparseCoder with lasso_cd and transform_max_iter=5000...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D, transform_algorithm='lasso_cd',
++                       transform_alpha=2, transform_max_iter=5000)
++    x = coder.transform(y.reshape(1, -1))
++    
++    convergence_warnings = [warning for warning in w if issubclass(warning.category, ConvergenceWarning)]
++    if convergence_warnings:
++        print("Got convergence warning:")
++        for warning in convergence_warnings:
++            print(f"  {warning.message}")
++    else:
++        print("No convergence warning (as expected)")
++
++# Test that the parameter is properly stored
++print(f"\nChecking that transform_max_iter is properly stored: {coder.transform_max_iter}")
++
++# Test with other algorithms (should not affect them)
++print("\nTesting with OMP algorithm (transform_max_iter should not affect it)...")
++coder_omp = SparseCoder(dictionary=D, transform_algorithm='omp',
++                       transform_n_nonzero_coefs=15, transform_max_iter=5000)
++x_omp = coder_omp.transform(y.reshape(1, -1))
++print("OMP transform successful")
+diff --git a/test_plot_sparse_coding_modified.py b/test_plot_sparse_coding_modified.py
+new file mode 100644
+index 000000000..2c47cf593
+--- /dev/null
++++ b/test_plot_sparse_coding_modified.py
+@@ -0,0 +1,64 @@
++"""
++Modified version of plot_sparse_coding.py using lasso_cd with higher max_iter
++"""
++from distutils.version import LooseVersion
++import numpy as np
++import matplotlib.pyplot as plt
++from sklearn.decomposition import SparseCoder
++import warnings
++
++
++def ricker_function(resolution, center, width):
++    """Discrete sub-sampled Ricker (Mexican hat) wavelet"""
++    x = np.linspace(0, resolution - 1, resolution)
++    x = ((2 / ((np.sqrt(3 * width) * np.pi ** 1 / 4)))
++         * (1 - ((x - center) ** 2 / width ** 2))
++         * np.exp((-(x - center) ** 2) / (2 * width ** 2)))
++    return x
++
++
++def ricker_matrix(width, resolution, n_components):
++    """Dictionary of Ricker (Mexican hat) wavelets"""
++    centers = np.linspace(0, resolution - 1, n_components)
++    D = np.empty((n_components, resolution))
++    for i, center in enumerate(centers):
++        D[i] = ricker_function(resolution, center, width)
++    D /= np.sqrt(np.sum(D ** 2, axis=1))[:, np.newaxis]
++    return D
++
++
++resolution = 1024
++subsampling = 3  # subsampling factor
++width = 100
++n_components = resolution // subsampling
++
++# Compute a wavelet dictionary
++D_fixed = ricker_matrix(width=width, resolution=resolution,
++                        n_components=n_components)
++
++# Generate a signal
++y = np.linspace(0, resolution - 1, resolution)
++first_quarter = y < resolution / 4
++y[first_quarter] = 3.
++y[np.logical_not(first_quarter)] = -1.
++
++# Test with lasso_cd algorithm with higher max_iter
++print("Testing SparseCoder with lasso_cd and transform_max_iter=5000...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D_fixed, transform_algorithm='lasso_cd',
++                       transform_alpha=2, transform_max_iter=5000)
++    x = coder.transform(y.reshape(1, -1))
++    
++    convergence_warnings = [warning for warning in w if "ConvergenceWarning" in str(warning.category)]
++    if convergence_warnings:
++        print("Got convergence warning:")
++        for warning in convergence_warnings:
++            print(f"  {warning.message}")
++    else:
++        print("No convergence warning - Success!")
++    
++    density = len(np.flatnonzero(x))
++    x_reconstructed = np.ravel(np.dot(x, D_fixed))
++    squared_error = np.sum((y - x_reconstructed) ** 2)
++    print(f"Lasso CD: {density} nonzero coefs, {squared_error:.2f} error")
+diff --git a/test_sparse_coder_convergence.py b/test_sparse_coder_convergence.py
+new file mode 100644
+index 000000000..eb16a6a2b
+--- /dev/null
++++ b/test_sparse_coder_convergence.py
+@@ -0,0 +1,68 @@
++import numpy as np
++import warnings
++from sklearn.decomposition import SparseCoder
++from sklearn.exceptions import ConvergenceWarning
++
++# Recreate a scenario similar to the example
++def ricker_function(resolution, center, width):
++    """Discrete sub-sampled Ricker (Mexican hat) wavelet"""
++    x = np.linspace(0, resolution - 1, resolution)
++    x = ((2 / ((np.sqrt(3 * width) * np.pi ** 1 / 4)))
++         * (1 - ((x - center) ** 2 / width ** 2))
++         * np.exp((-(x - center) ** 2) / (2 * width ** 2)))
++    return x
++
++def ricker_matrix(width, resolution, n_components):
++    """Dictionary of Ricker (Mexican hat) wavelets"""
++    centers = np.linspace(0, resolution - 1, n_components)
++    D = np.empty((n_components, resolution))
++    for i, center in enumerate(centers):
++        D[i] = ricker_function(resolution, center, width)
++    D /= np.sqrt(np.sum(D ** 2, axis=1))[:, np.newaxis]
++    return D
++
++resolution = 1024
++width = 100
++n_components = resolution // 3
++
++# Compute a wavelet dictionary
++D = ricker_matrix(width=width, resolution=resolution, n_components=n_components)
++
++# Generate a signal
++y = np.linspace(0, resolution - 1, resolution)
++first_quarter = y < resolution / 4
++y[first_quarter] = 3.
++y[np.logical_not(first_quarter)] = -1.
++
++# Test with lasso_cd which might need more iterations
++print("Testing SparseCoder with lasso_cd...")
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    coder = SparseCoder(dictionary=D, transform_algorithm='lasso_cd',
++                       transform_alpha=2)
++    x = coder.transform(y.reshape(1, -1))
++    
++    convergence_warnings = [warning for warning in w if issubclass(warning.category, ConvergenceWarning)]
++    if convergence_warnings:
++        print("Got convergence warning:")
++        for warning in convergence_warnings:
++            print(f"  {warning.message}")
++    else:
++        print("No convergence warning found")
++
++# Now let's check if we can manually call sparse_encode with higher max_iter
++print("\nTesting sparse_encode directly with max_iter=5000...")
++from sklearn.decomposition import sparse_encode
++
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    x = sparse_encode(y.reshape(1, -1), D, algorithm='lasso_cd',
++                     alpha=2, max_iter=5000)
++    
++    convergence_warnings = [warning for warning in w if issubclass(warning.category, ConvergenceWarning)]
++    if convergence_warnings:
++        print("Got convergence warning with max_iter=5000:")
++        for warning in convergence_warnings:
++            print(f"  {warning.message}")
++    else:
++        print("No convergence warning with max_iter=5000")
+diff --git a/test_sparse_coder_max_iter.py b/test_sparse_coder_max_iter.py
+new file mode 100644
+index 000000000..4283da4c1
+--- /dev/null
++++ b/test_sparse_coder_max_iter.py
+@@ -0,0 +1,60 @@
++import numpy as np
++import warnings
++import pytest
++from sklearn.decomposition import SparseCoder
++from sklearn.exceptions import ConvergenceWarning
++
++
++def test_sparse_coder_transform_max_iter():
++    """Test that SparseCoder respects transform_max_iter parameter."""
++    rng = np.random.RandomState(42)
++    n_samples, n_features = 100, 50
++    n_components = 40
++    
++    # Create a dictionary and normalize it
++    dictionary = rng.randn(n_components, n_features)
++    dictionary /= np.sqrt(np.sum(dictionary ** 2, axis=1))[:, np.newaxis]
++    
++    # Create data that's hard to fit
++    X = rng.randn(n_samples, n_features) * 10
++    
++    # With default max_iter=1000, should get convergence warning
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        coder = SparseCoder(dictionary=dictionary, transform_algorithm='lasso_cd',
++                           transform_alpha=0.001)
++        assert coder.transform_max_iter == 1000  # Check default value
++        code = coder.transform(X)
++        
++        # There might be a convergence warning
++        convergence_warnings = [warning for warning in w 
++                              if issubclass(warning.category, ConvergenceWarning)]
++        n_warnings_default = len(convergence_warnings)
++    
++    # With higher max_iter, should have fewer or no warnings
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter("always")
++        coder = SparseCoder(dictionary=dictionary, transform_algorithm='lasso_cd',
++                           transform_alpha=0.001, transform_max_iter=5000)
++        assert coder.transform_max_iter == 5000  # Check custom value
++        code = coder.transform(X)
++        
++        convergence_warnings = [warning for warning in w 
++                              if issubclass(warning.category, ConvergenceWarning)]
++        n_warnings_high = len(convergence_warnings)
++    
++    # Should have fewer warnings with higher max_iter
++    assert n_warnings_high <= n_warnings_default
++    
++    # Test that transform_max_iter doesn't affect other algorithms
++    for algo in ['lars', 'lasso_lars', 'omp', 'threshold']:
++        coder = SparseCoder(dictionary=dictionary, transform_algorithm=algo,
++                           transform_alpha=0.1, transform_n_nonzero_coefs=10,
++                           transform_max_iter=5000)
++        # Should work without errors
++        code = coder.transform(X[:5])  # Just a few samples for speed
++
++
++if __name__ == "__main__":
++    test_sparse_coder_transform_max_iter()
++    print("All tests passed!")

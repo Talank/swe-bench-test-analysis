@@ -1,0 +1,529 @@
+diff --git a/debug_sharing.py b/debug_sharing.py
+new file mode 100644
+index 0000000000..06681ffb4b
+--- /dev/null
++++ b/debug_sharing.py
+@@ -0,0 +1,22 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
++
++# Check sharing status
++for i, ax in enumerate(axes.flatten()):
++    print(f"Subplot {i}:")
++    print(f"  _sharex: {ax._sharex}")
++    print(f"  _sharey: {ax._sharey}")
++    print(f"  get_shared_x_axes: {ax.get_shared_x_axes().get_siblings(ax)}")
++    print(f"  get_shared_y_axes: {ax.get_shared_y_axes().get_siblings(ax)}")
++    
++# Now clear and check again
++print("\nAfter clear:")
++for i, ax in enumerate(axes.flatten()):
++    ax.clear()
++    print(f"Subplot {i}:")
++    print(f"  _sharex: {ax._sharex}")
++    print(f"  _sharey: {ax._sharey}")
++    print(f"  get_shared_x_axes: {ax.get_shared_x_axes().get_siblings(ax)}")
++    print(f"  get_shared_y_axes: {ax.get_shared_y_axes().get_siblings(ax)}")
+diff --git a/lib/matplotlib/axes/_base.py b/lib/matplotlib/axes/_base.py
+index 802fd3c997..7aa7431524 100644
+--- a/lib/matplotlib/axes/_base.py
++++ b/lib/matplotlib/axes/_base.py
+@@ -1299,6 +1299,37 @@ class _AxesBase(martist.Artist):
+ 
+         self.xaxis.set_clip_path(self.patch)
+         self.yaxis.set_clip_path(self.patch)
++        
++        # Restore default tick positions from rcParams
++        self.tick_params(
++            top=mpl.rcParams['xtick.top'] and mpl.rcParams['xtick.minor.top'],
++            bottom=mpl.rcParams['xtick.bottom'] and mpl.rcParams['xtick.minor.bottom'],
++            labeltop=(mpl.rcParams['xtick.labeltop'] and
++                      mpl.rcParams['xtick.minor.top']),
++            labelbottom=(mpl.rcParams['xtick.labelbottom'] and
++                         mpl.rcParams['xtick.minor.bottom']),
++            left=mpl.rcParams['ytick.left'] and mpl.rcParams['ytick.minor.left'],
++            right=mpl.rcParams['ytick.right'] and mpl.rcParams['ytick.minor.right'],
++            labelleft=(mpl.rcParams['ytick.labelleft'] and
++                       mpl.rcParams['ytick.minor.left']),
++            labelright=(mpl.rcParams['ytick.labelright'] and
++                        mpl.rcParams['ytick.minor.right']),
++            which='minor')
++
++        self.tick_params(
++            top=mpl.rcParams['xtick.top'] and mpl.rcParams['xtick.major.top'],
++            bottom=mpl.rcParams['xtick.bottom'] and mpl.rcParams['xtick.major.bottom'],
++            labeltop=(mpl.rcParams['xtick.labeltop'] and
++                      mpl.rcParams['xtick.major.top']),
++            labelbottom=(mpl.rcParams['xtick.labelbottom'] and
++                         mpl.rcParams['xtick.major.bottom']),
++            left=mpl.rcParams['ytick.left'] and mpl.rcParams['ytick.major.left'],
++            right=mpl.rcParams['ytick.right'] and mpl.rcParams['ytick.major.right'],
++            labelleft=(mpl.rcParams['ytick.labelleft'] and
++                       mpl.rcParams['ytick.major.left']),
++            labelright=(mpl.rcParams['ytick.labelright'] and
++                        mpl.rcParams['ytick.major.right']),
++            which='major')
+ 
+         self._shared_axes["x"].clean()
+         self._shared_axes["y"].clean()
+@@ -1308,6 +1339,18 @@ class _AxesBase(martist.Artist):
+         if self._sharey is not None:
+             self.yaxis.set_visible(yaxis_visible)
+             self.patch.set_visible(patch_visible)
++            
++        # Re-apply label_outer settings if this is a subplot with shared axes
++        # Only do this if we have a subplotspec (i.e., not during initial creation)
++        # Check if we have shared axes by looking at siblings, not just _sharex/_sharey
++        if hasattr(self, '_subplotspec') and hasattr(self, '_label_outer_xaxis'):
++            # Check if this axes shares x with any other axes
++            if len(self.get_shared_x_axes().get_siblings(self)) > 1:
++                self._label_outer_xaxis()
++        if hasattr(self, '_subplotspec') and hasattr(self, '_label_outer_yaxis'):
++            # Check if this axes shares y with any other axes
++            if len(self.get_shared_y_axes().get_siblings(self)) > 1:
++                self._label_outer_yaxis()
+ 
+         self.stale = True
+ 
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d22cf253ff
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,41 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import matplotlib
++print(f"Matplotlib version: {matplotlib.__version__}")
++
++# Create figure with shared axes
++fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
++
++x = np.arange(0.0, 2*np.pi, 0.01)
++y = np.sin(x)
++
++# First, let's see the state before clear
++print("\nBefore clear:")
++for i, ax in enumerate(axes.flatten()):
++    print(f"Subplot {i}: xaxis visible={ax.xaxis.get_visible()}, yaxis visible={ax.yaxis.get_visible()}")
++    print(f"  xaxis tick labels visible={ax.xaxis.get_ticklabels()[0].get_visible() if ax.xaxis.get_ticklabels() else 'No labels'}")
++    print(f"  yaxis tick labels visible={ax.yaxis.get_ticklabels()[0].get_visible() if ax.yaxis.get_ticklabels() else 'No labels'}")
++    print(f"  label_outer={hasattr(ax, '_label_outer_xaxis')}, {hasattr(ax, '_label_outer_yaxis')}")
++
++# Now clear and plot
++for ax in axes.flatten():
++    ax.clear()
++    ax.plot(x, y)
++
++print("\nAfter clear:")
++for i, ax in enumerate(axes.flatten()):
++    print(f"Subplot {i}: xaxis visible={ax.xaxis.get_visible()}, yaxis visible={ax.yaxis.get_visible()}")
++    print(f"  xaxis tick labels visible={ax.xaxis.get_ticklabels()[0].get_visible() if ax.xaxis.get_ticklabels() else 'No labels'}")
++    print(f"  yaxis tick labels visible={ax.yaxis.get_ticklabels()[0].get_visible() if ax.yaxis.get_ticklabels() else 'No labels'}")
++    print(f"  label_outer={hasattr(ax, '_label_outer_xaxis')}, {hasattr(ax, '_label_outer_yaxis')}")
++
++plt.savefig('/testbed/test_output.png')
++plt.close()
++
++# Let's also test without clear
++fig2, axes2 = plt.subplots(2, 2, sharex=True, sharey=True)
++for ax in axes2.flatten():
++    ax.plot(x, y)
++    
++plt.savefig('/testbed/test_output_no_clear.png')
++plt.close()
+diff --git a/single_no_clear.png b/single_no_clear.png
+new file mode 100644
+index 0000000000..26c88b747d
+Binary files /dev/null and b/single_no_clear.png differ
+diff --git a/single_with_clear.png b/single_with_clear.png
+new file mode 100644
+index 0000000000..8a81156192
+Binary files /dev/null and b/single_with_clear.png differ
+diff --git a/test_clear_shared_axes.py b/test_clear_shared_axes.py
+new file mode 100644
+index 0000000000..cc20602f40
+--- /dev/null
++++ b/test_clear_shared_axes.py
+@@ -0,0 +1,96 @@
++"""Test for the fix of ax.clear() with shared axes."""
++import numpy as np
++import matplotlib.pyplot as plt
++
++
++def test_clear_shared_axes_tick_labels():
++    """Test that ax.clear() preserves tick label visibility with shared axes."""
++    # Create subplots with shared axes
++    fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
++    
++    # Store expected visibility before clear
++    expected_x_visibility = []
++    expected_y_visibility = []
++    for ax in axes.flatten():
++        expected_x_visibility.append(
++            any(label.get_visible() for label in ax.xaxis.get_ticklabels()))
++        expected_y_visibility.append(
++            any(label.get_visible() for label in ax.yaxis.get_ticklabels()))
++    
++    # Clear and plot
++    x = np.arange(0.0, 2*np.pi, 0.01)
++    y = np.sin(x)
++    for ax in axes.flatten():
++        ax.clear()
++        ax.plot(x, y)
++    
++    # Check visibility after clear
++    for i, ax in enumerate(axes.flatten()):
++        actual_x_visible = any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++        actual_y_visible = any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++        assert actual_x_visible == expected_x_visibility[i], \
++            f"Subplot {i}: x-axis visibility changed after clear"
++        assert actual_y_visible == expected_y_visibility[i], \
++            f"Subplot {i}: y-axis visibility changed after clear"
++
++
++def test_clear_preserves_tick_positions():
++    """Test that ax.clear() preserves default tick positions."""
++    fig, ax = plt.subplots()
++    
++    # Clear the axes
++    ax.clear()
++    
++    # Check that ticks are in default positions (bottom/left)
++    assert ax.xaxis.get_ticks_position() == 'bottom'
++    assert ax.yaxis.get_ticks_position() == 'left'
++
++
++def test_clear_sharex_only():
++    """Test ax.clear() with only x-axis shared."""
++    fig, axes = plt.subplots(2, 2, sharex=True)
++    
++    # Clear and check
++    for ax in axes.flatten():
++        ax.clear()
++    
++    # Top row should have x labels hidden
++    for ax in axes[0, :]:
++        assert not any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++    
++    # Bottom row should have x labels visible
++    for ax in axes[1, :]:
++        assert any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++    
++    # All should have y labels visible
++    for ax in axes.flatten():
++        assert any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++
++
++def test_clear_sharey_only():
++    """Test ax.clear() with only y-axis shared."""
++    fig, axes = plt.subplots(2, 2, sharey=True)
++    
++    # Clear and check
++    for ax in axes.flatten():
++        ax.clear()
++    
++    # Left column should have y labels visible
++    for ax in axes[:, 0]:
++        assert any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++    
++    # Right column should have y labels hidden
++    for ax in axes[:, 1]:
++        assert not any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++    
++    # All should have x labels visible
++    for ax in axes.flatten():
++        assert any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++
++
++if __name__ == "__main__":
++    test_clear_shared_axes_tick_labels()
++    test_clear_preserves_tick_positions()
++    test_clear_sharex_only()
++    test_clear_sharey_only()
++    print("All tests passed!")
+diff --git a/test_default_ticks.py b/test_default_ticks.py
+new file mode 100644
+index 0000000000..9d5441370c
+--- /dev/null
++++ b/test_default_ticks.py
+@@ -0,0 +1,22 @@
++import matplotlib.pyplot as plt
++import matplotlib as mpl
++
++# Check what the default tick positions are
++print(f"Default xtick.top: {mpl.rcParams['xtick.top']}")
++print(f"Default xtick.bottom: {mpl.rcParams['xtick.bottom']}")
++print(f"Default ytick.left: {mpl.rcParams['ytick.left']}")
++print(f"Default ytick.right: {mpl.rcParams['ytick.right']}")
++
++# Create an axes and check actual tick visibility
++fig, ax = plt.subplots()
++ax.clear()
++
++# Check individual ticks
++print("\nAfter clear, tick visibility:")
++for tick in ax.xaxis.get_major_ticks():
++    print(f"  X tick - tick1On: {tick.tick1On}, tick2On: {tick.tick2On}")
++    break  # Just check first one
++    
++for tick in ax.yaxis.get_major_ticks():
++    print(f"  Y tick - tick1On: {tick.tick1On}, tick2On: {tick.tick2On}")
++    break  # Just check first one
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..c52cd5001d
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,91 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import matplotlib
++
++print(f"Testing fix for ax.clear() with shared axes")
++print(f"Matplotlib version: {matplotlib.__version__}")
++
++# Test 1: Basic shared axes test
++print("\nTest 1: Basic shared axes")
++fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
++x = np.arange(0.0, 2*np.pi, 0.01)
++y = np.sin(x)
++
++for ax in axes.flatten():
++    ax.clear()
++    ax.plot(x, y)
++
++# Check tick label visibility
++success = True
++expected_visibility = [(False, True), (False, False), (True, True), (True, False)]
++for i, (ax, (x_vis, y_vis)) in enumerate(zip(axes.flatten(), expected_visibility)):
++    x_labels_visible = any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++    y_labels_visible = any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++    if x_labels_visible != x_vis or y_labels_visible != y_vis:
++        print(f"  FAIL: Subplot {i} has incorrect visibility. Expected ({x_vis}, {y_vis}), got ({x_labels_visible}, {y_labels_visible})")
++        success = False
++        
++if success:
++    print("  PASS: All subplots have correct tick label visibility")
++
++# Test 2: Check tick positions
++print("\nTest 2: Tick positions after clear")
++fig2, ax2 = plt.subplots()
++ax2.clear()
++if ax2.xaxis.get_ticks_position() == 'bottom' and ax2.yaxis.get_ticks_position() == 'left':
++    print("  PASS: Tick positions are correct (bottom/left)")
++else:
++    print(f"  FAIL: Tick positions are {ax2.xaxis.get_ticks_position()}/{ax2.yaxis.get_ticks_position()}")
++
++# Test 3: Shared x only
++print("\nTest 3: Shared x-axis only")
++fig3, axes3 = plt.subplots(2, 2, sharex=True)
++for ax in axes3.flatten():
++    ax.clear()
++    ax.plot(x, y)
++    
++# Top row should have x labels hidden, bottom row visible
++top_row_correct = all(not any(label.get_visible() for label in ax.xaxis.get_ticklabels()) 
++                      for ax in axes3[0, :])
++bottom_row_correct = all(any(label.get_visible() for label in ax.xaxis.get_ticklabels()) 
++                        for ax in axes3[1, :])
++if top_row_correct and bottom_row_correct:
++    print("  PASS: X-axis labels correctly hidden/shown")
++else:
++    print("  FAIL: X-axis label visibility incorrect")
++
++# Test 4: Shared y only
++print("\nTest 4: Shared y-axis only")
++fig4, axes4 = plt.subplots(2, 2, sharey=True)
++for ax in axes4.flatten():
++    ax.clear()
++    ax.plot(x, y)
++    
++# Left column should have y labels visible, right column hidden
++left_col_correct = all(any(label.get_visible() for label in ax.yaxis.get_ticklabels()) 
++                      for ax in axes4[:, 0])
++right_col_correct = all(not any(label.get_visible() for label in ax.yaxis.get_ticklabels()) 
++                       for ax in axes4[:, 1])
++if left_col_correct and right_col_correct:
++    print("  PASS: Y-axis labels correctly hidden/shown")
++else:
++    print("  FAIL: Y-axis label visibility incorrect")
++
++# Test 5: No shared axes
++print("\nTest 5: No shared axes")
++fig5, axes5 = plt.subplots(2, 2)
++for ax in axes5.flatten():
++    ax.clear()
++    ax.plot(x, y)
++    
++# All should have labels visible
++all_visible = all(any(label.get_visible() for label in ax.xaxis.get_ticklabels()) and
++                 any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++                 for ax in axes5.flatten())
++if all_visible:
++    print("  PASS: All labels visible when no sharing")
++else:
++    print("  FAIL: Some labels hidden when they shouldn't be")
++
++plt.close('all')
++print("\nAll tests completed!")
+diff --git a/test_original_issue.png b/test_original_issue.png
+new file mode 100644
+index 0000000000..6ba361f957
+Binary files /dev/null and b/test_original_issue.png differ
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 0000000000..267d1b32fa
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,35 @@
++"""Test the exact code from the problem statement."""
++import numpy as np
++import matplotlib.pyplot as plt
++
++fig, axes = plt.subplots(2, 2, sharex=True, sharey=True)
++
++x = np.arange(0.0, 2*np.pi, 0.01)
++y = np.sin(x)
++
++for ax in axes.flatten():
++    ax.clear()
++    ax.plot(x, y)
++
++# Save the figure
++fig.savefig('/testbed/test_original_issue.png')
++
++# Check that the issue is fixed
++print("Checking tick label visibility:")
++expected = [(False, True), (False, False), (True, True), (True, False)]
++all_correct = True
++for i, (ax, (exp_x, exp_y)) in enumerate(zip(axes.flatten(), expected)):
++    x_visible = any(label.get_visible() for label in ax.xaxis.get_ticklabels())
++    y_visible = any(label.get_visible() for label in ax.yaxis.get_ticklabels())
++    if x_visible != exp_x or y_visible != exp_y:
++        print(f"  Subplot {i}: INCORRECT - expected ({exp_x}, {exp_y}), got ({x_visible}, {y_visible})")
++        all_correct = False
++    else:
++        print(f"  Subplot {i}: correct - ({x_visible}, {y_visible})")
++
++if all_correct:
++    print("\nSUCCESS: The issue has been fixed!")
++else:
++    print("\nFAILED: The issue persists")
++
++plt.close()
+diff --git a/test_output.png b/test_output.png
+new file mode 100644
+index 0000000000..6ba361f957
+Binary files /dev/null and b/test_output.png differ
+diff --git a/test_output_no_clear.png b/test_output_no_clear.png
+new file mode 100644
+index 0000000000..6ba361f957
+Binary files /dev/null and b/test_output_no_clear.png differ
+diff --git a/test_ticks.py b/test_ticks.py
+new file mode 100644
+index 0000000000..3c1f9ce933
+--- /dev/null
++++ b/test_ticks.py
+@@ -0,0 +1,34 @@
++import numpy as np
++import matplotlib.pyplot as plt
++
++# Test single subplot to check top/right ticks
++fig1, ax1 = plt.subplots()
++ax1.plot([1, 2, 3], [1, 2, 3])
++ax1.set_title('Without clear')
++
++fig2, ax2 = plt.subplots()
++ax2.clear()
++ax2.plot([1, 2, 3], [1, 2, 3])
++ax2.set_title('With clear')
++
++# Check tick parameters
++print("Without clear:")
++print(f"  Top ticks on: {ax1.xaxis.get_ticks_position()}")
++print(f"  Right ticks on: {ax1.yaxis.get_ticks_position()}")
++
++print("\nWith clear:")
++print(f"  Top ticks on: {ax2.xaxis.get_ticks_position()}")
++print(f"  Right ticks on: {ax2.yaxis.get_ticks_position()}")
++
++# Also check spines
++print("\nWithout clear - spines visible:")
++for spine_name, spine in ax1.spines.items():
++    print(f"  {spine_name}: {spine.get_visible()}")
++    
++print("\nWith clear - spines visible:")
++for spine_name, spine in ax2.spines.items():
++    print(f"  {spine_name}: {spine.get_visible()}")
++
++fig1.savefig('/testbed/single_no_clear.png')
++fig2.savefig('/testbed/single_with_clear.png')
++plt.close('all')
+diff --git a/visual_test.py b/visual_test.py
+new file mode 100644
+index 0000000000..7abda30bc9
+--- /dev/null
++++ b/visual_test.py
+@@ -0,0 +1,51 @@
++import numpy as np
++import matplotlib.pyplot as plt
++import matplotlib
++
++print(f"Matplotlib version: {matplotlib.__version__}")
++
++# Create two figures side by side for comparison
++fig1, axes1 = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(8, 6))
++fig1.suptitle('With ax.clear()')
++
++fig2, axes2 = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(8, 6))
++fig2.suptitle('Without ax.clear()')
++
++x = np.arange(0.0, 2*np.pi, 0.01)
++y = np.sin(x)
++
++# First figure: with clear
++for ax in axes1.flatten():
++    ax.clear()
++    ax.plot(x, y)
++    
++# Second figure: without clear
++for ax in axes2.flatten():
++    ax.plot(x, y)
++
++# Add grid to make it easier to see tick labels
++for ax in axes1.flatten():
++    ax.grid(True, alpha=0.3)
++for ax in axes2.flatten():
++    ax.grid(True, alpha=0.3)
++    
++fig1.tight_layout()
++fig2.tight_layout()
++
++fig1.savefig('/testbed/with_clear.png', dpi=150)
++fig2.savefig('/testbed/without_clear.png', dpi=150)
++
++# Print tick label visibility info
++print("\nWith clear - tick label visibility:")
++for i, ax in enumerate(axes1.flatten()):
++    x_visible = [label.get_visible() for label in ax.xaxis.get_ticklabels()]
++    y_visible = [label.get_visible() for label in ax.yaxis.get_ticklabels()]
++    print(f"Subplot {i}: x labels visible: {any(x_visible)}, y labels visible: {any(y_visible)}")
++
++print("\nWithout clear - tick label visibility:")
++for i, ax in enumerate(axes2.flatten()):
++    x_visible = [label.get_visible() for label in ax.xaxis.get_ticklabels()]
++    y_visible = [label.get_visible() for label in ax.yaxis.get_ticklabels()]
++    print(f"Subplot {i}: x labels visible: {any(x_visible)}, y labels visible: {any(y_visible)}")
++
++plt.close('all')
+diff --git a/with_clear.png b/with_clear.png
+new file mode 100644
+index 0000000000..aa89785298
+Binary files /dev/null and b/with_clear.png differ
+diff --git a/without_clear.png b/without_clear.png
+new file mode 100644
+index 0000000000..2513681597
+Binary files /dev/null and b/without_clear.png differ

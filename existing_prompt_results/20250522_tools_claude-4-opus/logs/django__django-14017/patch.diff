@@ -1,0 +1,609 @@
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index c957ffa564..d257214c60 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -39,18 +39,28 @@ class Q(tree.Node):
+     def __init__(self, *args, _connector=None, _negated=False, **kwargs):
+         super().__init__(children=[*args, *sorted(kwargs.items())], connector=_connector, negated=_negated)
+ 
++    def _clone(self):
++        """Create a copy of this Q object."""
++        clone = self.__class__()
++        clone.connector = self.connector
++        clone.negated = self.negated
++        clone.children = self.children[:]
++        return clone
++
+     def _combine(self, other, conn):
+         if not isinstance(other, Q):
+-            raise TypeError(other)
++            # If the other object is a conditional expression, wrap it in a Q
++            if getattr(other, 'conditional', False):
++                other = Q(other)
++            else:
++                raise TypeError(other)
+ 
+         # If the other Q() is empty, ignore it and just use `self`.
+         if not other:
+-            _, args, kwargs = self.deconstruct()
+-            return type(self)(*args, **kwargs)
++            return self._clone()
+         # Or if this Q is empty, ignore it and just use `other`.
+         elif not self:
+-            _, args, kwargs = other.deconstruct()
+-            return type(other)(*args, **kwargs)
++            return other._clone()
+ 
+         obj = type(self)()
+         obj.connector = conn
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..edcb519d8a
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++
++# Add some test data
++User.objects.create(username='test1')
++User.objects.create(username='test2')
++
++# Test various combinations
++print("1. Testing Q() & Exists(...)")
++q1 = Q() & Exists(User.objects.filter(username='test1'))
++print(f"   Result: {q1}")
++print(f"   Filtering with it: {list(User.objects.filter(q1).values_list('username', flat=True))}")
++
++print("\n2. Testing Exists(...) & Q()")
++q2 = Exists(User.objects.filter(username='test1')) & Q()
++print(f"   Result: {q2}")
++print(f"   Filtering with it: {list(User.objects.filter(q2).values_list('username', flat=True))}")
++
++print("\n3. Testing Q(username='test2') & Exists(...)")
++q3 = Q(username='test2') & Exists(User.objects.filter(username='test1'))
++print(f"   Result: {q3}")
++print(f"   Filtering with it: {list(User.objects.filter(q3).values_list('username', flat=True))}")
++
++print("\n4. Testing Exists(...) & Q(username='test2')")
++q4 = Exists(User.objects.filter(username='test1')) & Q(username='test2')
++print(f"   Result: {q4}")
++print(f"   Filtering with it: {list(User.objects.filter(q4).values_list('username', flat=True))}")
++
++print("\n5. Testing Q() | Exists(...)")
++q5 = Q() | Exists(User.objects.filter(username='test1'))
++print(f"   Result: {q5}")
++# Note: Q() | something should be equivalent to Q() (empty OR)
++
++print("\n6. Testing Exists(...) | Q()")
++q6 = Exists(User.objects.filter(username='test1')) | Q()
++print(f"   Result: {q6}")
++
++print("\n7. Testing negation: ~Exists(...)")
++q7 = ~Exists(User.objects.filter(username='nonexistent'))
++print(f"   Result: {q7}")
++print(f"   Filtering with it: {list(User.objects.filter(q7).values_list('username', flat=True))}")
++
++print("\n8. Testing Q(~Exists(...))")
++q8 = Q(~Exists(User.objects.filter(username='nonexistent')))
++print(f"   Result: {q8}")
++print(f"   Filtering with it: {list(User.objects.filter(q8).values_list('username', flat=True))}")
++
++print("\n9. Testing complex: (Q(username='test1') | Q(username='test2')) & Exists(...)")
++q9 = (Q(username='test1') | Q(username='test2')) & Exists(User.objects.all())
++print(f"   Result: {q9}")
++print(f"   Filtering with it: {list(User.objects.filter(q9).values_list('username', flat=True))}")
+diff --git a/test_conditional.py b/test_conditional.py
+new file mode 100644
+index 0000000000..dcfa7955f4
+--- /dev/null
++++ b/test_conditional.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++# Check if Exists has conditional property
++e = Exists(User.objects.all())
++print(f"Exists output_field: {e.output_field}")
++print(f"Exists output_field type: {type(e.output_field)}")
++print(f"Exists has conditional: {hasattr(e, 'conditional')}")
++if hasattr(e, 'conditional'):
++    print(f"Exists conditional value: {e.conditional}")
++
++# Check the inheritance chain
++print(f"\nExists MRO: {Exists.__mro__}")
++
++# Let's see what happens when we do Exists & Q
++print("\nTesting Exists & Q:")
++try:
++    result = e & Q()
++    print(f"Result: {result}")
++    print(f"Result type: {type(result)}")
++except Exception as ex:
++    print(f"Error: {type(ex).__name__}: {ex}")
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..e7fdd77768
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++# Test creating Q with Exists
++e = Exists(User.objects.all())
++print(f"Creating Q with Exists: Q(e)")
++try:
++    q = Q(e)
++    print(f"Success: {q}")
++    print(f"Q children: {q.children}")
++except Exception as ex:
++    import traceback
++    print(f"Error: {type(ex).__name__}: {ex}")
++    traceback.print_exc()
+diff --git a/test_empty_q.py b/test_empty_q.py
+new file mode 100644
+index 0000000000..ff8494fb32
+--- /dev/null
++++ b/test_empty_q.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++# Test empty Q
++q1 = Q()
++print(f"Empty Q: {q1}")
++print(f"Empty Q bool: {bool(q1)}")
++print(f"Empty Q children: {q1.children}")
++
++# Test Q with Exists
++e = Exists(User.objects.all())
++q2 = Q(e)
++print(f"\nQ(Exists): {q2}")
++print(f"Q(Exists) bool: {bool(q2)}")
++print(f"Q(Exists) children: {q2.children}")
++
++# Test combining
++print("\nTesting Q() & Exists directly in _combine")
++q3 = Q()
++try:
++    # Simulate what happens in _combine
++    if not q3:
++        print("q3 is falsy (empty)")
++        _, args, kwargs = q2.deconstruct()
++        print(f"q2 deconstruct: args={args}, kwargs={kwargs}")
++        result = type(q2)(*args, **kwargs)
++        print(f"Result: {result}")
++except Exception as ex:
++    import traceback
++    print(f"Error: {type(ex).__name__}: {ex}")
++    traceback.print_exc()
+diff --git a/test_exists_q.py b/test_exists_q.py
+new file mode 100644
+index 0000000000..d6feb0c04d
+--- /dev/null
++++ b/test_exists_q.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++# Test the issue
++print("Testing Exists(...) & Q(...)")
++try:
++    result1 = Exists(User.objects.all()) & Q()
++    print(f"Success: {result1}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting Q(...) & Exists(...)")
++try:
++    result2 = Q() & Exists(User.objects.all())
++    print(f"Success: {result2}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting Q(name='test') & Exists(...)")
++try:
++    result3 = Q(username='test') & Exists(User.objects.all())
++    print(f"Success: {result3}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting Exists(...) | Q(...)")
++try:
++    result4 = Exists(User.objects.all()) | Q()
++    print(f"Success: {result4}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting Q(...) | Exists(...)")
++try:
++    result5 = Q() | Exists(User.objects.all())
++    print(f"Success: {result5}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..fdd65ba371
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python
++"""Final verification that the original problem is fixed."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++print("Original problem from the issue:")
++print("================================")
++
++print("\n1. Exists(...) & Q() - This already worked:")
++try:
++    result1 = Exists(User.objects.all()) & Q()
++    print(f"   Success: {result1}")
++except Exception as e:
++    print(f"   Error: {type(e).__name__}: {e}")
++
++print("\n2. Q() & Exists(...) - This was raising TypeError:")
++try:
++    result2 = Q() & Exists(User.objects.all())
++    print(f"   Success: {result2}")
++    print("   ✓ FIXED! No TypeError!")
++except Exception as e:
++    print(f"   Error: {type(e).__name__}: {e}")
++    print("   ✗ NOT FIXED!")
++
++print("\n3. Additional test - Q with condition & Exists:")
++try:
++    result3 = Q(username='test') & Exists(User.objects.all())
++    print(f"   Success: {result3}")
++except Exception as e:
++    print(f"   Error: {type(e).__name__}: {e}")
++
++print("\n4. Test commutativity - both should give similar results:")
++e = Exists(User.objects.all())
++q = Q(username='test')
++
++result_a = e & q
++result_b = q & e
++
++print(f"   Exists & Q: {result_a}")
++print(f"   Q & Exists: {result_b}")
++print(f"   Both are Q objects: {isinstance(result_a, Q) and isinstance(result_b, Q)}")
+diff --git a/test_patch.py b/test_patch.py
+new file mode 100644
+index 0000000000..167fbdac7d
+--- /dev/null
++++ b/test_patch.py
+@@ -0,0 +1,42 @@
++"""
++Test to add to Django's test suite for Q & Exists combination.
++This could be added to tests/queries/test_q.py
++"""
++
++def test_combine_with_expression(self):
++    """
++    Q objects can be combined with conditional expressions that have
++    conditional=True attribute (like Exists).
++    """
++    from django.db.models import Exists
++    from django.contrib.auth.models import User
++    
++    # Test combining Q with Exists in both orders
++    exists = Exists(User.objects.all())
++    
++    # Q & Exists
++    result = Q() & exists
++    self.assertIsInstance(result, Q)
++    self.assertEqual(len(result.children), 1)
++    self.assertIs(result.children[0], exists)
++    
++    # Exists & Q
++    result = exists & Q()
++    self.assertIsInstance(result, Q)
++    
++    # Q | Exists
++    result = Q() | exists
++    self.assertIsInstance(result, Q)
++    
++    # Exists | Q
++    result = exists | Q()
++    self.assertIsInstance(result, Q)
++    
++    # Q with conditions & Exists
++    result = Q(username='test') & exists
++    self.assertIsInstance(result, Q)
++    self.assertEqual(len(result.children), 2)
++    
++    # Should still raise TypeError for non-conditional expressions
++    with self.assertRaises(TypeError):
++        Q() & 'not a valid operand'
+diff --git a/test_q_exists_combination.py b/test_q_exists_combination.py
+new file mode 100644
+index 0000000000..12293e0f4e
+--- /dev/null
++++ b/test_q_exists_combination.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python
++"""Test for Q and Exists combination fix."""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db.models import Q, Exists
++from django.contrib.auth.models import User
++
++
++class TestQExistsCombination(TestCase):
++    def test_q_and_exists(self):
++        """Test that Q() & Exists() works in both orders."""
++        # This should work (and already did before the fix)
++        result1 = Exists(User.objects.all()) & Q()
++        self.assertIsInstance(result1, Q)
++        
++        # This should now also work (this is what we fixed)
++        result2 = Q() & Exists(User.objects.all())
++        self.assertIsInstance(result2, Q)
++        
++    def test_q_or_exists(self):
++        """Test that Q() | Exists() works in both orders."""
++        # This should work
++        result1 = Exists(User.objects.all()) | Q()
++        self.assertIsInstance(result1, Q)
++        
++        # This should now also work
++        result2 = Q() | Exists(User.objects.all())
++        self.assertIsInstance(result2, Q)
++        
++    def test_q_and_exists_with_conditions(self):
++        """Test Q with conditions combined with Exists."""
++        # Both orders should work
++        result1 = Q(username='test') & Exists(User.objects.filter(is_active=True))
++        self.assertIsInstance(result1, Q)
++        
++        result2 = Exists(User.objects.filter(is_active=True)) & Q(username='test')
++        self.assertIsInstance(result2, Q)
++        
++    def test_complex_combinations(self):
++        """Test more complex combinations."""
++        # Nested combinations
++        result = (Q(username='test') | Q(email='test@example.com')) & Exists(User.objects.all())
++        self.assertIsInstance(result, Q)
++        
++        # Multiple Exists
++        result = Exists(User.objects.filter(username='test1')) & Exists(User.objects.filter(username='test2'))
++        self.assertIsInstance(result, Q)
++        
++    def test_negated_exists(self):
++        """Test negated Exists with Q."""
++        result1 = Q() & ~Exists(User.objects.all())
++        self.assertIsInstance(result1, Q)
++        
++        result2 = ~Exists(User.objects.all()) & Q()
++        self.assertIsInstance(result2, Q)
++
++
++if __name__ == '__main__':
++    # Run the tests
++    import unittest
++    unittest.main()
+diff --git a/tests/queries/test_q.py b/tests/queries/test_q.py
+index 6dcf36ce02..6133c7d63b 100644
+--- a/tests/queries/test_q.py
++++ b/tests/queries/test_q.py
+@@ -1,4 +1,4 @@
+-from django.db.models import F, Q
++from django.db.models import Exists, F, Q
+ from django.test import SimpleTestCase
+ 
+ 
+@@ -111,3 +111,37 @@ class QTests(SimpleTestCase):
+         q = q1 & q2
+         path, args, kwargs = q.deconstruct()
+         self.assertEqual(Q(*args, **kwargs), q)
++
++    def test_combine_with_expression(self):
++        """
++        Q objects can be combined with conditional expressions that have
++        conditional=True attribute (like Exists).
++        """
++        from django.contrib.auth.models import User
++        
++        class MockExistsExpression:
++            conditional = True
++            
++            def __repr__(self):
++                return '<MockExistsExpression>'
++        
++        mock_exists = MockExistsExpression()
++        
++        # Q & conditional expression
++        result = Q() & mock_exists
++        self.assertIsInstance(result, Q)
++        self.assertEqual(len(result.children), 1)
++        self.assertIs(result.children[0], mock_exists)
++        
++        # Q with conditions & conditional expression
++        result = Q(x=1) & mock_exists
++        self.assertIsInstance(result, Q)
++        self.assertEqual(len(result.children), 2)
++        
++        # Q | conditional expression
++        result = Q() | mock_exists
++        self.assertIsInstance(result, Q)
++        
++        # Should still raise TypeError for non-conditional expressions
++        with self.assertRaises(TypeError):
++            Q() & 'not a valid operand'

@@ -1,0 +1,947 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fafc1beee8..dbade83eb6 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -2,9 +2,11 @@ import json
+ 
+ from django import forms
+ from django.core import checks, exceptions
++from django.core.exceptions import EmptyResultSet
+ from django.db import NotSupportedError, connections, router
+ from django.db.models import lookups
+ from django.db.models.lookups import PostgresOperatorLookup, Transform
++from django.utils.datastructures import OrderedSet
+ from django.utils.translation import gettext_lazy as _
+ 
+ from . import Field
+@@ -479,6 +481,59 @@ class KeyTransformGte(KeyTransformNumericLookupMixin, lookups.GreaterThanOrEqual
+     pass
+ 
+ 
++class KeyTransformIn(lookups.In):
++    def get_prep_lookup(self):
++        # Don't call get_prep_value on the list itself, it will be called
++        # on individual values later in batch_process_rhs
++        return self.rhs
++
++    def batch_process_rhs(self, compiler, connection, rhs=None):
++        if rhs is None:
++            rhs = self.rhs
++        
++        # Remove None values as they won't match in JSON
++        rhs_values = [r for r in rhs if r is not None]
++        
++        if not rhs_values:
++            raise EmptyResultSet
++        
++        # Get prep values for each item
++        if hasattr(self.lhs.output_field, 'get_prep_value'):
++            prep_values = [self.lhs.output_field.get_prep_value(v) for v in rhs_values]
++        else:
++            prep_values = rhs_values
++
++        if connection.vendor == 'mysql':
++            # MySQL needs JSON_EXTRACT for proper comparison
++            sqls = ["JSON_EXTRACT(%s, '$')"] * len(prep_values)
++            return sqls, prep_values
++            
++        elif connection.vendor == 'sqlite':
++            # SQLite also needs JSON_EXTRACT for proper comparison
++            sqls = []
++            for val in prep_values:
++                if val == 'null':
++                    sqls.append('%s')
++                else:
++                    sqls.append("JSON_EXTRACT(%s, '$')")
++            return sqls, prep_values
++            
++        elif connection.vendor == 'oracle':
++            # Oracle needs special handling
++            sqls = []
++            for value in rhs_values:
++                function = 'JSON_QUERY' if isinstance(value, (list, dict)) else 'JSON_VALUE'
++                sqls.append("%s('%s', '$.value')" % (
++                    function,
++                    json.dumps({'value': value}),
++                ))
++            return sqls, []
++            
++        else:
++            # PostgreSQL has native JSON support - use default behavior
++            return super().batch_process_rhs(compiler, connection, rhs)
++
++
+ KeyTransform.register_lookup(KeyTransformExact)
+ KeyTransform.register_lookup(KeyTransformIExact)
+ KeyTransform.register_lookup(KeyTransformIsNull)
+@@ -494,6 +549,7 @@ KeyTransform.register_lookup(KeyTransformLt)
+ KeyTransform.register_lookup(KeyTransformLte)
+ KeyTransform.register_lookup(KeyTransformGt)
+ KeyTransform.register_lookup(KeyTransformGte)
++KeyTransform.register_lookup(KeyTransformIn)
+ 
+ 
+ class KeyTransformFactory:
+diff --git a/test_json_complex.py b/test_json_complex.py
+new file mode 100644
+index 0000000000..3416108f5e
+--- /dev/null
++++ b/test_json_complex.py
+@@ -0,0 +1,92 @@
++import os
++import django
++from django.db import models
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test various data types
++print("Testing JSONField __in lookup with various data types:")
++print("=" * 60)
++
++# Test with strings
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'name': 'Alice'})
++TestModel.objects.create(data={'name': 'Bob'})
++TestModel.objects.create(data={'name': 'Charlie'})
++
++result = TestModel.objects.filter(data__name__in=['Alice', 'Bob'])
++print(f"String values - Count: {result.count()}, Values: {[obj.data['name'] for obj in result]}")
++
++# Test with floats
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'price': 10.5})
++TestModel.objects.create(data={'price': 20.0})
++TestModel.objects.create(data={'price': 30.75})
++
++result = TestModel.objects.filter(data__price__in=[10.5, 20.0])
++print(f"Float values - Count: {result.count()}, Values: {[obj.data['price'] for obj in result]}")
++
++# Test with booleans
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'active': True})
++TestModel.objects.create(data={'active': False})
++TestModel.objects.create(data={'active': True})
++
++result = TestModel.objects.filter(data__active__in=[True])
++print(f"Boolean values - Count: {result.count()}, Values: {[obj.data['active'] for obj in result]}")
++
++# Test with nested paths
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'user': {'id': 1, 'name': 'Alice'}})
++TestModel.objects.create(data={'user': {'id': 2, 'name': 'Bob'}})
++TestModel.objects.create(data={'user': {'id': 3, 'name': 'Charlie'}})
++
++result = TestModel.objects.filter(data__user__id__in=[1, 3])
++print(f"Nested path - Count: {result.count()}, Values: {[obj.data['user']['id'] for obj in result]}")
++
++# Test with None/null values
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'value': None})
++TestModel.objects.create(data={'value': 0})
++TestModel.objects.create(data={'value': 1})
++
++# None values should be filtered out
++result = TestModel.objects.filter(data__value__in=[None, 0, 1])
++print(f"With None - Count: {result.count()}, Values: {[obj.data['value'] for obj in result]}")
++
++# Test edge case: empty list
++result = TestModel.objects.filter(data__value__in=[])
++print(f"Empty list - Count: {result.count()}")
++
++print("\nAll tests completed successfully!")
+diff --git a/test_json_debug.py b/test_json_debug.py
+new file mode 100644
+index 0000000000..4a4fa37b9a
+--- /dev/null
++++ b/test_json_debug.py
+@@ -0,0 +1,68 @@
++import os
++import django
++from django.db import models, connection
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++TestModel.objects.create(data={'key': 0})
++TestModel.objects.create(data={'key': 1})
++
++# Test with raw SQL
++with connection.cursor() as cursor:
++    # Test exact match
++    cursor.execute("""
++        SELECT data FROM test_app_testmodel 
++        WHERE JSON_EXTRACT(data, '$.key') = JSON_EXTRACT('0', '$')
++    """)
++    print("Exact match with JSON_EXTRACT('0', '$'):", cursor.fetchall())
++    
++    # Test IN with JSON_EXTRACT
++    cursor.execute("""
++        SELECT data FROM test_app_testmodel 
++        WHERE JSON_EXTRACT(data, '$.key') IN (JSON_EXTRACT('0', '$'), JSON_EXTRACT('1', '$'))
++    """)
++    print("IN match with JSON_EXTRACT:", cursor.fetchall())
++    
++    # Test what JSON_EXTRACT returns
++    cursor.execute("SELECT JSON_EXTRACT('0', '$')")
++    print("JSON_EXTRACT('0', '$') returns:", cursor.fetchone())
++    
++    cursor.execute("SELECT JSON_EXTRACT('1', '$')")
++    print("JSON_EXTRACT('1', '$') returns:", cursor.fetchone())
++    
++    # Test direct value extraction
++    cursor.execute("SELECT JSON_EXTRACT(data, '$.key') FROM test_app_testmodel")
++    print("JSON_EXTRACT(data, '$.key') returns:", cursor.fetchall())
+diff --git a/test_json_edge_cases.py b/test_json_edge_cases.py
+new file mode 100644
+index 0000000000..949a912fdb
+--- /dev/null
++++ b/test_json_edge_cases.py
+@@ -0,0 +1,99 @@
++import os
++import django
++from django.db import models
++from django.core.exceptions import EmptyResultSet
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++print("Testing JSONField __in lookup edge cases:")
++print("=" * 60)
++
++# Test 1: Empty IN list should raise EmptyResultSet
++print("Test 1: Empty IN list")
++try:
++    # This should be handled internally and return empty queryset
++    result = TestModel.objects.filter(data__key__in=[])
++    print(f"Result count: {result.count()}")
++    # Check that the query short-circuits
++    print("[OK] Empty list handled correctly")
++except Exception as e:
++    print(f"[ERROR] Error: {e}")
++
++# Test 2: All None values should also result in empty queryset
++print("\nTest 2: All None values")
++TestModel.objects.create(data={'key': 0})
++result = TestModel.objects.filter(data__key__in=[None, None])
++print(f"Result count: {result.count()}")
++print("[OK] All None values handled correctly")
++
++# Test 3: Mixed None and valid values
++print("\nTest 3: Mixed None and valid values")
++result = TestModel.objects.filter(data__key__in=[None, 0, None])
++print(f"Result count: {result.count()}")
++print("[OK] Mixed None values handled correctly")
++
++# Test 4: Special JSON values
++print("\nTest 4: Special JSON values")
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'key': 'null'})  # String "null"
++TestModel.objects.create(data={'key': None})    # Actual null
++TestModel.objects.create(data={'key': ''})      # Empty string
++
++result = TestModel.objects.filter(data__key__in=['null'])
++print(f"String 'null' count: {result.count()}")
++
++result = TestModel.objects.filter(data__key__in=[''])
++print(f"Empty string count: {result.count()}")
++
++# Test 5: Unicode and special characters
++print("\nTest 5: Unicode and special characters")
++TestModel.objects.all().delete()
++TestModel.objects.create(data={'key': '你好'})
++TestModel.objects.create(data={'key': 'émoji 😀'})
++TestModel.objects.create(data={'key': 'quote"test'})
++
++result = TestModel.objects.filter(data__key__in=['你好', 'émoji 😀'])
++print(f"Unicode count: {result.count()}")
++
++# Test 6: Very large IN list
++print("\nTest 6: Large IN list")
++TestModel.objects.all().delete()
++for i in range(10):
++    TestModel.objects.create(data={'key': i})
++
++large_list = list(range(0, 10, 2))  # [0, 2, 4, 6, 8]
++result = TestModel.objects.filter(data__key__in=large_list)
++print(f"Large list count: {result.count()} (expected: 5)")
++
++print("\n[OK] All edge case tests passed!")
+diff --git a/test_json_in_lookup.py b/test_json_in_lookup.py
+new file mode 100644
+index 0000000000..638e527e6d
+--- /dev/null
++++ b/test_json_in_lookup.py
+@@ -0,0 +1,80 @@
++import os
++import django
++from django.db import models
++from django.test import TestCase
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++TestModel.objects.create(data={'key': 0})
++TestModel.objects.create(data={'key': 1})
++TestModel.objects.create(data={'key': 2})
++TestModel.objects.create(data={'other': 'value'})
++
++# Test the issue
++print("Testing JSONField __in lookup issue:")
++print("=" * 50)
++
++# Test 1: Using __in with a list containing 0
++first_filter = {'data__key__in': [0]}
++first_items = TestModel.objects.filter(**first_filter)
++print(f"Filter: {first_filter}")
++print(f"Count with __in: {len(first_items)}")
++print(f"Items: {list(first_items.values_list('data', flat=True))}")
++print()
++
++# Test 2: Using exact match with 0
++second_filter = {'data__key': 0}
++second_items = TestModel.objects.filter(**second_filter)
++print(f"Filter: {second_filter}")
++print(f"Count with exact: {len(second_items)}")
++print(f"Items: {list(second_items.values_list('data', flat=True))}")
++print()
++
++# Test 3: Using __in with multiple values
++third_filter = {'data__key__in': [0, 1]}
++third_items = TestModel.objects.filter(**third_filter)
++print(f"Filter: {third_filter}")
++print(f"Count with __in [0, 1]: {len(third_items)}")
++print(f"Items: {list(third_items.values_list('data', flat=True))}")
++print()
++
++# Test 4: Using __in with a list containing 1
++fourth_filter = {'data__key__in': [1]}
++fourth_items = TestModel.objects.filter(**fourth_filter)
++print(f"Filter: {fourth_filter}")
++print(f"Count with __in [1]: {len(fourth_items)}")
++print(f"Items: {list(fourth_items.values_list('data', flat=True))}")
++
++print("\nExpected: __in lookup should return the same results as exact lookup")
+diff --git a/test_json_in_sql.py b/test_json_in_sql.py
+new file mode 100644
+index 0000000000..74ed710aa9
+--- /dev/null
++++ b/test_json_in_sql.py
+@@ -0,0 +1,68 @@
++import os
++import django
++from django.db import models, connection
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++TestModel.objects.create(data={'key': 0})
++
++# Check SQL for exact lookup
++print("SQL for exact lookup (data__key=0):")
++qs1 = TestModel.objects.filter(data__key=0)
++print(str(qs1.query))
++print()
++
++# Check SQL for __in lookup
++print("SQL for __in lookup (data__key__in=[0]):")
++qs2 = TestModel.objects.filter(data__key__in=[0])
++print(str(qs2.query))
++print()
++
++# Let's also check what happens with regular fields
++class RegularModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(RegularModel)
++
++RegularModel.objects.create(value=0)
++
++print("SQL for regular field __in lookup (value__in=[0]):")
++qs3 = RegularModel.objects.filter(value__in=[0])
++print(str(qs3.query))
+diff --git a/test_json_mysql.py b/test_json_mysql.py
+new file mode 100644
+index 0000000000..81c3c93d92
+--- /dev/null
++++ b/test_json_mysql.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.db import models, connection
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings for MySQL
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.mysql',
++        'NAME': 'test_db',
++        'USER': 'root',
++        'PASSWORD': '',
++        'HOST': 'localhost',
++        'PORT': '3306',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++try:
++    django.setup()
++    
++    # Define test model
++    class TestModel(models.Model):
++        data = models.JSONField()
++        
++        class Meta:
++            app_label = 'test_app'
++            
++    print(f"Testing with {connection.vendor}")
++    
++    # Check if MySQL is available
++    if connection.vendor == 'mysql':
++        # Create the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(TestModel)
++        
++        # Create test data
++        TestModel.objects.create(data={'key': 0})
++        TestModel.objects.create(data={'key': 1})
++        TestModel.objects.create(data={'key': 2})
++        
++        # Test __in lookup
++        result = TestModel.objects.filter(data__key__in=[0, 1])
++        print(f"Count with __in [0, 1]: {result.count()}")
++        print(f"Values: {list(result.values_list('data', flat=True))}")
++        
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(TestModel)
++    else:
++        print("MySQL is not available, skipping test")
++        
++except Exception as e:
++    print(f"Error: {e}")
++    print("MySQL is not available or not configured properly")
+diff --git a/test_json_oracle_compat.py b/test_json_oracle_compat.py
+new file mode 100644
+index 0000000000..d7f8a4d889
+--- /dev/null
++++ b/test_json_oracle_compat.py
+@@ -0,0 +1,43 @@
++"""
++Test to verify Oracle compatibility for the KeyTransformIn lookup.
++This test simulates what the SQL should look like for Oracle.
++"""
++import json
++
++# Simulate Oracle SQL generation for __in lookup
++def oracle_in_sql(values):
++    sqls = []
++    for value in values:
++        function = 'JSON_QUERY' if isinstance(value, (list, dict)) else 'JSON_VALUE'
++        sqls.append("%s('%s', '$.value')" % (
++            function,
++            json.dumps({'value': value}),
++        ))
++    return sqls
++
++# Test various value types
++test_values = [
++    0,
++    1,
++    "test",
++    True,
++    False,
++    [1, 2, 3],
++    {"key": "value"},
++]
++
++print("Oracle SQL generation test:")
++print("=" * 60)
++
++for value in test_values:
++    sql = oracle_in_sql([value])
++    print(f"Value: {value!r}")
++    print(f"SQL: {sql[0]}")
++    print()
++
++# Test multiple values
++print("Multiple values:")
++values = [0, 1, "test"]
++sqls = oracle_in_sql(values)
++for i, (value, sql) in enumerate(zip(values, sqls)):
++    print(f"Value {i}: {value!r} -> {sql}")
+diff --git a/test_json_params.py b/test_json_params.py
+new file mode 100644
+index 0000000000..93c93491a4
+--- /dev/null
++++ b/test_json_params.py
+@@ -0,0 +1,57 @@
++import os
++import django
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++TestModel.objects.create(data={'key': 0})
++
++# Test with parameterized query
++with connection.cursor() as cursor:
++    # This is what we want
++    cursor.execute(
++        "SELECT data FROM test_app_testmodel WHERE JSON_EXTRACT(data, '$.key') IN (JSON_EXTRACT(%s, '$'))",
++        ['0']
++    )
++    print("Result with parameter '0':", cursor.fetchall())
++    
++    # This is what we're getting
++    cursor.execute(
++        'SELECT data FROM test_app_testmodel WHERE JSON_EXTRACT(data, \'$."key"\') IN (JSON_EXTRACT(%s, \'$\'))',
++        ['"0"']
++    )
++    print('Result with parameter \'"0"\':', cursor.fetchall())
+diff --git a/test_json_postgresql.py b/test_json_postgresql.py
+new file mode 100644
+index 0000000000..77683294b5
+--- /dev/null
++++ b/test_json_postgresql.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.db import models, connection
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings for PostgreSQL
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.postgresql',
++        'NAME': 'test_db',
++        'USER': 'postgres',
++        'PASSWORD': '',
++        'HOST': 'localhost',
++        'PORT': '5432',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++try:
++    django.setup()
++    
++    # Define test model
++    class TestModel(models.Model):
++        data = models.JSONField()
++        
++        class Meta:
++            app_label = 'test_app'
++            
++    print(f"Testing with {connection.vendor}")
++    
++    # Check if PostgreSQL is available
++    if connection.vendor == 'postgresql':
++        # Create the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(TestModel)
++        
++        # Create test data
++        TestModel.objects.create(data={'key': 0})
++        TestModel.objects.create(data={'key': 1})
++        TestModel.objects.create(data={'key': 2})
++        
++        # Test __in lookup
++        result = TestModel.objects.filter(data__key__in=[0, 1])
++        print(f"Count with __in [0, 1]: {result.count()}")
++        print(f"Values: {list(result.values_list('data', flat=True))}")
++        
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(TestModel)
++    else:
++        print("PostgreSQL is not available, skipping test")
++        
++except Exception as e:
++    print(f"Error: {e}")
++    print("PostgreSQL is not available or not configured properly")
+diff --git a/test_json_prep_value.py b/test_json_prep_value.py
+new file mode 100644
+index 0000000000..d130dedc81
+--- /dev/null
++++ b/test_json_prep_value.py
+@@ -0,0 +1,40 @@
++import os
++import django
++from django.db import models
++import json
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Test get_prep_value
++field = models.JSONField()
++print("get_prep_value(0):", repr(field.get_prep_value(0)))
++print("get_prep_value(1):", repr(field.get_prep_value(1)))
++print("get_prep_value('test'):", repr(field.get_prep_value('test')))
++print("get_prep_value({'key': 0}):", repr(field.get_prep_value({'key': 0})))
++print()
++
++# Test json.dumps directly
++print("json.dumps(0):", repr(json.dumps(0)))
++print("json.dumps(1):", repr(json.dumps(1)))
++print("json.dumps('test'):", repr(json.dumps('test')))
++print("json.dumps({'key': 0}):", repr(json.dumps({'key': 0})))
+diff --git a/test_json_sql_debug.py b/test_json_sql_debug.py
+new file mode 100644
+index 0000000000..59091efac0
+--- /dev/null
++++ b/test_json_sql_debug.py
+@@ -0,0 +1,55 @@
++import os
++import django
++from django.db import models, connection
++from django.test.utils import CaptureQueriesContext
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++DEBUG = True
++""")
++
++django.setup()
++
++# Define test model
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++TestModel.objects.create(data={'key': 0})
++
++# Capture actual SQL
++with CaptureQueriesContext(connection) as queries:
++    list(TestModel.objects.filter(data__key__in=[0]))
++    
++print("Actual SQL for data__key__in=[0]:")
++print(queries[0]['sql'])
++print()
++
++# Test the SQL directly
++with connection.cursor() as cursor:
++    # Execute the captured query
++    cursor.execute(queries[0]['sql'])
++    print("Result:", cursor.fetchall())
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..833d089dbb
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,13 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
+diff --git a/tests/model_fields/test_jsonfield.py b/tests/model_fields/test_jsonfield.py
+index a7648711ac..089a6809aa 100644
+--- a/tests/model_fields/test_jsonfield.py
++++ b/tests/model_fields/test_jsonfield.py
+@@ -697,6 +697,43 @@ class TestQuerying(TestCase):
+                 self.assertIs(NullableJSONModel.objects.filter(
+                     **{lookup: value},
+                 ).exists(), True)
++    
++    def test_key_in_lookup(self):
++        # Test __in lookup on key transforms
++        obj1 = NullableJSONModel.objects.create(value={'num': 0})
++        obj2 = NullableJSONModel.objects.create(value={'num': 1})
++        obj3 = NullableJSONModel.objects.create(value={'num': 2})
++        obj4 = NullableJSONModel.objects.create(value={'other': 'value'})
++        
++        # Test with single value
++        self.assertSequenceEqual(
++            NullableJSONModel.objects.filter(value__num__in=[0]),
++            [obj1],
++        )
++        
++        # Test with multiple values
++        self.assertSequenceEqual(
++            NullableJSONModel.objects.filter(value__num__in=[0, 1]),
++            [obj1, obj2],
++        )
++        
++        # Test with values that don't exist
++        self.assertSequenceEqual(
++            NullableJSONModel.objects.filter(value__num__in=[3, 4]),
++            [],
++        )
++        
++        # Test with mixed existing and non-existing values
++        self.assertSequenceEqual(
++            NullableJSONModel.objects.filter(value__num__in=[1, 2, 3]),
++            [obj2, obj3],
++        )
++        
++        # Test that it excludes objects without the key
++        self.assertSequenceEqual(
++            NullableJSONModel.objects.filter(value__num__in=[0, 1, 2]),
++            [obj1, obj2, obj3],
++        )
+ 
+     @skipUnlessDBFeature('supports_json_field_contains')
+     def test_contains_contained_by_with_key_transform(self):

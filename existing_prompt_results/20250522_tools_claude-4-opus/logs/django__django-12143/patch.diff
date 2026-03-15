@@ -1,0 +1,415 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 137e6faa0f..effc5e9296 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -1631,7 +1631,7 @@ class ModelAdmin(BaseModelAdmin):
+ 
+     def _get_edited_object_pks(self, request, prefix):
+         """Return POST data values of list_editable primary keys."""
+-        pk_pattern = re.compile(r'{}-\d+-{}$'.format(prefix, self.model._meta.pk.name))
++        pk_pattern = re.compile(r'{}-\d+-{}$'.format(re.escape(prefix), re.escape(self.model._meta.pk.name)))
+         return [value for key, value in request.POST.items() if pk_pattern.match(key)]
+ 
+     def _get_list_editable_queryset(self, request, prefix):
+diff --git a/test_admin_regex_fix.py b/test_admin_regex_fix.py
+new file mode 100644
+index 0000000000..32adaff21a
+--- /dev/null
++++ b/test_admin_regex_fix.py
+@@ -0,0 +1,61 @@
++"""Test for the regex special characters fix in admin changeform"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++import django
++django.setup()
++
++from django.test import TestCase, RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.contrib.admin import ModelAdmin
++from django.contrib.auth.models import User
++
++
++class RegexPrefixTestCase(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.site = AdminSite()
++        
++    def test_get_edited_object_pks_with_special_chars(self):
++        """Test that _get_edited_object_pks works with regex special characters in prefix"""
++        
++        class TestModelAdmin(ModelAdmin):
++            pass
++            
++        ma = TestModelAdmin(User, self.site)
++        
++        # Test various prefixes with regex special characters
++        test_cases = [
++            # (prefix, post_data, expected_pks)
++            ('form', {'form-0-id': '1', 'form-1-id': '2'}, ['1', '2']),
++            ('form[test]', {'form[test]-0-id': '3', 'form[test]-1-id': '4'}, ['3', '4']),
++            ('form.test', {'form.test-0-id': '5', 'form.test-1-id': '6'}, ['5', '6']),
++            ('form(test)', {'form(test)-0-id': '7', 'form(test)-1-id': '8'}, ['7', '8']),
++            ('form+test', {'form+test-0-id': '9', 'form+test-1-id': '10'}, ['9', '10']),
++            ('form*test', {'form*test-0-id': '11', 'form*test-1-id': '12'}, ['11', '12']),
++            ('form^test', {'form^test-0-id': '13', 'form^test-1-id': '14'}, ['13', '14']),
++            ('form$test', {'form$test-0-id': '15', 'form$test-1-id': '16'}, ['15', '16']),
++            ('form?test', {'form?test-0-id': '17', 'form?test-1-id': '18'}, ['17', '18']),
++            ('form{test}', {'form{test}-0-id': '19', 'form{test}-1-id': '20'}, ['19', '20']),
++            ('form|test', {'form|test-0-id': '21', 'form|test-1-id': '22'}, ['21', '22']),
++            ('form\\test', {'form\\test-0-id': '23', 'form\\test-1-id': '24'}, ['23', '24']),
++        ]
++        
++        for prefix, post_data, expected_pks in test_cases:
++            with self.subTest(prefix=prefix):
++                # Add some extra data that shouldn't match
++                post_data_with_noise = post_data.copy()
++                post_data_with_noise['other-0-id'] = '999'
++                post_data_with_noise[prefix.replace('[', '').replace(']', '') + '-0-id'] = '998'
++                
++                request = self.factory.post('/', data=post_data_with_noise)
++                pks = ma._get_edited_object_pks(request, prefix)
++                
++                self.assertEqual(sorted(pks), sorted(expected_pks))
++
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/test_data_loss_scenario.py b/test_data_loss_scenario.py
+new file mode 100644
+index 0000000000..873e45ac45
+--- /dev/null
++++ b/test_data_loss_scenario.py
+@@ -0,0 +1,57 @@
++"""Demonstrate the data loss scenario with regex special characters in formset prefix"""
++import re
++
++def simulate_old_code(prefix, pk_name, post_data):
++    """Simulate the old problematic code"""
++    pk_pattern = re.compile(r'{}-\d+-{}$'.format(prefix, pk_name))
++    return [value for key, value in post_data.items() if pk_pattern.match(key)]
++
++def simulate_new_code(prefix, pk_name, post_data):
++    """Simulate the fixed code"""
++    pk_pattern = re.compile(r'{}-\d+-{}$'.format(re.escape(prefix), re.escape(pk_name)))
++    return [value for key, value in post_data.items() if pk_pattern.match(key)]
++
++# Scenario: Admin form with prefix containing square brackets
++prefix = 'form[test]'
++pk_name = 'id'
++
++# POST data from the form
++post_data = {
++    'form[test]-0-id': '123',  # Object with ID 123
++    'form[test]-1-id': '456',  # Object with ID 456
++    'form[test]-2-id': '789',  # Object with ID 789
++    # These shouldn't match but would with the old code
++    'formt-0-id': '999',       # Different object!
++    'forme-0-id': '888',       # Different object!
++    'forms-0-id': '777',       # Different object!
++}
++
++print("Data Loss Scenario Demonstration")
++print("=" * 50)
++print(f"Formset prefix: '{prefix}'")
++print(f"POST data keys: {list(post_data.keys())}")
++print()
++
++print("OLD CODE (with bug):")
++old_result = simulate_old_code(prefix, pk_name, post_data)
++print(f"Matched PKs: {old_result}")
++print(f"Number of objects that would be edited: {len(old_result)}")
++print()
++
++print("NEW CODE (fixed):")
++new_result = simulate_new_code(prefix, pk_name, post_data)
++print(f"Matched PKs: {new_result}")
++print(f"Number of objects that would be edited: {len(new_result)}")
++print()
++
++print("ANALYSIS:")
++print(f"The old code incorrectly matched {len(old_result) - len(new_result)} extra objects!")
++print("This could lead to unintended data modifications when saving the form.")
++print()
++
++# Show what the regex patterns look like
++print("REGEX PATTERNS:")
++print(f"Old pattern: {prefix}-\\d+-{pk_name}$")
++print(f"  Interpretation: '{prefix}' means match any single char from: t, e, s")
++print(f"New pattern: {re.escape(prefix)}-\\d+-{re.escape(pk_name)}$")
++print(f"  Interpretation: Matches the literal string '{prefix}'")
+diff --git a/test_regex_prefix.py b/test_regex_prefix.py
+new file mode 100644
+index 0000000000..24408dca43
+--- /dev/null
++++ b/test_regex_prefix.py
+@@ -0,0 +1,72 @@
++"""Test script to reproduce the regex special characters issue in formset prefix"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++django.setup()
++
++import re
++from django.test import RequestFactory
++from django.contrib.admin.options import ModelAdmin
++from django.contrib.auth.models import User
++from django.test.utils import setup_test_environment, teardown_test_environment
++
++# Set up test environment
++setup_test_environment()
++
++# Create a mock ModelAdmin instance
++class TestModelAdmin(ModelAdmin):
++    model = User
++    
++    def _get_edited_object_pks(self, request, prefix):
++        """Return POST data values of list_editable primary keys."""
++        # This is the problematic line from the original code
++        pk_pattern = re.compile(r'{}-\d+-{}$'.format(prefix, self.model._meta.pk.name))
++        return [value for key, value in request.POST.items() if pk_pattern.match(key)]
++
++# Test with normal prefix (should work)
++admin = TestModelAdmin(User, None)
++factory = RequestFactory()
++
++# Normal case - should work fine
++normal_data = {
++    'form-0-id': '1',
++    'form-1-id': '2',
++    'form-2-id': '3',
++}
++request = factory.post('/', data=normal_data)
++pks = admin._get_edited_object_pks(request, prefix='form')
++print(f"Normal prefix 'form': {pks}")
++
++# Test with prefix containing regex special characters
++special_data = {
++    'form[test]-0-id': '1',
++    'form[test]-1-id': '2',
++    'form[test]-2-id': '3',
++}
++request = factory.post('/', data=special_data)
++
++try:
++    pks = admin._get_edited_object_pks(request, prefix='form[test]')
++    print(f"Special prefix 'form[test]': {pks}")
++except Exception as e:
++    print(f"Error with special prefix 'form[test]': {type(e).__name__}: {e}")
++
++# Test with another special character
++special_data2 = {
++    'form.test-0-id': '1',
++    'form.test-1-id': '2',
++    'form.test-2-id': '3',
++}
++request2 = factory.post('/', data=special_data2)
++
++try:
++    pks = admin._get_edited_object_pks(request2, prefix='form.test')
++    print(f"Special prefix 'form.test': {pks}")
++except Exception as e:
++    print(f"Error with special prefix 'form.test': {type(e).__name__}: {e}")
++
++# Clean up
++teardown_test_environment()
+diff --git a/test_regex_simple.py b/test_regex_simple.py
+new file mode 100644
+index 0000000000..06330ec82b
+--- /dev/null
++++ b/test_regex_simple.py
+@@ -0,0 +1,65 @@
++"""Simple test to demonstrate the regex issue"""
++import re
++
++# Simulate the problematic code
++def test_regex_pattern(prefix, pk_name='id'):
++    """This simulates the problematic line in ModelAdmin._get_edited_object_pks"""
++    pk_pattern = re.compile(r'{}-\d+-{}$'.format(prefix, pk_name))
++    return pk_pattern
++
++# Test with normal prefix
++print("Testing normal prefix 'form':")
++pattern = test_regex_pattern('form', 'id')
++print(f"Pattern: {pattern.pattern}")
++print(f"Matches 'form-0-id': {bool(pattern.match('form-0-id'))}")
++print(f"Matches 'form-1-id': {bool(pattern.match('form-1-id'))}")
++print()
++
++# Test with prefix containing square brackets (regex special chars)
++print("Testing prefix with square brackets 'form[test]':")
++try:
++    pattern = test_regex_pattern('form[test]', 'id')
++    print(f"Pattern: {pattern.pattern}")
++    # This will not match as expected because [ and ] are regex special chars
++    print(f"Matches 'form[test]-0-id': {bool(pattern.match('form[test]-0-id'))}")
++    print(f"Matches 'formt-0-id': {bool(pattern.match('formt-0-id'))}")  # This would match!
++    print(f"Matches 'forme-0-id': {bool(pattern.match('forme-0-id'))}")  # This would match!
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++print()
++
++# Test with prefix containing dots (regex special char)
++print("Testing prefix with dots 'form.test':")
++pattern = test_regex_pattern('form.test', 'id')
++print(f"Pattern: {pattern.pattern}")
++print(f"Matches 'form.test-0-id': {bool(pattern.match('form.test-0-id'))}")
++print(f"Matches 'formXtest-0-id': {bool(pattern.match('formXtest-0-id'))}")  # This would match!
++print()
++
++# Test with prefix containing parentheses
++print("Testing prefix with parentheses 'form(test)':")
++try:
++    pattern = test_regex_pattern('form(test)', 'id')
++    print(f"Pattern: {pattern.pattern}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++print()
++
++# Show the fix using re.escape()
++print("FIXED VERSION using re.escape():")
++def test_regex_pattern_fixed(prefix, pk_name='id'):
++    """Fixed version using re.escape()"""
++    pk_pattern = re.compile(r'{}-\d+-{}$'.format(re.escape(prefix), re.escape(pk_name)))
++    return pk_pattern
++
++# Test all problematic cases with the fix
++for prefix in ['form', 'form[test]', 'form.test', 'form(test)', 'form+test', 'form*test']:
++    print(f"\nTesting prefix '{prefix}':")
++    pattern = test_regex_pattern_fixed(prefix, 'id')
++    print(f"Pattern: {pattern.pattern}")
++    test_key = f"{prefix}-0-id"
++    print(f"Matches '{test_key}': {bool(pattern.match(test_key))}")
++    # Test that it doesn't match incorrect patterns
++    wrong_key = prefix.replace('[', '').replace(']', '').replace('.', 'X') + "-0-id"
++    if wrong_key != test_key:
++        print(f"Matches '{wrong_key}': {bool(pattern.match(wrong_key))}")
+diff --git a/tests/admin_changelist/test_regex_prefix.py b/tests/admin_changelist/test_regex_prefix.py
+new file mode 100644
+index 0000000000..5a0c063932
+--- /dev/null
++++ b/tests/admin_changelist/test_regex_prefix.py
+@@ -0,0 +1,117 @@
++"""Tests for regex special characters in formset prefix"""
++from django.test import TestCase, RequestFactory
++from django.contrib import admin
++
++from .models import Swallow
++from .admin import SwallowAdmin, site as custom_site
++
++
++class RegexPrefixTests(TestCase):
++    factory = RequestFactory()
++    
++    def test_get_edited_object_pks_with_regex_special_chars(self):
++        """Test that _get_edited_object_pks works correctly with regex special characters in prefix."""
++        a = Swallow.objects.create(origin='Swallow A', load=4, speed=1)
++        b = Swallow.objects.create(origin='Swallow B', load=2, speed=2)
++        c = Swallow.objects.create(origin='Swallow C', load=5, speed=5)
++        
++        m = SwallowAdmin(Swallow, custom_site)
++        
++        # Test various prefixes with regex special characters
++        test_cases = [
++            # Standard case
++            ('form', {
++                'form-0-uuid': str(a.pk),
++                'form-1-uuid': str(b.pk),
++                'form-2-uuid': str(c.pk),
++            }),
++            # Square brackets
++            ('form[test]', {
++                'form[test]-0-uuid': str(a.pk),
++                'form[test]-1-uuid': str(b.pk),
++                'form[test]-2-uuid': str(c.pk),
++            }),
++            # Dots
++            ('form.test', {
++                'form.test-0-uuid': str(a.pk),
++                'form.test-1-uuid': str(b.pk),
++                'form.test-2-uuid': str(c.pk),
++            }),
++            # Parentheses
++            ('form(test)', {
++                'form(test)-0-uuid': str(a.pk),
++                'form(test)-1-uuid': str(b.pk),
++                'form(test)-2-uuid': str(c.pk),
++            }),
++            # Plus sign
++            ('form+test', {
++                'form+test-0-uuid': str(a.pk),
++                'form+test-1-uuid': str(b.pk),
++                'form+test-2-uuid': str(c.pk),
++            }),
++            # Asterisk
++            ('form*test', {
++                'form*test-0-uuid': str(a.pk),
++                'form*test-1-uuid': str(b.pk),
++                'form*test-2-uuid': str(c.pk),
++            }),
++            # Question mark
++            ('form?test', {
++                'form?test-0-uuid': str(a.pk),
++                'form?test-1-uuid': str(b.pk),
++                'form?test-2-uuid': str(c.pk),
++            }),
++            # Caret
++            ('form^test', {
++                'form^test-0-uuid': str(a.pk),
++                'form^test-1-uuid': str(b.pk),
++                'form^test-2-uuid': str(c.pk),
++            }),
++            # Dollar sign
++            ('form$test', {
++                'form$test-0-uuid': str(a.pk),
++                'form$test-1-uuid': str(b.pk),
++                'form$test-2-uuid': str(c.pk),
++            }),
++            # Curly braces
++            ('form{test}', {
++                'form{test}-0-uuid': str(a.pk),
++                'form{test}-1-uuid': str(b.pk),
++                'form{test}-2-uuid': str(c.pk),
++            }),
++            # Pipe
++            ('form|test', {
++                'form|test-0-uuid': str(a.pk),
++                'form|test-1-uuid': str(b.pk),
++                'form|test-2-uuid': str(c.pk),
++            }),
++            # Backslash
++            ('form\\test', {
++                'form\\test-0-uuid': str(a.pk),
++                'form\\test-1-uuid': str(b.pk),
++                'form\\test-2-uuid': str(c.pk),
++            }),
++        ]
++        
++        for prefix, post_data in test_cases:
++            with self.subTest(prefix=prefix):
++                # Add some noise data that shouldn't match
++                full_data = post_data.copy()
++                full_data['other-0-uuid'] = 'should-not-match'
++                # Add data that would match if regex chars aren't escaped properly
++                if '[' in prefix:
++                    # If prefix is 'form[test]', this would match 'formt' or 'forme' etc
++                    full_data['formt-0-uuid'] = 'should-not-match-2'
++                elif '.' in prefix:
++                    # If prefix is 'form.test', this would match 'formXtest'
++                    full_data['formXtest-0-uuid'] = 'should-not-match-3'
++                
++                request = self.factory.post('/', data=full_data)
++                pks = m._get_edited_object_pks(request, prefix=prefix)
++                
++                # Should only get the PKs for the correct prefix
++                expected_pks = sorted([str(a.pk), str(b.pk), str(c.pk)])
++                actual_pks = sorted(pks)
++                
++                self.assertEqual(actual_pks, expected_pks,
++                    f"Failed for prefix '{prefix}'. Expected {expected_pks}, got {actual_pks}")

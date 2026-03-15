@@ -1,0 +1,445 @@
+diff --git a/check_filter_registration.py b/check_filter_registration.py
+new file mode 100644
+index 0000000000..c3fd3f2562
+--- /dev/null
++++ b/check_filter_registration.py
+@@ -0,0 +1,36 @@
++#!/usr/bin/env python
++"""Check if escapeseq filter is properly registered."""
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [],
++        },
++    }],
++)
++
++django.setup()
++
++from django.template.defaultfilters import register
++
++# Check if escapeseq is registered
++if 'escapeseq' in register.filters:
++    print("✓ escapeseq filter is properly registered")
++    filter_func = register.filters['escapeseq']
++    print(f"  Function: {filter_func}")
++    print(f"  Is safe: {getattr(filter_func, 'is_safe', 'Not set')}")
++else:
++    print("✗ escapeseq filter is NOT registered")
++
++# List all filters that contain 'seq' or 'escape'
++print("\nRelated filters:")
++for name in sorted(register.filters.keys()):
++    if 'seq' in name or 'escape' in name:
++        print(f"  - {name}")
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 5289ef34a0..a4e80162f6 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -498,6 +498,16 @@ def safeseq(value):
+     return [mark_safe(obj) for obj in value]
+ 
+ 
++@register.filter(is_safe=True)
++def escapeseq(value):
++    """
++    An "escape" filter for sequences. Escape each element in the sequence,
++    individually, after converting them to strings. Return a list
++    with the results.
++    """
++    return [escape(obj) for obj in value]
++
++
+ @register.filter(is_safe=True)
+ @stringfilter
+ def striptags(value):
+diff --git a/docs/ref/templates/builtins.txt b/docs/ref/templates/builtins.txt
+index 3aa20dfc71..d9a2517e91 100644
+--- a/docs/ref/templates/builtins.txt
++++ b/docs/ref/templates/builtins.txt
+@@ -1849,6 +1849,33 @@ For example:
+ If ``value`` is ``"testing\r\njavascript 'string\" <b>escaping</b>"``,
+ the output will be ``"testing\\u000D\\u000Ajavascript \\u0027string\\u0022 \\u003Cb\\u003Eescaping\\u003C/b\\u003E"``.
+ 
++.. templatefilter:: escapeseq
++
++``escapeseq``
++-------------
++
++.. versionadded:: 5.1
++
++Applies the :tfilter:`escape` filter to each element of a sequence. Useful in
++conjunction with other filters that operate on sequences, such as
++:tfilter:`join`. Each element of the sequence is escaped individually after
++converting it to a string.
++
++For example:
++
++.. code-block:: html+django
++
++    {% autoescape off %}
++        {{ some_list|escapeseq|join:", " }}
++    {% endautoescape %}
++
++If ``some_list`` is ``['<p>First</p>', '<p>Second</p>']``, the output will be
++``&lt;p&gt;First&lt;/p&gt;, &lt;p&gt;Second&lt;/p&gt;``.
++
++This is the escaping counterpart to :tfilter:`safeseq`. While ``safeseq`` marks
++each element as safe (preventing escaping), ``escapeseq`` explicitly escapes
++each element regardless of the autoescape setting.
++
+ .. templatefilter:: filesizeformat
+ 
+ ``filesizeformat``
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 0000000000..d4d311a4dc
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/env python
++"""Final comprehensive test of escapeseq filter."""
++
++import django
++from django.conf import settings
++from django.template import Template, Context
++from django.utils.safestring import mark_safe
++
++settings.configure(
++    DEBUG=True,
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [],
++        },
++    }],
++)
++
++django.setup()
++
++print("=== Final Comprehensive Test of escapeseq Filter ===\n")
++
++# Test 1: Basic functionality
++print("1. Basic functionality test:")
++template = Template('{{ items|escapeseq|join:", " }}')
++context = Context({'items': ['<b>Bold</b>', '&amp;', '"Quote"', "It's"]})
++result = template.render(context)
++print(f"   Input: ['<b>Bold</b>', '&amp;', '\"Quote\"', \"It's\"]")
++print(f"   Output: {result}")
++assert '&lt;b&gt;' in result
++assert '&amp;amp;' in result
++assert '&quot;' in result
++assert '&#x27;' in result
++print("   ✓ Pass\n")
++
++# Test 2: With autoescape off
++print("2. With autoescape off:")
++template = Template('{% autoescape off %}{{ items|escapeseq|join:", " }}{% endautoescape %}')
++context = Context({'items': ['<script>alert("XSS")</script>', '<div>Test</div>']})
++result = template.render(context)
++print(f"   Input: ['<script>alert(\"XSS\")</script>', '<div>Test</div>']")
++print(f"   Output: {result}")
++assert '&lt;script&gt;' in result
++assert '&lt;div&gt;' in result
++print("   ✓ Pass\n")
++
++# Test 3: Comparison with safeseq
++print("3. Comparison with safeseq:")
++items = ['<em>Emphasis</em>', '<strong>Strong</strong>']
++template1 = Template('{{ items|safeseq|join:", " }}')
++template2 = Template('{{ items|escapeseq|join:", " }}')
++result1 = template1.render(Context({'items': items}))
++result2 = template2.render(Context({'items': items}))
++print(f"   Input: {items}")
++print(f"   safeseq output: {result1}")
++print(f"   escapeseq output: {result2}")
++assert '<em>' in result1  # safeseq preserves HTML
++assert '&lt;em&gt;' in result2  # escapeseq escapes HTML
++print("   ✓ Pass\n")
++
++# Test 4: With safe strings
++print("4. With safe strings:")
++safe_items = [mark_safe('<p>Paragraph 1</p>'), mark_safe('<p>Paragraph 2</p>')]
++template = Template('{{ items|escapeseq|join:", " }}')
++result = template.render(Context({'items': safe_items}))
++print(f"   Input: [mark_safe('<p>Paragraph 1</p>'), mark_safe('<p>Paragraph 2</p>')]")
++print(f"   Output: {result}")
++assert '&lt;p&gt;' in result  # Even safe strings are escaped
++print("   ✓ Pass\n")
++
++# Test 5: Mixed types
++print("5. Mixed types test:")
++mixed = [42, 'String & text', None, 3.14, '<tag>', True, False]
++template = Template('{{ items|escapeseq|join:", " }}')
++result = template.render(Context({'items': mixed}))
++print(f"   Input: {mixed}")
++print(f"   Output: {result}")
++assert 'String &amp; text' in result
++assert '&lt;tag&gt;' in result
++print("   ✓ Pass\n")
++
++# Test 6: Empty and edge cases
++print("6. Edge cases:")
++template = Template('{{ items|escapeseq|join:", " }}')
++
++# Empty list
++result = template.render(Context({'items': []}))
++print(f"   Empty list: '{result}'")
++assert result == ''
++
++# Single item
++result = template.render(Context({'items': ['<single>']}))
++print(f"   Single item ['<single>']: '{result}'")
++assert result == '&lt;single&gt;'
++print("   ✓ Pass\n")
++
++# Test 7: Practical use case from problem statement
++print("7. Practical use case (from problem statement):")
++template = Template('{% autoescape off %}{{ some_list|escapeseq|join:"," }}{% endautoescape %}')
++context = Context({'some_list': ['<tag>', 'value & text', '"quoted"', "It's here"]})
++result = template.render(context)
++print(f"   Template: {{% autoescape off %}}{{{{ some_list|escapeseq|join:\",\" }}}}{{% endautoescape %}}")
++print(f"   Input: ['<tag>', 'value & text', '\"quoted\"', \"It's here\"]")
++print(f"   Output: {result}")
++assert '&lt;tag&gt;' in result
++assert 'value &amp; text' in result
++assert '&quot;quoted&quot;' in result
++assert 'It&#x27;s here' in result
++print("   ✓ Pass\n")
++
++print("=== All Tests Passed! ✅ ===")
++print("\nThe escapeseq filter is working correctly and ready for use!")
+diff --git a/test_escapeseq.py b/test_escapeseq.py
+new file mode 100644
+index 0000000000..906e58f472
+--- /dev/null
++++ b/test_escapeseq.py
+@@ -0,0 +1,148 @@
++#!/usr/bin/env python
++"""Test the escapeseq filter implementation."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.template import Template, Context
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [],
++        },
++    }],
++)
++
++django.setup()
++
++def test_escapeseq_basic():
++    """Test basic escapeseq functionality."""
++    print("Test 1: Basic escapeseq functionality")
++    
++    # Test with HTML characters that need escaping
++    test_list = ['<script>alert("XSS")</script>', 'Hello & Goodbye', '"Quotes"', "It's here"]
++    
++    # Test with autoescape on (default)
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': test_list})
++    result = template.render(context)
++    print(f"With autoescape on: {result}")
++    
++    # Test with autoescape off
++    template = Template('{% autoescape off %}{{ items|escapeseq|join:", " }}{% endautoescape %}')
++    context = Context({'items': test_list})
++    result = template.render(context)
++    print(f"With autoescape off: {result}")
++    
++    # Verify the output contains escaped characters
++    assert '&lt;script&gt;' in result
++    assert '&amp;' in result
++    assert '&quot;' in result
++    assert '&#x27;' in result
++    print("✓ Test 1 passed\n")
++
++
++def test_escapeseq_vs_safeseq():
++    """Compare escapeseq with safeseq behavior."""
++    print("Test 2: Compare escapeseq vs safeseq")
++    
++    test_list = ['<b>Bold</b>', '<i>Italic</i>']
++    
++    # Test safeseq
++    template = Template('{{ items|safeseq|join:", " }}')
++    context = Context({'items': test_list})
++    safeseq_result = template.render(context)
++    print(f"safeseq result: {safeseq_result}")
++    
++    # Test escapeseq
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': test_list})
++    escapeseq_result = template.render(context)
++    print(f"escapeseq result: {escapeseq_result}")
++    
++    # Verify safeseq doesn't escape but escapeseq does
++    assert '<b>' in safeseq_result
++    assert '&lt;b&gt;' in escapeseq_result
++    print("✓ Test 2 passed\n")
++
++
++def test_escapeseq_with_safe_strings():
++    """Test escapeseq with already safe strings."""
++    print("Test 3: escapeseq with safe strings")
++    
++    from django.utils.safestring import mark_safe
++    
++    # Create a list with safe strings
++    test_list = [mark_safe('<b>Bold</b>'), mark_safe('<i>Italic</i>')]
++    
++    # Test escapeseq - it should still escape even safe strings
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': test_list})
++    result = template.render(context)
++    print(f"Result with safe strings: {result}")
++    
++    # Verify that even safe strings are escaped
++    assert '&lt;b&gt;' in result
++    assert '&lt;i&gt;' in result
++    print("✓ Test 3 passed\n")
++
++
++def test_escapeseq_empty_and_edge_cases():
++    """Test escapeseq with empty lists and edge cases."""
++    print("Test 4: Edge cases")
++    
++    # Empty list
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': []})
++    result = template.render(context)
++    print(f"Empty list result: '{result}'")
++    assert result == ''
++    
++    # List with None values
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': [None, 'test', None]})
++    result = template.render(context)
++    print(f"List with None result: '{result}'")
++    
++    # List with numbers
++    template = Template('{{ items|escapeseq|join:", " }}')
++    context = Context({'items': [1, 2.5, 3]})
++    result = template.render(context)
++    print(f"List with numbers result: '{result}'")
++    
++    print("✓ Test 4 passed\n")
++
++
++def test_escapeseq_practical_example():
++    """Test the practical example from the problem statement."""
++    print("Test 5: Practical example from problem statement")
++    
++    # The example: {{ some_list|escapeseq|join:"," }}
++    some_list = ['<tag>', 'value & text', '"quoted"']
++    
++    template = Template('{% autoescape off %}{{ some_list|escapeseq|join:"," }}{% endautoescape %}')
++    context = Context({'some_list': some_list})
++    result = template.render(context)
++    print(f"Result: {result}")
++    
++    # Verify all items are escaped even with autoescape off
++    assert '&lt;tag&gt;' in result
++    assert 'value &amp; text' in result
++    assert '&quot;quoted&quot;' in result
++    print("✓ Test 5 passed\n")
++
++
++if __name__ == '__main__':
++    test_escapeseq_basic()
++    test_escapeseq_vs_safeseq()
++    test_escapeseq_with_safe_strings()
++    test_escapeseq_empty_and_edge_cases()
++    test_escapeseq_practical_example()
++    print("All tests passed! ✅")
+diff --git a/tests/template_tests/filter_tests/test_escapeseq.py b/tests/template_tests/filter_tests/test_escapeseq.py
+new file mode 100644
+index 0000000000..44615ceff2
+--- /dev/null
++++ b/tests/template_tests/filter_tests/test_escapeseq.py
+@@ -0,0 +1,64 @@
++from django.test import SimpleTestCase
++from django.utils.safestring import mark_safe
++
++from ..utils import setup
++
++
++class EscapeseqTests(SimpleTestCase):
++    @setup({"escapeseq01": '{{ a|join:", " }} -- {{ a|escapeseq|join:", " }}'})
++    def test_escapeseq01(self):
++        """Test escapeseq with autoescape on (default)."""
++        output = self.engine.render_to_string("escapeseq01", {"a": ["&", "<", ">", '"']})
++        self.assertEqual(output, "&amp;, &lt;, &gt;, &quot; -- &amp;, &lt;, &gt;, &quot;")
++
++    @setup(
++        {
++            "escapeseq02": (
++                '{% autoescape off %}{{ a|join:", " }} -- {{ a|escapeseq|join:", " }}'
++                "{% endautoescape %}"
++            )
++        }
++    )
++    def test_escapeseq02(self):
++        """Test escapeseq with autoescape off - escapeseq should still escape."""
++        output = self.engine.render_to_string("escapeseq02", {"a": ["&", "<", ">", '"']})
++        self.assertEqual(output, "&, <, >, \" -- &amp;, &lt;, &gt;, &quot;")
++
++    @setup({"escapeseq03": '{{ a|escapeseq|join:", " }}'})
++    def test_escapeseq03_with_safe_strings(self):
++        """Test escapeseq with safe strings - should still escape them."""
++        output = self.engine.render_to_string(
++            "escapeseq03", 
++            {"a": [mark_safe("<b>Bold</b>"), mark_safe("<i>Italic</i>")]}
++        )
++        self.assertEqual(output, "&lt;b&gt;Bold&lt;/b&gt;, &lt;i&gt;Italic&lt;/i&gt;")
++
++    @setup({"escapeseq04": '{{ a|escapeseq|join:", " }}'})
++    def test_escapeseq04_mixed_types(self):
++        """Test escapeseq with mixed types."""
++        output = self.engine.render_to_string(
++            "escapeseq04", 
++            {"a": [1, "test & text", None, 2.5, "<tag>"]}
++        )
++        self.assertEqual(output, "1, test &amp; text, None, 2.5, &lt;tag&gt;")
++
++    @setup({"escapeseq05": '{{ a|escapeseq|join:", " }}'})
++    def test_escapeseq05_empty_list(self):
++        """Test escapeseq with empty list."""
++        output = self.engine.render_to_string("escapeseq05", {"a": []})
++        self.assertEqual(output, "")
++
++    @setup(
++        {
++            "escapeseq06": (
++                '{% autoescape off %}{{ a|escapeseq|join:"," }}{% endautoescape %}'
++            )
++        }
++    )
++    def test_escapeseq06_practical_example(self):
++        """Test the practical example from the problem statement."""
++        output = self.engine.render_to_string(
++            "escapeseq06", 
++            {"a": ['<tag>', 'value & text', '"quoted"']}
++        )
++        self.assertEqual(output, "&lt;tag&gt;,value &amp; text,&quot;quoted&quot;")

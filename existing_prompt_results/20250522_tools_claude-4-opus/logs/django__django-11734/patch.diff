@@ -1,0 +1,1497 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 35f3c5e1ea..1c775d832e 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1702,7 +1702,10 @@ class Query(BaseExpression):
+         handle.
+         """
+         filter_lhs, filter_rhs = filter_expr
+-        if isinstance(filter_rhs, F):
++        if isinstance(filter_rhs, OuterRef):
++            # filter_rhs is already an OuterRef, don't wrap it again
++            pass
++        elif isinstance(filter_rhs, F):
+             filter_expr = (filter_lhs, OuterRef(filter_rhs.name))
+         # Generate the inner query.
+         query = Query(self.model)
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..db86feb152
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,121 @@
++import os
++import sys
++import django
++
++# Add tests directory to path
++sys.path.insert(0, '/testbed/tests')
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++django.setup()
++
++from django.db.models import Exists, OuterRef, Q
++from queries.models import Number, Item, Tag, NamedCategory, Author, ExtraInfo, Note
++from datetime import datetime
++
++# Create test data
++Number.objects.all().delete()
++Item.objects.all().delete()
++Tag.objects.all().delete()
++NamedCategory.objects.all().delete()
++Author.objects.all().delete()
++ExtraInfo.objects.all().delete()
++Note.objects.all().delete()
++
++# Create categories with specific IDs
++cat1 = NamedCategory.objects.create(id=1, name='cat1')
++cat2 = NamedCategory.objects.create(id=2, name='cat2')
++
++# Create tags
++tag1 = Tag.objects.create(name='tag1', category=cat1)
++tag2 = Tag.objects.create(name='tag2', category=cat2)
++
++# Create author and note
++extra = ExtraInfo.objects.create(info='Extra Info')
++author = Author.objects.create(name='Test Author', num=1, extra=extra)
++note = Note.objects.create(note='Test Note', misc='misc')
++
++# Create items
++item1 = Item.objects.create(name='item1', created=datetime.now(), creator=author, note=note)
++item1.tags.add(tag1)
++
++item2 = Item.objects.create(name='item2', created=datetime.now(), creator=author, note=note)
++item2.tags.add(tag2)
++
++# Create numbers
++for i in range(5):
++    Number.objects.create(num=i)
++
++print("Testing OuterRef with exclude() and ~Q()...")
++
++# Test 1: filter() - This should work
++print("\n1. Testing with filter() - Expected to work:")
++try:
++    # Build the subquery
++    subquery = Item.objects.filter(tags__category_id=OuterRef('pk'))
++    print(f"   Subquery type: {type(subquery)}")
++    print(f"   Subquery query: {subquery.query}")
++    
++    # Build the full query
++    qs = Number.objects.annotate(
++        foo=Exists(subquery)
++    ).filter(foo=True)
++    
++    # Check the SQL
++    print(f"   Full query SQL: {qs.query}")
++    
++    # Execute
++    result = list(qs)
++    print(f"   SUCCESS: filter() works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in filter(): {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test 2: exclude() - This should fail according to the issue
++print("\n2. Testing with exclude() - Expected to fail:")
++try:
++    # Build the subquery
++    subquery = Item.objects.exclude(tags__category_id=OuterRef('pk'))
++    print(f"   Subquery type: {type(subquery)}")
++    print(f"   Subquery query: {subquery.query}")
++    
++    # Build the full query
++    qs = Number.objects.annotate(
++        foo=Exists(subquery)
++    ).filter(foo=True)
++    
++    # Check the SQL
++    print(f"   Full query SQL: {qs.query}")
++    
++    # Execute
++    result = list(qs)
++    print(f"   SUCCESS: exclude() works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in exclude(): {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test 3: filter(~Q()) - This should also fail according to the issue
++print("\n3. Testing with filter(~Q()) - Expected to fail:")
++try:
++    # Build the subquery
++    subquery = Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++    print(f"   Subquery type: {type(subquery)}")
++    print(f"   Subquery query: {subquery.query}")
++    
++    # Build the full query
++    qs = Number.objects.annotate(
++        foo=Exists(subquery)
++    ).filter(foo=True)
++    
++    # Check the SQL
++    print(f"   Full query SQL: {qs.query}")
++    
++    # Execute
++    result = list(qs)
++    print(f"   SUCCESS: filter(~Q()) works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in filter(~Q()): {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..6cdd8e514f
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,118 @@
++#!/usr/bin/env python
++"""
++Test edge cases for the OuterRef fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q, F
++
++# Define test models
++class Model1(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Model2(models.Model):
++    name = models.CharField(max_length=100)
++    ref = models.ForeignKey(Model1, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Model1)
++    schema_editor.create_model(Model2)
++
++print("Testing edge cases...")
++
++# Test 1: Nested OuterRef (should not double-wrap)
++print("\n1. Nested OuterRef test:")
++try:
++    outer_ref = OuterRef('pk')
++    # Ensure that OuterRef doesn't get wrapped again
++    qs = Model1.objects.annotate(
++        has_ref=Exists(
++            Model2.objects.exclude(ref_id=outer_ref)
++        )
++    )
++    list(qs)
++    print("   [PASS] Nested OuterRef works correctly")
++except Exception as e:
++    print(f"   [FAIL] Error: {e}")
++
++# Test 2: Multiple OuterRefs in same query
++print("\n2. Multiple OuterRefs test:")
++try:
++    qs = Model1.objects.annotate(
++        complex_check=Exists(
++            Model2.objects.exclude(
++                Q(ref_id=OuterRef('pk')) | Q(name=OuterRef('name'))
++            )
++        )
++    )
++    list(qs)
++    print("   [PASS] Multiple OuterRefs work correctly")
++except Exception as e:
++    print(f"   [FAIL] Error: {e}")
++
++# Test 3: F expression should still be converted to OuterRef in split_exclude
++print("\n3. F expression conversion test:")
++try:
++    # Create a many-to-many relationship to trigger split_exclude
++    class Model3(models.Model):
++        name = models.CharField(max_length=100)
++        refs = models.ManyToManyField(Model2)
++        
++        class Meta:
++            app_label = 'test'
++    
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Model3)
++    
++    # This should trigger split_exclude and convert F to OuterRef
++    qs = Model3.objects.exclude(refs__ref_id=F('id'))
++    list(qs)
++    print("   [PASS] F expression conversion works correctly")
++except Exception as e:
++    print(f"   [FAIL] Error: {e}")
++
++# Test 4: Combination of OuterRef and F
++print("\n4. OuterRef and F combination test:")
++try:
++    qs = Model1.objects.annotate(
++        mixed_check=Exists(
++            Model2.objects.exclude(
++                Q(ref_id=OuterRef('pk')) & Q(id=F('ref_id'))
++            )
++        )
++    )
++    list(qs)
++    print("   [PASS] OuterRef and F combination works correctly")
++except Exception as e:
++    print(f"   [FAIL] Error: {e}")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..03841c4efd
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,143 @@
++#!/usr/bin/env python
++"""
++Reproduce the exact issue from the problem statement.
++The error occurs when OuterRef is used in exclude() or ~Q() within an Exists subquery.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++
++# Define test models exactly as in the problem statement
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Number)
++    schema_editor.create_model(Category)  
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Item)
++
++# The issue might be that the Number model's pk field is being used as OuterRef
++# and it's being matched against category_id. Let's see if this specific
++# mismatch causes the issue.
++
++# Let's check if the issue is in the query building phase
++print("Checking query building...")
++
++# Build the queries step by step
++print("\n1. Building filter query:")
++filter_qs = Item.objects.filter(tags__category_id=OuterRef('pk'))
++print(f"   Type: {type(filter_qs)}")
++
++print("\n2. Building exclude query:")
++exclude_qs = Item.objects.exclude(tags__category_id=OuterRef('pk'))
++print(f"   Type: {type(exclude_qs)}")
++
++print("\n3. Building ~Q query:")
++negated_qs = Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++print(f"   Type: {type(negated_qs)}")
++
++# Now let's check if the issue happens when we use these in annotations
++print("\n4. Using in annotations:")
++
++# The key might be that we need to actually evaluate the query
++# Let's try different ways to trigger the error
++
++print("\n   a) Direct evaluation of subquery:")
++try:
++    # This should definitely fail
++    list(exclude_qs)
++except ValueError as e:
++    print(f"      Expected error: {e}")
++
++print("\n   b) Using in Exists - filter case:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(Item.objects.filter(tags__category_id=OuterRef('pk')))
++    ).filter(foo=True)
++    # Force SQL generation
++    str(qs.query)
++    print("      Query built successfully")
++    list(qs)
++    print("      Query executed successfully")
++except Exception as e:
++    print(f"      Error: {e}")
++
++print("\n   c) Using in Exists - exclude case:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(Item.objects.exclude(tags__category_id=OuterRef('pk')))
++    ).filter(foo=True)
++    # Force SQL generation
++    str(qs.query)
++    print("      Query built successfully")
++    list(qs)
++    print("      Query executed successfully")
++except Exception as e:
++    print(f"      Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\n   d) Using in Exists - ~Q case:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(Item.objects.filter(~Q(tags__category_id=OuterRef('pk'))))
++    ).filter(foo=True)
++    # Force SQL generation
++    str(qs.query)
++    print("      Query built successfully")
++    list(qs)
++    print("      Query executed successfully")
++except Exception as e:
++    print(f"      Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's check if the issue is version-specific or configuration-specific
++print(f"\nDjango version: {django.__version__}")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..934b500d25
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,121 @@
++#!/usr/bin/env python
++"""
++Final verification that the issue from the problem statement is fixed.
++This test reproduces the exact scenario from the problem statement.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++
++# Define test models matching the problem statement
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Number)
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Item)
++
++print("Testing the exact scenario from the problem statement...")
++
++# Test from the problem statement
++def test_exists_exclude():
++    print("\n=== Running test_exists_exclude ===")
++    
++    # filter() - should work
++    print("\n1. filter() test:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.filter(tags__category_id=OuterRef('pk'))
++            )
++        ).filter(foo=True)
++        print(qs)  # Should work
++        print("   [PASS] filter() works")
++    except ValueError as e:
++        print(f"   [FAIL] filter() failed: {e}")
++    
++    # exclude() - previously crashed with "This queryset contains a reference to an outer query"
++    print("\n2. exclude() test:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.exclude(tags__category_id=OuterRef('pk'))
++            )
++        ).filter(foo=True)
++        print(qs)  # Should now work with our fix
++        print("   [PASS] exclude() works")
++    except ValueError as e:
++        print(f"   [FAIL] exclude() failed: {e}")
++        return False
++    
++    # filter(~Q()) - previously crashed with "This queryset contains a reference to an outer query"
++    print("\n3. filter(~Q()) test:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++            )
++        ).filter(foo=True)
++        print(qs)  # Should now work with our fix
++        print("   [PASS] filter(~Q()) works")
++    except ValueError as e:
++        print(f"   [FAIL] filter(~Q()) failed: {e}")
++        return False
++    
++    return True
++
++# Run the test
++success = test_exists_exclude()
++
++if success:
++    print("\n[SUCCESS] All tests passed! The issue has been fixed.")
++else:
++    print("\n[ERROR] Some tests failed. The issue is not fully fixed.")
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..687a12757a
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,138 @@
++#!/usr/bin/env python
++"""
++Verify that the fix for OuterRef in exclude() and ~Q() works correctly.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q, F
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Child(models.Model):
++    name = models.CharField(max_length=100)
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='children')
++    
++    class Meta:
++        app_label = 'test'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=100)
++    children = models.ManyToManyField(Child)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Parent)
++    schema_editor.create_model(Child)
++    schema_editor.create_model(Tag)
++
++# Create test data
++p1 = Parent.objects.create(id=1, name='Parent 1')
++p2 = Parent.objects.create(id=2, name='Parent 2')
++
++c1 = Child.objects.create(name='Child 1', parent=p1)
++c2 = Child.objects.create(name='Child 2', parent=p2)
++
++t1 = Tag.objects.create(name='Tag 1')
++t1.children.add(c1)
++
++print("Testing various OuterRef scenarios...")
++
++# Test 1: Simple filter with OuterRef (should work)
++print("\n1. Simple filter with OuterRef:")
++try:
++    qs = Parent.objects.annotate(
++        has_child_in_tag=Exists(
++            Tag.objects.filter(children__parent_id=OuterRef('pk'))
++        )
++    )
++    result = list(qs.values('name', 'has_child_in_tag'))
++    print(f"   Success: {result}")
++except Exception as e:
++    print(f"   Error: {e}")
++
++# Test 2: exclude with OuterRef (previously failed)
++print("\n2. exclude with OuterRef:")
++try:
++    qs = Parent.objects.annotate(
++        no_child_in_tag=Exists(
++            Tag.objects.exclude(children__parent_id=OuterRef('pk'))
++        )
++    )
++    result = list(qs.values('name', 'no_child_in_tag'))
++    print(f"   Success: {result}")
++except Exception as e:
++    print(f"   Error: {e}")
++
++# Test 3: ~Q with OuterRef (previously failed)
++print("\n3. ~Q with OuterRef:")
++try:
++    qs = Parent.objects.annotate(
++        no_child_in_tag=Exists(
++            Tag.objects.filter(~Q(children__parent_id=OuterRef('pk')))
++        )
++    )
++    result = list(qs.values('name', 'no_child_in_tag'))
++    print(f"   Success: {result}")
++except Exception as e:
++    print(f"   Error: {e}")
++
++# Test 4: Complex case with ManyToMany and OuterRef
++print("\n4. ManyToMany with exclude and OuterRef:")
++try:
++    qs = Parent.objects.annotate(
++        has_untagged_child=Exists(
++            Tag.objects.exclude(children__parent_id=OuterRef('pk'))
++        )
++    )
++    result = list(qs.values('name', 'has_untagged_child'))
++    print(f"   Success: {result}")
++except Exception as e:
++    print(f"   Error: {e}")
++
++# Test 5: Verify F expressions still work
++print("\n5. F expressions in exclude (should still work):")
++try:
++    # Add a field for F expression test
++    Child.objects.update(id=F('parent_id'))
++    
++    qs = Parent.objects.annotate(
++        has_mismatched_child=Exists(
++            Child.objects.exclude(id=F('parent_id'))
++        )
++    )
++    result = list(qs.values('name', 'has_mismatched_child'))
++    print(f"   Success: {result}")
++except Exception as e:
++    print(f"   Error: {e}")
++
++print("\nAll tests completed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..aec905cf76
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,135 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++
++# Define test models
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Number)
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Item)
++
++# Create test data
++for i in range(5):
++    Number.objects.create(num=i)
++
++cat1 = Category.objects.create(id=1, name='cat1')
++cat2 = Category.objects.create(id=2, name='cat2')
++
++tag1 = Tag.objects.create(name='tag1', category=cat1)
++tag2 = Tag.objects.create(name='tag2', category=cat2)
++
++item1 = Item.objects.create(name='item1')
++item1.tags.add(tag1)
++
++item2 = Item.objects.create(name='item2')
++item2.tags.add(tag2)
++
++print("Testing OuterRef with exclude() and ~Q()...")
++
++# Test 1: filter() - This should work
++print("\n1. Testing with filter() - Expected to work:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(tags__category_id=OuterRef('pk'))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: filter() works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in filter(): {e}")
++
++# Test 2: exclude() - This should fail according to the issue
++print("\n2. Testing with exclude() - Expected to fail:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.exclude(tags__category_id=OuterRef('pk'))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: exclude() works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in exclude(): {e}")
++
++# Test 3: filter(~Q()) - This should also fail according to the issue
++print("\n3. Testing with filter(~Q()) - Expected to fail:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: filter(~Q()) works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in filter(~Q()): {e}")
++
++# Let's try a more complex case
++print("\n4. Testing with more complex exclude:")
++try:
++    # This might trigger the issue
++    subquery = Item.objects.exclude(tags__category_id=OuterRef('pk'))
++    # Try to access the query directly
++    print(f"   Subquery: {subquery.query}")
++    
++    qs = Number.objects.annotate(
++        foo=Exists(subquery)
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: complex exclude() works, found {len(result)} results")
++except Exception as e:
++    print(f"   ERROR in complex exclude(): {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_issue2.py b/test_issue2.py
+new file mode 100644
+index 0000000000..074aa6d329
+--- /dev/null
++++ b/test_issue2.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++from django.db.models.expressions import ResolvedOuterRef
++
++# Define test models
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    number = models.ForeignKey(Number, on_delete=models.CASCADE, null=True)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Number)
++    schema_editor.create_model(Item)
++
++# Create test data
++for i in range(5):
++    num = Number.objects.create(num=i)
++    if i < 2:
++        Item.objects.create(name=f'item{i}', number=num)
++
++print("Testing OuterRef resolution...")
++
++# Let's trace what happens
++print("\n1. Creating OuterRef:")
++outer_ref = OuterRef('pk')
++print(f"   OuterRef type: {type(outer_ref)}")
++print(f"   OuterRef name: {outer_ref.name}")
++
++# Let's see what happens when we resolve it
++print("\n2. Resolving OuterRef:")
++resolved = outer_ref.resolve_expression()
++print(f"   Resolved type: {type(resolved)}")
++print(f"   Is ResolvedOuterRef: {isinstance(resolved, ResolvedOuterRef)}")
++
++# Let's trace the query building
++print("\n3. Building queries:")
++
++# Filter case
++print("\n   a) Filter case:")
++filter_qs = Item.objects.filter(number_id=OuterRef('pk'))
++print(f"      Query: {filter_qs.query}")
++
++# Exclude case
++print("\n   b) Exclude case:")
++exclude_qs = Item.objects.exclude(number_id=OuterRef('pk'))
++print(f"      Query: {exclude_qs.query}")
++
++# ~Q case
++print("\n   c) ~Q case:")
++negated_qs = Item.objects.filter(~Q(number_id=OuterRef('pk')))
++print(f"      Query: {negated_qs.query}")
++
++# Now let's try using them in Exists
++print("\n4. Using in Exists:")
++
++# Filter case
++print("\n   a) Filter with Exists:")
++try:
++    qs = Number.objects.annotate(
++        has_item=Exists(Item.objects.filter(number_id=OuterRef('pk')))
++    )
++    print(f"      Query: {qs.query}")
++    result = list(qs)
++    print(f"      Success: {len(result)} results")
++except Exception as e:
++    print(f"      Error: {e}")
++
++# Exclude case
++print("\n   b) Exclude with Exists:")
++try:
++    qs = Number.objects.annotate(
++        no_item=Exists(Item.objects.exclude(number_id=OuterRef('pk')))
++    )
++    print(f"      Query: {qs.query}")
++    result = list(qs)
++    print(f"      Success: {len(result)} results")
++except Exception as e:
++    print(f"      Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's check if the issue is in the query compilation
++print("\n5. Checking query compilation:")
++try:
++    # Create the subquery
++    subquery = Item.objects.exclude(number_id=OuterRef('pk'))
++    
++    # Check if OuterRef is resolved too early
++    from django.db.models.sql.compiler import SQLCompiler
++    from django.db import connection
++    
++    # Try to compile the subquery directly
++    compiler = subquery.query.get_compiler(using='default')
++    print(f"   Compiler: {compiler}")
++    
++    # This might trigger the error
++    sql, params = compiler.as_sql()
++    print(f"   SQL: {sql}")
++    print(f"   Params: {params}")
++except Exception as e:
++    print(f"   Error during compilation: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_outerref_issue.py b/test_outerref_issue.py
+new file mode 100644
+index 0000000000..48b7e813c1
+--- /dev/null
++++ b/test_outerref_issue.py
+@@ -0,0 +1,94 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Add tests directory to path
++sys.path.insert(0, '/testbed/tests')
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++django.setup()
++
++from django.db.models import Exists, OuterRef, Q
++from tests.queries.models import Number, Item, Tag, NamedCategory, Author, Note
++
++# Create test data
++def setup_test_data():
++    # Clear existing data
++    Number.objects.all().delete()
++    Item.objects.all().delete()
++    Tag.objects.all().delete()
++    NamedCategory.objects.all().delete()
++    Author.objects.all().delete()
++    Note.objects.all().delete()
++    
++    # Create test data
++    for i in range(5):
++        Number.objects.create(num=i, other_num=10-i)
++    
++    # Create categories
++    cat1 = NamedCategory.objects.create(name='cat1')
++    cat2 = NamedCategory.objects.create(name='cat2')
++    
++    # Create tags
++    tag1 = Tag.objects.create(name='tag1', category=cat1)
++    tag2 = Tag.objects.create(name='tag2', category=cat2)
++    
++    # Create author and note
++    author = Author.objects.create(name='Test Author', num=1)
++    note = Note.objects.create(note='Test Note', misc='misc')
++    
++    # Create items
++    from datetime import datetime
++    item1 = Item.objects.create(name='item1', created=datetime.now(), creator=author, note=note)
++    item1.tags.add(tag1)
++    
++    item2 = Item.objects.create(name='item2', created=datetime.now(), creator=author, note=note)
++    item2.tags.add(tag2)
++
++def test_exists_exclude():
++    print("Testing OuterRef with exclude() and ~Q()...")
++    
++    # Test 1: filter() - This should work
++    print("\n1. Testing with filter() - Expected to work:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.filter(tags__category_id=OuterRef('pk'))
++            )
++        ).filter(foo=True)
++        result = list(qs)
++        print(f"   SUCCESS: filter() works, found {len(result)} results")
++    except Exception as e:
++        print(f"   ERROR in filter(): {e}")
++    
++    # Test 2: exclude() - This should fail according to the issue
++    print("\n2. Testing with exclude() - Expected to fail:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.exclude(tags__category_id=OuterRef('pk'))
++            )
++        ).filter(foo=True)
++        result = list(qs)
++        print(f"   SUCCESS: exclude() works, found {len(result)} results")
++    except Exception as e:
++        print(f"   ERROR in exclude(): {e}")
++    
++    # Test 3: filter(~Q()) - This should also fail according to the issue
++    print("\n3. Testing with filter(~Q()) - Expected to fail:")
++    try:
++        qs = Number.objects.annotate(
++            foo=Exists(
++                Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++            )
++        ).filter(foo=True)
++        result = list(qs)
++        print(f"   SUCCESS: filter(~Q()) works, found {len(result)} results")
++    except Exception as e:
++        print(f"   ERROR in filter(~Q()): {e}")
++
++if __name__ == '__main__':
++    setup_test_data()
++    test_exists_exclude()
+diff --git a/test_outerref_simple.py b/test_outerref_simple.py
+new file mode 100644
+index 0000000000..2e58716f2e
+--- /dev/null
++++ b/test_outerref_simple.py
+@@ -0,0 +1,114 @@
++import os
++import sys
++import django
++
++# Add tests directory to path
++sys.path.insert(0, '/testbed/tests')
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++django.setup()
++
++from django.db import models
++from django.db.models import Exists, OuterRef, Q
++
++# Create simple test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Tag(models.Model):
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    tags = models.ManyToManyField(Tag)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Tag)
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Number)
++
++# Create test data
++cat1 = Category.objects.create(id=1, name='cat1')
++cat2 = Category.objects.create(id=2, name='cat2')
++
++tag1 = Tag.objects.create(name='tag1', category=cat1)
++tag2 = Tag.objects.create(name='tag2', category=cat2)
++
++item1 = Item.objects.create(name='item1')
++item1.tags.add(tag1)
++
++item2 = Item.objects.create(name='item2')
++item2.tags.add(tag2)
++
++for i in range(5):
++    Number.objects.create(num=i)
++
++print("Testing OuterRef with exclude() and ~Q()...")
++
++# Test 1: filter() - This should work
++print("\n1. Testing with filter() - Expected to work:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(tags__category_id=OuterRef('pk'))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: filter() works, found {len(result)} results")
++    print(f"   SQL: {qs.query}")
++except Exception as e:
++    print(f"   ERROR in filter(): {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test 2: exclude() - This should fail according to the issue
++print("\n2. Testing with exclude() - Expected to fail:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.exclude(tags__category_id=OuterRef('pk'))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: exclude() works, found {len(result)} results")
++    print(f"   SQL: {qs.query}")
++except Exception as e:
++    print(f"   ERROR in exclude(): {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test 3: filter(~Q()) - This should also fail according to the issue
++print("\n3. Testing with filter(~Q()) - Expected to fail:")
++try:
++    qs = Number.objects.annotate(
++        foo=Exists(
++            Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++        )
++    ).filter(foo=True)
++    result = list(qs)
++    print(f"   SUCCESS: filter(~Q()) works, found {len(result)} results")
++    print(f"   SQL: {qs.query}")
++except Exception as e:
++    print(f"   ERROR in filter(~Q()): {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_split_exclude.py b/test_split_exclude.py
+new file mode 100644
+index 0000000000..34be1a1a19
+--- /dev/null
++++ b/test_split_exclude.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python
++"""
++Test the split_exclude scenario with OuterRef.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q, F
++from django.db.models.sql.query import Query
++from django.db.models.sql.datastructures import MultiJoin
++
++# Patch split_exclude to add debugging
++original_split_exclude = Query.split_exclude
++
++def debug_split_exclude(self, filter_expr, can_reuse, names_with_path):
++    print(f"\nsplit_exclude called:")
++    print(f"  filter_expr: {filter_expr}")
++    print(f"  filter_lhs: {filter_expr[0]}")
++    print(f"  filter_rhs: {filter_expr[1]}")
++    print(f"  filter_rhs type: {type(filter_expr[1])}")
++    print(f"  isinstance(filter_rhs, F): {isinstance(filter_expr[1], F)}")
++    print(f"  isinstance(filter_rhs, OuterRef): {isinstance(filter_expr[1], OuterRef)}")
++    
++    result = original_split_exclude(self, filter_expr, can_reuse, names_with_path)
++    print(f"  result: {result}")
++    return result
++
++Query.split_exclude = debug_split_exclude
++
++# Define test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    authors = models.ManyToManyField(Author)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create test data
++a1 = Author.objects.create(id=1, name='Author 1')
++a2 = Author.objects.create(id=2, name='Author 2')
++
++b1 = Book.objects.create(title='Book 1')
++b1.authors.add(a1)
++
++b2 = Book.objects.create(title='Book 2')
++b2.authors.add(a2)
++
++print("Testing split_exclude with OuterRef...")
++
++# This should trigger split_exclude because authors is a ManyToMany field
++print("\n1. Testing exclude with OuterRef on ManyToMany:")
++try:
++    qs = Author.objects.annotate(
++        has_no_books=Exists(
++            Book.objects.exclude(authors__id=OuterRef('pk'))
++        )
++    )
++    result = list(qs)
++    print(f"   Success: {len(result)} results")
++except Exception as e:
++    print(f"   Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\n2. Testing ~Q with OuterRef on ManyToMany:")
++try:
++    qs = Author.objects.annotate(
++        has_no_books=Exists(
++            Book.objects.filter(~Q(authors__id=OuterRef('pk')))
++        )
++    )
++    result = list(qs)
++    print(f"   Success: {len(result)} results")
++except Exception as e:
++    print(f"   Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's also test with F expressions
++print("\n3. Testing exclude with F on ManyToMany:")
++try:
++    # Create a query that would use F in split_exclude
++    qs = Book.objects.exclude(authors__id=F('id'))
++    result = list(qs)
++    print(f"   Success: {len(result)} results")
++except Exception as e:
++    print(f"   Error: {e}")
+diff --git a/test_trace.py b/test_trace.py
+new file mode 100644
+index 0000000000..e292edac94
+--- /dev/null
++++ b/test_trace.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Minimal Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Exists, OuterRef, Q
++from django.db.models.expressions import F, ResolvedOuterRef
++
++# Patch OuterRef to trace resolution
++original_resolve = OuterRef.resolve_expression
++
++def traced_resolve(self, query=None, allow_joins=True, reuse=None,
++                  summarize=False, for_save=False, simple_col=False):
++    print(f"\nOuterRef.resolve_expression called:")
++    print(f"  self.name: {self.name}")
++    print(f"  query: {query}")
++    print(f"  allow_joins: {allow_joins}")
++    print(f"  simple_col: {simple_col}")
++    import traceback
++    traceback.print_stack(limit=10)
++    result = original_resolve(self, query, allow_joins, reuse, summarize, for_save, simple_col)
++    print(f"  result type: {type(result)}")
++    return result
++
++OuterRef.resolve_expression = traced_resolve
++
++# Define test models
++class Number(models.Model):
++    num = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++class Item(models.Model):
++    name = models.CharField(max_length=100)
++    number = models.ForeignKey(Number, on_delete=models.CASCADE, null=True)
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Number)
++    schema_editor.create_model(Item)
++
++# Create test data
++for i in range(5):
++    num = Number.objects.create(num=i)
++    if i < 2:
++        Item.objects.create(name=f'item{i}', number=num)
++
++print("Testing OuterRef resolution paths...")
++
++# Test 1: filter()
++print("\n=== TEST 1: filter() ===")
++try:
++    qs = Number.objects.annotate(
++        has_item=Exists(Item.objects.filter(number_id=OuterRef('pk')))
++    )
++    result = list(qs)
++    print(f"Success: {len(result)} results")
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test 2: exclude()
++print("\n=== TEST 2: exclude() ===")
++try:
++    qs = Number.objects.annotate(
++        no_item=Exists(Item.objects.exclude(number_id=OuterRef('pk')))
++    )
++    result = list(qs)
++    print(f"Success: {len(result)} results")
++except Exception as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py
+index 668d5e6ad6..c1e3b4b3a8 100644
+--- a/tests/queries/test_qs_combinators.py
++++ b/tests/queries/test_qs_combinators.py
+@@ -1,9 +1,9 @@
+ from django.db import connection
+-from django.db.models import Exists, F, IntegerField, OuterRef, Value
++from django.db.models import Exists, F, IntegerField, OuterRef, Q, Value
+ from django.db.utils import DatabaseError, NotSupportedError
+ from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
+ 
+-from .models import Number, ReservedName
++from .models import Author, ExtraInfo, Item, NamedCategory, Note, Number, ReservedName, Tag
+ 
+ 
+ @skipUnlessDBFeature('supports_select_union')
+@@ -285,3 +285,63 @@ class QuerySetSetOperationTests(TestCase):
+                         msg % (operation, combinator),
+                     ):
+                         getattr(getattr(qs, combinator)(qs), operation)()
++
++    def test_exists_exclude(self):
++        # Create test data
++        from datetime import datetime
++        
++        # Create categories with specific IDs
++        cat1 = NamedCategory.objects.create(id=1, name='cat1')
++        cat2 = NamedCategory.objects.create(id=2, name='cat2')
++        
++        # Create tags
++        tag1 = Tag.objects.create(name='tag1', category=cat1)
++        tag2 = Tag.objects.create(name='tag2', category=cat2)
++        
++        # Create author and note
++        extra = ExtraInfo.objects.create(info='Extra Info')
++        author = Author.objects.create(name='Test Author', num=1, extra=extra)
++        note = Note.objects.create(note='Test Note', misc='misc')
++        
++        # Create items
++        item1 = Item.objects.create(name='item1', created=datetime.now(), creator=author, note=note)
++        item1.tags.add(tag1)
++        
++        item2 = Item.objects.create(name='item2', created=datetime.now(), creator=author, note=note)
++        item2.tags.add(tag2)
++        
++        # filter() - should work
++        try:
++            qs = Number.objects.annotate(
++                foo=Exists(
++                    Item.objects.filter(tags__category_id=OuterRef('pk'))
++                )
++            ).filter(foo=True)
++            list(qs)  # Force evaluation
++            print("filter() works")
++        except ValueError as e:
++            self.fail(f"filter() failed unexpectedly: {e}")
++        
++        # exclude() - should fail according to the issue
++        try:
++            qs = Number.objects.annotate(
++                foo=Exists(
++                    Item.objects.exclude(tags__category_id=OuterRef('pk'))
++                )
++            ).filter(foo=True)
++            result = list(qs)  # Force evaluation
++            print(f"exclude() unexpectedly succeeded with {len(result)} results")
++        except ValueError as e:
++            print(f"exclude() failed as expected: {e}")
++        
++        # filter(~Q()) - should also fail according to the issue
++        try:
++            qs = Number.objects.annotate(
++                foo=Exists(
++                    Item.objects.filter(~Q(tags__category_id=OuterRef('pk')))
++                )
++            ).filter(foo=True)
++            result = list(qs)  # Force evaluation
++            print(f"filter(~Q()) unexpectedly succeeded with {len(result)} results")
++        except ValueError as e:
++            print(f"filter(~Q()) failed as expected: {e}")

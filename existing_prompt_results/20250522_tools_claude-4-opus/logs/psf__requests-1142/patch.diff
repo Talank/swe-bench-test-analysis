@@ -1,0 +1,785 @@
+diff --git a/requests/models.py b/requests/models.py
+index 99260453..ede152bb 100644
+--- a/requests/models.py
++++ b/requests/models.py
+@@ -386,13 +386,31 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+         self.body = body
+ 
+     def prepare_content_length(self, body):
+-        self.headers['Content-Length'] = '0'
+-        if hasattr(body, 'seek') and hasattr(body, 'tell'):
+-            body.seek(0, 2)
+-            self.headers['Content-Length'] = str(body.tell())
+-            body.seek(0, 0)
+-        elif body is not None:
+-            self.headers['Content-Length'] = str(len(body))
++        # Check if body is effectively empty
++        is_empty_body = (
++            body is None or 
++            body == '' or 
++            body == b'' or
++            (hasattr(body, '__len__') and len(body) == 0 and not hasattr(body, 'read'))
++        )
++        
++        if is_empty_body:
++            # For methods that typically don't have a body (GET, HEAD, DELETE, etc.),
++            # don't set Content-Length when body is empty
++            if self.method in ('GET', 'HEAD', 'DELETE', 'OPTIONS'):
++                self.headers.pop('Content-Length', None)
++            else:
++                # For methods that typically have a body (POST, PUT, PATCH),
++                # set Content-Length to 0 when body is empty
++                self.headers['Content-Length'] = '0'
++        else:
++            # Body is not empty, calculate its length
++            if hasattr(body, 'seek') and hasattr(body, 'tell'):
++                body.seek(0, 2)
++                self.headers['Content-Length'] = str(body.tell())
++                body.seek(0, 0)
++            else:
++                self.headers['Content-Length'] = str(len(body))
+ 
+     def prepare_auth(self, auth):
+         """Prepares the given HTTP auth data."""
+@@ -557,7 +575,7 @@ class Response(object):
+                     raise RuntimeError(
+                         'The content for this response was already consumed')
+ 
+-                if self.status_code is 0:
++                if self.status_code == 0:
+                     self._content = None
+                 else:
+                     self._content = bytes().join(self.iter_content(CONTENT_CHUNK_SIZE)) or bytes()
+diff --git a/test_amazon.py b/test_amazon.py
+new file mode 100644
+index 00000000..1b345290
+--- /dev/null
++++ b/test_amazon.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++"""Test that GET requests to amazon.com work without Content-Length header."""
++
++import requests
++
++# Test with our fixed version
++print("Testing GET request preparation (no actual request sent):")
++req = requests.Request('GET', 'http://amazon.com')
++prepared = req.prepare()
++
++print("\nHeaders that would be sent:")
++for header, value in prepared.headers.items():
++    print(f"  {header}: {value}")
++
++if 'Content-Length' in prepared.headers:
++    print("\nWARNING: Content-Length header is present!")
++else:
++    print("\nSUCCESS: No Content-Length header in GET request")
+diff --git a/test_amazon_case.py b/test_amazon_case.py
+new file mode 100644
+index 00000000..b6afa3d5
+--- /dev/null
++++ b/test_amazon_case.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Test the specific amazon.com case mentioned in the problem statement."""
++
++import requests
++
++# Test that GET request to amazon.com would not have Content-Length header
++print("Testing the amazon.com case from the problem statement...")
++print("=" * 60)
++
++# Create a GET request as would be done by requests.get('http://amazon.com')
++req = requests.Request('GET', 'http://amazon.com')
++prepared = req.prepare()
++
++print("Headers that would be sent to amazon.com:")
++for header, value in prepared.headers.items():
++    print(f"  {header}: {value}")
++
++if 'Content-Length' in prepared.headers:
++    print("\n❌ FAIL: Content-Length header is present!")
++    print("This would cause amazon.com to return 503 error")
++else:
++    print("\n✓ SUCCESS: No Content-Length header")
++    print("The request should work correctly with amazon.com")
++
++# Also test with requests.get() simulation
++print("\n\nSimulating requests.get('http://amazon.com'):")
++print("-" * 60)
++
++class MockAdapter(requests.adapters.HTTPAdapter):
++    def send(self, request, **kwargs):
++        print("Headers sent by requests.get():")
++        for header, value in request.headers.items():
++            print(f"  {header}: {value}")
++        
++        if 'Content-Length' in request.headers:
++            print("\n❌ FAIL: Would get 503 error from amazon.com")
++        else:
++            print("\n✓ SUCCESS: Request would work correctly")
++            
++        from requests.models import Response
++        resp = Response()
++        resp.status_code = 200
++        return resp
++
++session = requests.Session()
++session.mount('http://', MockAdapter())
++session.get('http://amazon.com')
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 00000000..c7c9709d
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python
++"""Comprehensive test for Content-Length header behavior."""
++
++import requests
++
++def test_various_requests():
++    """Test Content-Length header behavior in various scenarios."""
++    
++    # Test 1: GET request with no data (should NOT have Content-Length)
++    print("Test 1: GET request with no data")
++    req = requests.Request('GET', 'http://httpbin.org/get')
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 2: POST request with no data (should have Content-Length: 0)
++    print("Test 2: POST request with no data")
++    req = requests.Request('POST', 'http://httpbin.org/post')
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 3: POST request with data (should have Content-Length)
++    print("Test 3: POST request with data")
++    req = requests.Request('POST', 'http://httpbin.org/post', data={'key': 'value'})
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 4: GET request with data (should have Content-Length)
++    print("Test 4: GET request with data (unusual but valid)")
++    req = requests.Request('GET', 'http://httpbin.org/get', data={'key': 'value'})
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 5: PUT request with no data (should have Content-Length: 0)
++    print("Test 5: PUT request with no data")
++    req = requests.Request('PUT', 'http://httpbin.org/put')
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 6: DELETE request with no data (should NOT have Content-Length)
++    print("Test 6: DELETE request with no data")
++    req = requests.Request('DELETE', 'http://httpbin.org/delete')
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++    print()
++    
++    # Test 7: HEAD request with no data (should NOT have Content-Length)
++    print("Test 7: HEAD request with no data")
++    req = requests.Request('HEAD', 'http://httpbin.org/get')
++    prepared = req.prepare()
++    has_cl = 'Content-Length' in prepared.headers
++    print(f"  Has Content-Length: {has_cl}")
++    if has_cl:
++        print(f"  Content-Length value: {prepared.headers['Content-Length']}")
++
++if __name__ == "__main__":
++    test_various_requests()
+diff --git a/test_content_length.py b/test_content_length.py
+new file mode 100644
+index 00000000..07311d60
+--- /dev/null
++++ b/test_content_length.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python
++"""Test script to reproduce the content-length header issue with GET requests."""
++
++import requests
++
++def test_get_content_length():
++    """Test that GET requests don't include content-length header by default."""
++    
++    # Test 1: Using Request object and prepare()
++    req = requests.Request('GET', 'http://httpbin.org/headers')
++    prepared = req.prepare()
++    
++    print("Test 1: Headers in prepared GET request (using Request.prepare()):")
++    for header, value in prepared.headers.items():
++        print(f"  {header}: {value}")
++    
++    # Check if content-length is present
++    if 'content-length' in prepared.headers or 'Content-Length' in prepared.headers:
++        print("\nISSUE: Content-Length header is present in GET request!")
++        print(f"Content-Length value: {prepared.headers.get('content-length', prepared.headers.get('Content-Length'))}")
++    else:
++        print("\nOK: No Content-Length header in GET request")
++    
++    # Test 2: Using requests.get() directly
++    print("\n\nTest 2: Using requests.get() directly")
++    # We'll use a mock adapter to intercept the request
++    from requests.adapters import HTTPAdapter
++    
++    class MockAdapter(HTTPAdapter):
++        def send(self, request, **kwargs):
++            print("Headers sent in actual GET request:")
++            for header, value in request.headers.items():
++                print(f"  {header}: {value}")
++            # Return a mock response
++            from requests.models import Response
++            resp = Response()
++            resp.status_code = 200
++            resp._content = b'{"test": "ok"}'
++            return resp
++    
++    session = requests.Session()
++    session.mount('http://', MockAdapter())
++    session.get('http://httpbin.org/headers')
++
++if __name__ == "__main__":
++    test_get_content_length()
+diff --git a/test_content_length_fix.py b/test_content_length_fix.py
+new file mode 100644
+index 00000000..635f0ba7
+--- /dev/null
++++ b/test_content_length_fix.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python
++"""Test specifically for the Content-Length fix."""
++
++import requests
++from requests.models import PreparedRequest
++
++def test_content_length_behavior():
++    """Test that Content-Length is handled correctly for different HTTP methods."""
++    
++    test_cases = [
++        # (method, data, should_have_content_length, expected_value)
++        ('GET', None, False, None),
++        ('GET', 'data', True, '4'),
++        ('HEAD', None, False, None),
++        ('DELETE', None, False, None),
++        ('OPTIONS', None, False, None),
++        ('POST', None, True, '0'),
++        ('POST', 'data', True, '4'),
++        ('PUT', None, True, '0'),
++        ('PUT', 'data', True, '4'),
++        ('PATCH', None, True, '0'),
++        ('PATCH', 'data', True, '4'),
++    ]
++    
++    all_passed = True
++    
++    for method, data, should_have_cl, expected_value in test_cases:
++        req = requests.Request(method, 'http://example.com', data=data)
++        prepared = req.prepare()
++        
++        has_cl = 'Content-Length' in prepared.headers
++        actual_value = prepared.headers.get('Content-Length')
++        
++        if has_cl != should_have_cl:
++            print(f"FAIL: {method} with data={repr(data)}")
++            print(f"  Expected Content-Length present: {should_have_cl}")
++            print(f"  Actual Content-Length present: {has_cl}")
++            all_passed = False
++        elif has_cl and actual_value != expected_value:
++            print(f"FAIL: {method} with data={repr(data)}")
++            print(f"  Expected Content-Length value: {expected_value}")
++            print(f"  Actual Content-Length value: {actual_value}")
++            all_passed = False
++        else:
++            print(f"PASS: {method} with data={repr(data)}")
++    
++    return all_passed
++
++def test_auth_preserves_content_length_behavior():
++    """Test that auth doesn't break Content-Length behavior."""
++    
++    # Test GET with auth (should still not have Content-Length)
++    req = requests.Request('GET', 'http://example.com', auth=('user', 'pass'))
++    prepared = req.prepare()
++    
++    if 'Content-Length' in prepared.headers:
++        print("FAIL: GET request with auth has Content-Length header")
++        return False
++    else:
++        print("PASS: GET request with auth has no Content-Length header")
++        return True
++
++if __name__ == "__main__":
++    print("Testing Content-Length behavior:")
++    print("=" * 50)
++    test1_passed = test_content_length_behavior()
++    
++    print("\n\nTesting auth interaction:")
++    print("=" * 50)
++    test2_passed = test_auth_preserves_content_length_behavior()
++    
++    if test1_passed and test2_passed:
++        print("\n\nAll tests passed!")
++    else:
++        print("\n\nSome tests failed!")
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 00000000..a72b5b2b
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python
++"""Debug script to understand the body value in GET requests."""
++
++import requests
++import traceback
++
++# Monkey patch to add debug output
++original_prepare_content_length = requests.models.PreparedRequest.prepare_content_length
++original_prepare_auth = requests.models.PreparedRequest.prepare_auth
++
++def debug_prepare_content_length(self, body):
++    print(f"\nDEBUG prepare_content_length called")
++    print(f"  Method: {self.method}")
++    print(f"  Body: {repr(body)}, type: {type(body)}")
++    print(f"  Stack trace:")
++    for line in traceback.format_stack()[:-1]:
++        if '/testbed/' in line:
++            print(f"    {line.strip()}")
++    result = original_prepare_content_length(self, body)
++    print(f"  Headers after prepare_content_length: {dict(self.headers)}")
++    return result
++
++def debug_prepare_auth(self, auth):
++    print(f"\nDEBUG prepare_auth called with auth: {auth}")
++    return original_prepare_auth(self, auth)
++
++requests.models.PreparedRequest.prepare_content_length = debug_prepare_content_length
++requests.models.PreparedRequest.prepare_auth = debug_prepare_auth
++
++# Test without auth
++print("=== Test 1: GET without auth ===")
++req = requests.Request('GET', 'http://httpbin.org/headers')
++prepared = req.prepare()
++
++print("\nFinal headers:")
++for header, value in prepared.headers.items():
++    print(f"  {header}: {value}")
++
++# Test with auth
++print("\n\n=== Test 2: GET with auth ===")
++req = requests.Request('GET', 'http://httpbin.org/headers', auth=('user', 'pass'))
++prepared = req.prepare()
++
++print("\nFinal headers:")
++for header, value in prepared.headers.items():
++    print(f"  {header}: {value}")
+diff --git a/test_debug_empty.py b/test_debug_empty.py
+new file mode 100644
+index 00000000..73ae333b
+--- /dev/null
++++ b/test_debug_empty.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python
++"""Debug empty body handling."""
++
++import requests
++
++# Test values
++body = []
++print(f"body = {repr(body)}")
++print(f"body is None: {body is None}")
++print(f"hasattr(body, '__len__'): {hasattr(body, '__len__')}")
++print(f"len(body): {len(body)}")
++print(f"len(body) == 0: {len(body) == 0}")
++print(f"hasattr(body, 'read'): {hasattr(body, 'read')}")
++
++# Now test the actual request
++req = requests.Request('GET', 'http://example.com', data=None)
++prepared = req.prepare()
++
++print(f"\nPrepared request body: {repr(prepared.body)}")
++print(f"Has Content-Length: {'Content-Length' in prepared.headers}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..e066a6b5
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,59 @@
++#!/usr/bin/env python
++"""Test edge cases for Content-Length handling."""
++
++import requests
++import io
++
++print("Testing edge cases for Content-Length handling")
++print("=" * 60)
++
++test_cases = [
++    # (method, data, description, should_have_cl)
++    ('GET', None, 'GET with data=None', False),
++    ('GET', '', 'GET with empty string', False),
++    ('GET', b'', 'GET with empty bytes', False),
++    ('GET', [], 'GET with empty list', False),
++    ('GET', {}, 'GET with empty dict', False),
++    ('GET', 'data', 'GET with string data', True),
++    ('GET', b'data', 'GET with bytes data', True),
++    ('GET', {'key': 'value'}, 'GET with dict data', True),
++    ('GET', io.BytesIO(b'data'), 'GET with file-like object', True),
++    
++    ('POST', None, 'POST with data=None', True),
++    ('POST', '', 'POST with empty string', True),
++    ('POST', b'', 'POST with empty bytes', True),
++    ('POST', [], 'POST with empty list', True),
++    ('POST', {}, 'POST with empty dict', True),
++    
++    ('HEAD', None, 'HEAD with data=None', False),
++    ('DELETE', None, 'DELETE with data=None', False),
++    ('OPTIONS', None, 'OPTIONS with data=None', False),
++    
++    ('PUT', None, 'PUT with data=None', True),
++    ('PATCH', None, 'PATCH with data=None', True),
++]
++
++all_passed = True
++
++for method, data, description, should_have_cl in test_cases:
++    req = requests.Request(method, 'http://example.com', data=data)
++    prepared = req.prepare()
++    
++    has_cl = 'Content-Length' in prepared.headers
++    
++    if has_cl == should_have_cl:
++        status = "✓ PASS"
++    else:
++        status = "❌ FAIL"
++        all_passed = False
++        
++    print(f"{status}: {description}")
++    if has_cl:
++        print(f"       Content-Length: {prepared.headers['Content-Length']}")
++    else:
++        print(f"       No Content-Length header")
++
++if all_passed:
++    print("\n\nAll edge case tests passed! ✓")
++else:
++    print("\n\nSome tests failed!")
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 00000000..c0eef1df
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python
++"""Final comprehensive test for Content-Length fix."""
++
++import requests
++
++def test_requests_get():
++    """Test that requests.get() doesn't send Content-Length."""
++    
++    class MockAdapter(requests.adapters.HTTPAdapter):
++        def __init__(self):
++            super().__init__()
++            self.last_headers = None
++            
++        def send(self, request, **kwargs):
++            self.last_headers = dict(request.headers)
++            from requests.models import Response
++            resp = Response()
++            resp.status_code = 200
++            resp._content = b'{"test": "ok"}'
++            return resp
++    
++    adapter = MockAdapter()
++    session = requests.Session()
++    session.mount('http://', adapter)
++    
++    # Test 1: Simple GET
++    session.get('http://example.com')
++    assert 'Content-Length' not in adapter.last_headers, "GET request should not have Content-Length"
++    print("✓ Test 1 passed: Simple GET has no Content-Length")
++    
++    # Test 2: GET with params
++    session.get('http://example.com', params={'key': 'value'})
++    assert 'Content-Length' not in adapter.last_headers, "GET with params should not have Content-Length"
++    print("✓ Test 2 passed: GET with params has no Content-Length")
++    
++    # Test 3: POST without data
++    session.post('http://example.com')
++    assert adapter.last_headers.get('Content-Length') == '0', "POST without data should have Content-Length: 0"
++    print("✓ Test 3 passed: POST without data has Content-Length: 0")
++    
++    # Test 4: POST with data
++    session.post('http://example.com', data={'key': 'value'})
++    assert 'Content-Length' in adapter.last_headers, "POST with data should have Content-Length"
++    assert int(adapter.last_headers['Content-Length']) > 0, "POST with data should have Content-Length > 0"
++    print("✓ Test 4 passed: POST with data has Content-Length > 0")
++    
++    # Test 5: GET with explicit empty data (edge case)
++    req = requests.Request('GET', 'http://example.com', data={})
++    prepared = req.prepare()
++    session.send(prepared)
++    assert 'Content-Length' not in adapter.last_headers, "GET with empty data should not have Content-Length"
++    print("✓ Test 5 passed: GET with empty data has no Content-Length")
++
++def test_request_prepare():
++    """Test Request.prepare() behavior."""
++    
++    # Test 1: GET without data
++    req = requests.Request('GET', 'http://example.com')
++    prepared = req.prepare()
++    assert 'Content-Length' not in prepared.headers
++    print("✓ Test 6 passed: Request('GET') has no Content-Length")
++    
++    # Test 2: GET with data  
++    req = requests.Request('GET', 'http://example.com', data='test')
++    prepared = req.prepare()
++    assert prepared.headers.get('Content-Length') == '4'
++    print("✓ Test 7 passed: Request('GET', data='test') has Content-Length: 4")
++    
++    # Test 3: POST without data
++    req = requests.Request('POST', 'http://example.com')
++    prepared = req.prepare()
++    assert prepared.headers.get('Content-Length') == '0'
++    print("✓ Test 8 passed: Request('POST') has Content-Length: 0")
++
++if __name__ == "__main__":
++    print("Testing requests.get() behavior:")
++    print("=" * 50)
++    test_requests_get()
++    
++    print("\n\nTesting Request.prepare() behavior:")
++    print("=" * 50)
++    test_request_prepare()
++    
++    print("\n\nAll tests passed! ✓")
+diff --git a/test_real_world.py b/test_real_world.py
+new file mode 100644
+index 00000000..43a2f1cc
+--- /dev/null
++++ b/test_real_world.py
+@@ -0,0 +1,58 @@
++#!/usr/bin/env python
++"""Test real-world usage patterns."""
++
++import requests
++
++print("Testing real-world usage patterns")
++print("=" * 60)
++
++# Mock adapter to inspect headers
++class InspectAdapter(requests.adapters.HTTPAdapter):
++    def __init__(self):
++        super().__init__()
++        self.last_headers = None
++        
++    def send(self, request, **kwargs):
++        self.last_headers = dict(request.headers)
++        from requests.models import Response
++        resp = Response()
++        resp.status_code = 200
++        resp._content = b'OK'
++        return resp
++
++adapter = InspectAdapter()
++session = requests.Session()
++session.mount('http://', adapter)
++session.mount('https://', adapter)
++
++# Test 1: Normal GET request (most common usage)
++print("1. requests.get('http://example.com')")
++session.get('http://example.com')
++print(f"   Content-Length present: {'Content-Length' in adapter.last_headers}")
++
++# Test 2: GET with params
++print("\n2. requests.get('http://example.com', params={'q': 'test'})")
++session.get('http://example.com', params={'q': 'test'})
++print(f"   Content-Length present: {'Content-Length' in adapter.last_headers}")
++
++# Test 3: POST with data
++print("\n3. requests.post('http://example.com', data={'key': 'value'})")
++session.post('http://example.com', data={'key': 'value'})
++print(f"   Content-Length: {adapter.last_headers.get('Content-Length', 'NOT SET')}")
++
++# Test 4: POST without data
++print("\n4. requests.post('http://example.com')")
++session.post('http://example.com')
++print(f"   Content-Length: {adapter.last_headers.get('Content-Length', 'NOT SET')}")
++
++# Test 5: The amazon.com case
++print("\n5. requests.get('http://amazon.com') - The reported issue")
++session.get('http://amazon.com')
++if 'Content-Length' in adapter.last_headers:
++    print(f"   ❌ FAIL: Content-Length present (would cause 503 error)")
++else:
++    print(f"   ✓ SUCCESS: No Content-Length header")
++
++print("\n" + "=" * 60)
++print("Summary: The fix successfully prevents Content-Length headers")
++print("from being added to GET requests, solving the amazon.com issue.")
+diff --git a/test_requests_get.py b/test_requests_get.py
+new file mode 100644
+index 00000000..d6e06e3d
+--- /dev/null
++++ b/test_requests_get.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++"""Test the actual requests.get function."""
++
++import requests
++
++# Mock adapter to intercept
++class MockAdapter(requests.adapters.HTTPAdapter):
++    def send(self, request, **kwargs):
++        print("Headers sent by requests.get():")
++        for header, value in request.headers.items():
++            print(f"  {header}: {value}")
++        
++        # Return a mock response
++        from requests.models import Response
++        resp = Response()
++        resp.status_code = 200
++        resp._content = b'{"test": "ok"}'
++        resp.headers['Content-Type'] = 'application/json'
++        return resp
++
++# Test requests.get()
++session = requests.Session()
++session.mount('http://', MockAdapter())
++session.mount('https://', MockAdapter())
++
++print("Test 1: Simple GET request")
++session.get('http://example.com')
++
++print("\n\nTest 2: GET request with params")
++session.get('http://example.com', params={'key': 'value'})
++
++print("\n\nTest 3: Using requests.get directly (not session)")
++requests.get = lambda url, **kwargs: session.get(url, **kwargs)
++requests.get('http://example.com')
+diff --git a/test_single_case.py b/test_single_case.py
+new file mode 100644
+index 00000000..5cbe5aa8
+--- /dev/null
++++ b/test_single_case.py
+@@ -0,0 +1,13 @@
++#!/usr/bin/env python
++"""Test a single case to debug."""
++
++import requests
++
++# Test GET with None data
++req = requests.Request('GET', 'http://example.com', data=None)
++prepared = req.prepare()
++
++print("Method:", prepared.method)
++print("Body:", repr(prepared.body))
++print("Headers:", dict(prepared.headers))
++print("Has Content-Length:", 'Content-Length' in prepared.headers)
+diff --git a/test_trace_body.py b/test_trace_body.py
+new file mode 100644
+index 00000000..16caa830
+--- /dev/null
++++ b/test_trace_body.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python
++"""Trace body transformation."""
++
++import requests
++
++# Monkey patch prepare_body to trace
++original_prepare_body = requests.models.PreparedRequest.prepare_body
++
++def trace_prepare_body(self, data, files):
++    print(f"prepare_body called with data={repr(data)}, files={repr(files)}")
++    result = original_prepare_body(self, data, files)
++    print(f"After prepare_body: body={repr(self.body)}")
++    return result
++
++requests.models.PreparedRequest.prepare_body = trace_prepare_body
++
++# Test
++req = requests.Request('GET', 'http://example.com', data=None)
++prepared = req.prepare()
++
++print("\nFinal state:")
++print(f"Body: {repr(prepared.body)}")
++print(f"Headers: {dict(prepared.headers)}")
+diff --git a/test_trace_full.py b/test_trace_full.py
+new file mode 100644
+index 00000000..881f28d5
+--- /dev/null
++++ b/test_trace_full.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Full trace of body transformation."""
++
++import requests
++
++# Monkey patch prepare_body to trace
++original_prepare_body = requests.models.PreparedRequest.prepare_body
++original_prepare_content_length = requests.models.PreparedRequest.prepare_content_length
++original_encode_params = requests.models.RequestEncodingMixin._encode_params
++
++def trace_prepare_body(self, data, files):
++    print(f"prepare_body called with data={repr(data)}, files={repr(files)}")
++    print(f"  bool(data) = {bool(data)}")
++    result = original_prepare_body(self, data, files)
++    print(f"After prepare_body: self.body={repr(self.body)}")
++    return result
++
++def trace_prepare_content_length(self, body):
++    print(f"prepare_content_length called with body={repr(body)}")
++    print(f"  self.method = {self.method}")
++    print(f"  body is None: {body is None}")
++    print(f"  body == '': {body == ''}")
++    print(f"  body == b'': {body == b''}")
++    print(f"  hasattr(body, '__len__'): {hasattr(body, '__len__')}")
++    if hasattr(body, '__len__'):
++        print(f"  len(body): {len(body)}")
++    print(f"  hasattr(body, 'read'): {hasattr(body, 'read')}")
++    result = original_prepare_content_length(self, body)
++    print(f"After prepare_content_length: Content-Length={self.headers.get('Content-Length', 'NOT SET')}")
++    return result
++
++def trace_encode_params(data):
++    print(f"_encode_params called with data={repr(data)}")
++    result = original_encode_params(data)
++    print(f"_encode_params returns: {repr(result)}")
++    return result
++
++requests.models.PreparedRequest.prepare_body = trace_prepare_body
++requests.models.PreparedRequest.prepare_content_length = trace_prepare_content_length
++requests.models.RequestEncodingMixin._encode_params = staticmethod(trace_encode_params)
++
++# Test
++req = requests.Request('GET', 'http://example.com', data=None)
++prepared = req.prepare()
++
++print(f"\nFinal body: {repr(prepared.body)}")
++print(f"Final headers: {dict(prepared.headers)}")

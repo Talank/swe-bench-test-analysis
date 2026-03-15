@@ -1,0 +1,181 @@
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..be99b1b5
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,44 @@
++import numpy as np
++import xarray as xr
++
++# Test with multi-dimensional arrays
++print("Test 1: Multi-dimensional arrays with boolean weights")
++da = xr.DataArray([[1., 2.], [3., 4.]], dims=['x', 'y'])
++weights = xr.DataArray([[True, False], [True, True]], dims=['x', 'y'])
++result = da.weighted(weights).mean()
++print(f"Result: {result.values}")
++print(f"Expected: {(1 + 3 + 4) / 3} = 2.666...")
++
++# Test with different dimensions
++print("\nTest 2: Weighted mean along specific dimension")
++result_x = da.weighted(weights).mean(dim='x')
++print(f"Result along x: {result_x.values}")
++print(f"Expected: [2.0, 4.0]")
++
++result_y = da.weighted(weights).mean(dim='y')
++print(f"Result along y: {result_y.values}")
++print(f"Expected: [1.0, 3.5]")
++
++# Test with numpy bool_ dtype explicitly
++print("\nTest 3: Using np.bool_ dtype")
++weights_bool_ = xr.DataArray(np.array([True, True, False], dtype=np.bool_))
++da_1d = xr.DataArray([1., 1., 1.])
++result = da_1d.weighted(weights_bool_).mean()
++print(f"Result: {result.values}")
++print(f"Expected: 1.0")
++
++# Test interaction with skipna
++print("\nTest 4: Boolean weights with skipna")
++da_nan = xr.DataArray([1., np.nan, 3.])
++weights_bool = xr.DataArray([True, True, True])
++result_skipna_true = da_nan.weighted(weights_bool).mean(skipna=True)
++result_skipna_false = da_nan.weighted(weights_bool).mean(skipna=False)
++print(f"Result with skipna=True: {result_skipna_true.values}")
++print(f"Result with skipna=False: {result_skipna_false.values}")
++print(f"Expected: 2.0 and nan")
++
++# Test sum_of_weights behavior
++print("\nTest 5: Sum of weights with boolean and NaN data")
++sum_weights = da_nan.weighted(weights_bool).sum_of_weights()
++print(f"Sum of weights: {sum_weights.values}")
++print(f"Expected: 2.0 (excluding NaN position)")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 00000000..668638b9
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,33 @@
++import numpy as np
++import xarray as xr
++
++# Test case from the issue
++dta = xr.DataArray([1., 1., 1.])
++wgt = xr.DataArray(np.array([1, 1, 0], dtype=np.bool))
++
++result = dta.weighted(wgt).mean()
++print(f"Result with boolean weights: {result.values}")
++print(f"Expected: 1.0")
++
++# Let's also check the sum of weights
++sum_of_weights = dta.weighted(wgt).sum_of_weights()
++print(f"\nSum of weights: {sum_of_weights.values}")
++print(f"Expected sum of weights: 2")
++
++# Test with integer weights for comparison
++wgt_int = xr.DataArray(np.array([1, 1, 0], dtype=np.int))
++result_int = dta.weighted(wgt_int).mean()
++print(f"\nResult with integer weights: {result_int.values}")
++
++# Let's trace through the issue
++mask = dta.notnull()
++print(f"\nMask: {mask.values}")
++print(f"Weights: {wgt.values}")
++
++# The problem: dot product of two boolean arrays
++dot_result = xr.dot(mask, wgt)
++print(f"\nDot product of boolean arrays: {dot_result.values} (type: {type(dot_result.values)})")
++
++# What we need: convert to numeric
++dot_result_fixed = xr.dot(mask, wgt * 1)
++print(f"Dot product with conversion: {dot_result_fixed.values} (type: {type(dot_result_fixed.values)})")
+diff --git a/test_performance.py b/test_performance.py
+new file mode 100644
+index 00000000..427731b3
+--- /dev/null
++++ b/test_performance.py
+@@ -0,0 +1,26 @@
++import numpy as np
++import xarray as xr
++
++# Test that non-boolean weights are not converted
++da = xr.DataArray([1., 2., 3.])
++weights_float = xr.DataArray([1.0, 2.0, 3.0])
++weights_int = xr.DataArray([1, 2, 3])
++
++# Create a weighted object and check that weights are not modified
++weighted_float = da.weighted(weights_float)
++weighted_int = da.weighted(weights_int)
++
++# Access internal weights through _sum_of_weights
++# The weights should remain unchanged for non-boolean types
++print("Testing that non-boolean weights are not converted:")
++print(f"Float weights dtype: {weights_float.dtype}")
++print(f"Int weights dtype: {weights_int.dtype}")
++
++# Test the results are correct
++result_float = weighted_float.mean()
++result_int = weighted_int.mean()
++expected = (1*1 + 2*2 + 3*3) / (1 + 2 + 3)
++
++print(f"\nFloat weights result: {result_float.values}")
++print(f"Int weights result: {result_int.values}")
++print(f"Expected: {expected}")
+diff --git a/xarray/core/weighted.py b/xarray/core/weighted.py
+index 996d2e4c..ba8bcc2f 100644
+--- a/xarray/core/weighted.py
++++ b/xarray/core/weighted.py
+@@ -142,7 +142,13 @@ class Weighted:
+         # we need to mask data values that are nan; else the weights are wrong
+         mask = da.notnull()
+ 
+-        sum_of_weights = self._reduce(mask, self.weights, dim=dim, skipna=False)
++        # Convert boolean weights to numeric to ensure correct dot product
++        # When both mask and weights are boolean, dot returns boolean result
++        weights = self.weights
++        if weights.dtype == bool:
++            weights = weights.astype(int)
++
++        sum_of_weights = self._reduce(mask, weights, dim=dim, skipna=False)
+ 
+         # 0-weights are not valid
+         valid_weights = sum_of_weights != 0.0
+diff --git a/xarray/tests/test_weighted.py b/xarray/tests/test_weighted.py
+index 24531215..0bcde9fb 100644
+--- a/xarray/tests/test_weighted.py
++++ b/xarray/tests/test_weighted.py
+@@ -139,6 +139,36 @@ def test_weighted_mean_no_nan(weights, expected):
+     assert_equal(expected, result)
+ 
+ 
++def test_weighted_mean_boolean():
++    # Test case for boolean weights
++    da = DataArray([1., 1., 1.])
++    weights = DataArray(np.array([True, True, False]))
++    expected = DataArray(1.0)
++    
++    result = da.weighted(weights).mean()
++    
++    assert_equal(expected, result)
++    
++    # Test sum_of_weights with boolean
++    sum_weights = da.weighted(weights).sum_of_weights()
++    assert_equal(sum_weights, DataArray(2.0))
++    
++    # Test weighted sum with boolean
++    weighted_sum = da.weighted(weights).sum()
++    assert_equal(weighted_sum, DataArray(2.0))
++    
++    # Test with all False weights
++    weights_all_false = DataArray(np.array([False, False, False]))
++    result_all_false = da.weighted(weights_all_false).mean()
++    assert np.isnan(result_all_false.values)
++    
++    # Test with NaN in data
++    da_with_nan = DataArray([1., np.nan, 1.])
++    weights_bool = DataArray(np.array([True, True, True]))
++    result_with_nan = da_with_nan.weighted(weights_bool).mean()
++    assert_equal(result_with_nan, DataArray(1.0))
++
++
+ @pytest.mark.parametrize(
+     ("weights", "expected"), (([4, 6], 2.0), ([1, 0], np.nan), ([0, 0], np.nan))
+ )

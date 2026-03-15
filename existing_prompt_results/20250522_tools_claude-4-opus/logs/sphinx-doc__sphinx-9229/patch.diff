@@ -1,0 +1,1803 @@
+diff --git a/sphinx/pycode/__init__.py b/sphinx/pycode/__init__.py
+index 8e79385e2..c8d77b924 100644
+--- a/sphinx/pycode/__init__.py
++++ b/sphinx/pycode/__init__.py
+@@ -91,17 +91,42 @@ class ModuleAnalyzer:
+     @classmethod
+     def for_file(cls, filename: str, modname: str) -> "ModuleAnalyzer":
+         if ('file', filename) in cls.cache:
+-            return cls.cache['file', filename]
+-        try:
+-            with tokenize.open(filename) as f:
+-                obj = cls(f, modname, filename)
+-                cls.cache['file', filename] = obj
+-        except Exception as err:
+-            if '.egg' + path.sep in filename:
+-                obj = cls.cache['file', filename] = cls.for_egg(filename, modname)
++            # Check if the file has been modified since it was cached
++            cached_obj = cls.cache['file', filename]
++            if hasattr(cached_obj, '_mtime'):
++                try:
++                    current_mtime = path.getmtime(filename)
++                    if current_mtime != cached_obj._mtime:
++                        # File has been modified, remove from cache
++                        del cls.cache['file', filename]
++                        # Also remove from module cache if present
++                        if ('module', modname) in cls.cache:
++                            del cls.cache['module', modname]
++                except OSError:
++                    # If we can't get mtime, invalidate cache to be safe
++                    del cls.cache['file', filename]
++                    if ('module', modname) in cls.cache:
++                        del cls.cache['module', modname]
+             else:
+-                raise PycodeError('error opening %r' % filename, err) from err
+-        return obj
++                # Old cache entry without mtime, use as is
++                return cached_obj
++        
++        if ('file', filename) not in cls.cache:
++            try:
++                with tokenize.open(filename) as f:
++                    obj = cls(f, modname, filename)
++                    # Store the file modification time
++                    try:
++                        obj._mtime = path.getmtime(filename)
++                    except OSError:
++                        obj._mtime = None
++                    cls.cache['file', filename] = obj
++            except Exception as err:
++                if '.egg' + path.sep in filename:
++                    obj = cls.cache['file', filename] = cls.for_egg(filename, modname)
++                else:
++                    raise PycodeError('error opening %r' % filename, err) from err
++        return cls.cache['file', filename]
+ 
+     @classmethod
+     def for_egg(cls, filename: str, modname: str) -> "ModuleAnalyzer":
+@@ -120,19 +145,44 @@ class ModuleAnalyzer:
+             entry = cls.cache['module', modname]
+             if isinstance(entry, PycodeError):
+                 raise entry
+-            return entry
++            
++            # Check if the source file has been modified
++            if hasattr(entry, 'srcname') and entry.srcname and hasattr(entry, '_mtime'):
++                try:
++                    current_mtime = path.getmtime(entry.srcname)
++                    if current_mtime != entry._mtime:
++                        # File has been modified, remove from cache
++                        del cls.cache['module', modname]
++                        # Also remove from file cache if present
++                        if ('file', entry.srcname) in cls.cache:
++                            del cls.cache['file', entry.srcname]
++                except OSError:
++                    # If we can't get mtime, invalidate cache to be safe
++                    del cls.cache['module', modname]
++                    if hasattr(entry, 'srcname') and ('file', entry.srcname) in cls.cache:
++                        del cls.cache['file', entry.srcname]
++            else:
++                # No mtime check possible, return cached entry
++                return entry
+ 
+-        try:
+-            filename, source = cls.get_module_source(modname)
+-            if source is not None:
+-                obj = cls.for_string(source, modname, filename or '<string>')
+-            elif filename is not None:
+-                obj = cls.for_file(filename, modname)
+-        except PycodeError as err:
+-            cls.cache['module', modname] = err
+-            raise
+-        cls.cache['module', modname] = obj
+-        return obj
++        if ('module', modname) not in cls.cache:
++            try:
++                filename, source = cls.get_module_source(modname)
++                if source is not None:
++                    obj = cls.for_string(source, modname, filename or '<string>')
++                elif filename is not None:
++                    obj = cls.for_file(filename, modname)
++                # Store modification time if we have a filename
++                if filename and hasattr(obj, 'srcname'):
++                    try:
++                        obj._mtime = path.getmtime(obj.srcname)
++                    except OSError:
++                        obj._mtime = None
++            except PycodeError as err:
++                cls.cache['module', modname] = err
++                raise
++            cls.cache['module', modname] = obj
++        return cls.cache['module', modname]
+ 
+     def __init__(self, source: IO, modname: str, srcname: str) -> None:
+         self.modname = modname  # name of the module
+diff --git a/test_alias_doc.py b/test_alias_doc.py
+new file mode 100644
+index 000000000..b0af05a1d
+--- /dev/null
++++ b/test_alias_doc.py
+@@ -0,0 +1,69 @@
++"""Test to understand type alias documentation behavior."""
++import sys
++import os
++sys.path.insert(0, os.path.abspath('.'))
++
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++from sphinx.util import inspect
++from sphinx.ext.autodoc import DataDocumenter, ModuleDocumenter
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from docutils.statemachine import StringList
++
++# Test type aliases
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++
++# Check if these are generic aliases
++print("ScaffoldOpts is generic alias:", inspect.isgenericalias(ScaffoldOpts))
++print("FileContents is generic alias:", inspect.isgenericalias(FileContents))
++print("FileOp is generic alias:", inspect.isgenericalias(FileOp))
++
++# Check docstrings
++print("\nScaffoldOpts.__doc__:", ScaffoldOpts.__doc__)
++print("\nFileContents.__doc__:", FileContents.__doc__)
++print("\nFileOp.__doc__:", FileOp.__doc__)
++
++# Check types
++print("\nType of ScaffoldOpts:", type(ScaffoldOpts))
++print("Type of FileContents:", type(FileContents))
++print("Type of FileOp:", type(FileOp))
++
++# Check if they have __module__
++print("\nScaffoldOpts.__module__:", getattr(ScaffoldOpts, '__module__', 'NO MODULE'))
++print("FileContents.__module__:", getattr(FileContents, '__module__', 'NO MODULE'))
++print("FileOp.__module__:", getattr(FileOp, '__module__', 'NO MODULE'))
+diff --git a/test_build_scenarios.py b/test_build_scenarios.py
+new file mode 100644
+index 000000000..76c0a1638
+--- /dev/null
++++ b/test_build_scenarios.py
+@@ -0,0 +1,135 @@
++"""Test different build scenarios to see if docstrings are lost."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++def test_scenario(scenario_name, build_twice=False, clear_cache=False):
++    print(f"\n{'='*60}")
++    print(f"Testing scenario: {scenario_name}")
++    print('='*60)
++    
++    # Create a test directory structure
++    test_dir = tempfile.mkdtemp()
++    os.chdir(test_dir)
++    
++    # Create the test module
++    with open('file.py', 'w') as f:
++        f.write('''from typing import Any, Dict
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options."""
++''')
++    
++    # Create conf.py
++    with open('conf.py', 'w') as f:
++        f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++extensions = ['sphinx.ext.autodoc']
++''')
++    
++    # Create index.rst
++    with open('index.rst', 'w') as f:
++        f.write('.. autodata:: file.ScaffoldOpts')
++    
++    if clear_cache:
++        # Clear the module analyzer cache
++        from sphinx.pycode import ModuleAnalyzer
++        ModuleAnalyzer.cache.clear()
++    
++    # Build the documentation
++    from sphinx.cmd.build import build_main
++    
++    if build_twice:
++        # First build
++        print("First build...")
++        result = build_main(['-b', 'text', '.', '_build'])
++        
++        # Touch the file to trigger rebuild
++        import time
++        time.sleep(0.01)  # Ensure different mtime
++        Path('file.py').touch()
++        
++        # Second build without cleaning
++        print("\nSecond build...")
++        result = build_main(['-b', 'text', '.', '_build'])
++    else:
++        result = build_main(['-b', 'text', '.', '_build'])
++    
++    # Check the output
++    output_file = Path('_build/index.txt')
++    if output_file.exists():
++        with open(output_file, 'r') as f:
++            content = f.read()
++            has_docstring = "Dictionary with PyScaffold" in content
++            has_alias_of = "alias of" in content
++            
++            print(f"\nResult:")
++            print(f"  Has docstring: {has_docstring}")
++            print(f"  Has 'alias of': {has_alias_of}")
++            
++            if not has_docstring and has_alias_of:
++                print("  ❌ ISSUE REPRODUCED: Only 'alias of' without docstring!")
++                print("\nFull content:")
++                print(content)
++    
++    # Cleanup
++    os.chdir('..')
++    shutil.rmtree(test_dir)
++
++# Test different scenarios
++test_scenario("Normal build")
++test_scenario("Build twice (incremental)", build_twice=True)
++test_scenario("Clear cache before build", clear_cache=True)
++
++# Test with module already imported
++print(f"\n{'='*60}")
++print("Testing with pre-imported module")
++print('='*60)
++
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create and import the module first
++with open('preimported.py', 'w') as f:
++    f.write('''from typing import Any, Dict
++TestAlias = Dict[str, Any]
++"""This is a test alias."""
++''')
++
++sys.path.insert(0, os.getcwd())
++import preimported  # Import it
++
++# Now document it
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++extensions = ['sphinx.ext.autodoc']
++''')
++
++with open('index.rst', 'w') as f:
++    f.write('.. autodata:: preimported.TestAlias')
++
++from sphinx.cmd.build import build_main
++result = build_main(['-b', 'text', '.', '_build'])
++
++output_file = Path('_build/index.txt')
++if output_file.exists():
++    with open(output_file, 'r') as f:
++        content = f.read()
++        has_docstring = "This is a test alias" in content
++        has_alias_of = "alias of" in content
++        
++        print(f"\nResult:")
++        print(f"  Has docstring: {has_docstring}")
++        print(f"  Has 'alias of': {has_alias_of}")
++        
++        if not has_docstring and has_alias_of:
++            print("  ❌ ISSUE REPRODUCED: Only 'alias of' without docstring!")
++
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_cache_debug.py b/test_cache_debug.py
+new file mode 100644
+index 000000000..dbdd1badc
+--- /dev/null
++++ b/test_cache_debug.py
+@@ -0,0 +1,83 @@
++"""Debug the cache issue."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create the test module
++with open('file.py', 'w') as f:
++    f.write('''from typing import Any, Dict
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options."""
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst
++with open('index.rst', 'w') as f:
++    f.write('.. autodata:: file.ScaffoldOpts')
++
++# Check the cache before and after builds
++from sphinx.pycode import ModuleAnalyzer
++
++print("Initial cache state:")
++print(f"  Cache keys: {list(ModuleAnalyzer.cache.keys())}")
++
++# First build
++from sphinx.cmd.build import build_main
++print("\nFirst build...")
++result = build_main(['-b', 'text', '.', '_build'])
++
++print("\nCache after first build:")
++print(f"  Cache keys: {list(ModuleAnalyzer.cache.keys())}")
++for key in ModuleAnalyzer.cache:
++    if key[0] == 'module' and key[1] == 'file':
++        analyzer = ModuleAnalyzer.cache[key]
++        print(f"  Module 'file' analyzer: {analyzer}")
++        print(f"    attr_docs: {analyzer.attr_docs if hasattr(analyzer, 'attr_docs') else 'Not analyzed'}")
++        if hasattr(analyzer, '_mtime'):
++            print(f"    _mtime: {analyzer._mtime}")
++
++# Modify the file slightly (add a space)
++with open('file.py', 'a') as f:
++    f.write(' ')
++
++print("\nModified file.py")
++
++# Second build
++print("\nSecond build...")
++result = build_main(['-b', 'text', '.', '_build'])
++
++print("\nCache after second build:")
++print(f"  Cache keys: {list(ModuleAnalyzer.cache.keys())}")
++for key in ModuleAnalyzer.cache:
++    if key[0] == 'module' and key[1] == 'file':
++        analyzer = ModuleAnalyzer.cache[key]
++        print(f"  Module 'file' analyzer: {analyzer}")
++        print(f"    attr_docs: {analyzer.attr_docs if hasattr(analyzer, 'attr_docs') else 'Not analyzed'}")
++        if hasattr(analyzer, '_mtime'):
++            print(f"    _mtime: {analyzer._mtime}")
++
++# Check the output
++output_file = Path('_build/index.txt')
++if output_file.exists():
++    with open(output_file, 'r') as f:
++        content = f.read()
++        print(f"\nFinal output:")
++        print(content)
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_cache_invalidation.py b/test_cache_invalidation.py
+new file mode 100644
+index 000000000..1a81a058a
+--- /dev/null
++++ b/test_cache_invalidation.py
+@@ -0,0 +1,80 @@
++"""Test that cache invalidation works correctly."""
++import os
++import tempfile
++import time
++from sphinx.pycode import ModuleAnalyzer
++
++# Create a temporary file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write('''# Initial version
++x = 1
++''')
++    temp_file = f.name
++
++try:
++    # First analysis
++    analyzer1 = ModuleAnalyzer.for_file(temp_file, 'test_module')
++    analyzer1.analyze()
++    print("First analysis:")
++    print(f"  attr_docs: {analyzer1.attr_docs}")
++    print(f"  Has _mtime: {hasattr(analyzer1, '_mtime')}")
++    if hasattr(analyzer1, '_mtime'):
++        print(f"  _mtime: {analyzer1._mtime}")
++    
++    # Check cache
++    print("\nCache after first analysis:")
++    print(f"  Keys: {[k for k in ModuleAnalyzer.cache.keys() if 'test_module' in str(k)]}")
++    
++    # Wait a bit to ensure different mtime
++    time.sleep(0.1)
++    
++    # Modify the file
++    with open(temp_file, 'w') as f:
++        f.write('''# Modified version
++x = 1
++"""This is x."""
++''')
++    
++    # Second analysis
++    analyzer2 = ModuleAnalyzer.for_file(temp_file, 'test_module')
++    analyzer2.analyze()
++    print("\nSecond analysis (after modification):")
++    print(f"  attr_docs: {analyzer2.attr_docs}")
++    print(f"  Same object as first? {analyzer1 is analyzer2}")
++    print(f"  Has _mtime: {hasattr(analyzer2, '_mtime')}")
++    if hasattr(analyzer2, '_mtime'):
++        print(f"  _mtime: {analyzer2._mtime}")
++        if hasattr(analyzer1, '_mtime'):
++            print(f"  _mtime changed? {analyzer2._mtime != analyzer1._mtime}")
++    
++    # Test for_module too
++    print("\n\nTesting for_module:")
++    
++    # Clear cache
++    ModuleAnalyzer.cache.clear()
++    
++    # First analysis via module
++    analyzer3 = ModuleAnalyzer.for_module('test_module')
++    analyzer3.analyze()
++    print("First module analysis:")
++    print(f"  attr_docs: {analyzer3.attr_docs}")
++    
++    # Modify again
++    time.sleep(0.1)
++    with open(temp_file, 'w') as f:
++        f.write('''# Modified again
++x = 1
++"""This is x modified."""
++y = 2
++"""This is y."""
++''')
++    
++    # Second analysis via module
++    analyzer4 = ModuleAnalyzer.for_module('test_module')
++    analyzer4.analyze()
++    print("\nSecond module analysis (after modification):")
++    print(f"  attr_docs: {analyzer4.attr_docs}")
++    print(f"  Same object as first? {analyzer3 is analyzer4}")
++    
++finally:
++    os.unlink(temp_file)
+diff --git a/test_comment_syntax.py b/test_comment_syntax.py
+new file mode 100644
+index 000000000..db8609131
+--- /dev/null
++++ b/test_comment_syntax.py
+@@ -0,0 +1,35 @@
++"""Test different comment syntaxes."""
++from sphinx.pycode import ModuleAnalyzer
++import tempfile
++import os
++
++# Test with #: comment syntax
++test_code1 = '''from typing import List
++
++#: A list of int
++T = List[int]
++'''
++
++# Test with multiline docstring
++test_code2 = '''from typing import List
++
++T = List[int]
++"""A list of int"""
++'''
++
++for i, code in enumerate([test_code1, test_code2]):
++    print(f"\nTest {i+1}:")
++    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++        f.write(code)
++        temp_file = f.name
++    
++    try:
++        analyzer = ModuleAnalyzer.for_file(temp_file, f'test_module{i}')
++        analyzer.analyze()
++        
++        print("Found attribute docs:")
++        for key, value in analyzer.attr_docs.items():
++            print(f"  {key}: {value}")
++            
++    finally:
++        os.unlink(temp_file)
+diff --git a/test_debug_issue.py b/test_debug_issue.py
+new file mode 100644
+index 000000000..54cdb0afa
+--- /dev/null
++++ b/test_debug_issue.py
+@@ -0,0 +1,90 @@
++"""Debug the issue to understand when docstrings are shown vs not shown."""
++from sphinx.pycode import ModuleAnalyzer
++from sphinx.ext.autodoc import DataDocumenter, ModuleDocumenter
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++from docutils.statemachine import StringList
++import tempfile
++import os
++
++# Create test file
++test_code = '''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++'''
++
++# Write to a temporary file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write(test_code)
++    temp_file = f.name
++
++try:
++    # Analyze the module
++    analyzer = ModuleAnalyzer.for_file(temp_file, 'test_module')
++    analyzer.analyze()
++    
++    print("Module analyzer found these docs:")
++    for key, value in analyzer.attr_docs.items():
++        print(f"  {key}: {len(value)} lines")
++        
++    # Now let's check what each type alias object looks like
++    import sys
++    sys.path.insert(0, os.path.dirname(temp_file))
++    
++    # Import the module
++    import importlib.util
++    spec = importlib.util.spec_from_file_location("test_module", temp_file)
++    test_module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(test_module)
++    
++    # Check the objects
++    from sphinx.util import inspect
++    
++    print("\nType alias properties:")
++    for name in ['ScaffoldOpts', 'FileContents', 'FileOp']:
++        obj = getattr(test_module, name)
++        print(f"\n{name}:")
++        print(f"  Type: {type(obj)}")
++        print(f"  Is generic alias: {inspect.isgenericalias(obj)}")
++        print(f"  Has __doc__: {hasattr(obj, '__doc__')}")
++        print(f"  __doc__ value: {getattr(obj, '__doc__', 'N/A')}")
++        
++finally:
++    os.unlink(temp_file)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..a5bc06aed
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,68 @@
++"""Test edge cases with docstring parsing."""
++from sphinx.pycode.parser import VariableCommentPicker
++import ast
++
++# Test different docstring formats
++test_cases = [
++    # Case 1: Normal multiline docstring
++    '''
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options."""
++''',
++    
++    # Case 2: Docstring with blank line before
++    '''
++ScaffoldOpts = Dict[str, Any]
++
++"""Dictionary with PyScaffold's options."""
++''',
++    
++    # Case 3: Single line docstring
++    '''
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options."""''',
++    
++    # Case 4: Comment between assignment and docstring
++    '''
++ScaffoldOpts = Dict[str, Any]
++# This is a comment
++"""Dictionary with PyScaffold's options."""
++''',
++    
++    # Case 5: Multiple assignments
++    '''
++ScaffoldOpts = FileOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options."""
++'''
++]
++
++for i, code in enumerate(test_cases):
++    print(f"\nTest case {i+1}:")
++    print("Code:", repr(code.strip()))
++    
++    try:
++        tree = ast.parse(code)
++        picker = VariableCommentPicker(code.splitlines(True), 'utf-8')
++        picker.visit(tree)
++        
++        if picker.comments:
++            print("Comments found:", picker.comments)
++        else:
++            print("No comments found!")
++            
++        # Check AST structure
++        nodes = list(ast.walk(tree))
++        assign_node = None
++        expr_node = None
++        
++        for node in nodes:
++            if isinstance(node, ast.Assign):
++                assign_node = node
++            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Str):
++                expr_node = node
++                
++        if assign_node and expr_node:
++            print(f"Assignment line: {assign_node.lineno}, Expr line: {expr_node.lineno}")
++        
++    except Exception as e:
++        print(f"Error: {e}")
+diff --git a/test_exact_scenario.py b/test_exact_scenario.py
+new file mode 100644
+index 000000000..0db7fbae1
+--- /dev/null
++++ b/test_exact_scenario.py
+@@ -0,0 +1,132 @@
++"""Test the exact scenario from the problem statement."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create the exact test module from the problem statement
++with open('file.py', 'w') as f:
++    f.write('''# file.py
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst using the exact approach from the problem statement
++with open('index.rst', 'w') as f:
++    f.write('''file
++====
++
++.. toctree::
++   :maxdepth: 2
++   
++   api/file
++
++''')
++
++# Create api directory
++os.makedirs('api', exist_ok=True)
++
++# Run sphinx-apidoc as mentioned in the problem statement
++from sphinx.ext.apidoc import main as apidoc_main
++apidoc_main(['-f', '-o', 'api', '.'])
++
++# Build the documentation
++from sphinx.cmd.build import build_main
++result = build_main(['-b', 'html', '.', '_build/html'])
++
++# Check the generated HTML
++html_file = Path('_build/html/api/file.html')
++if html_file.exists():
++    with open(html_file, 'r') as f:
++        content = f.read()
++        
++        # Check for the presence of docstrings vs "alias of"
++        import re
++        
++        # Remove HTML tags for easier analysis
++        text_content = re.sub('<[^<]+?>', '', content)
++        
++        print("Checking generated HTML content...")
++        
++        # Check each type alias
++        for name in ['ScaffoldOpts', 'FileContents', 'FileOp']:
++            # Find the section for this type alias
++            pattern = rf'{name}.*?(?=(?:class|data|$))'
++            match = re.search(pattern, text_content, re.DOTALL)
++            if match:
++                section = match.group(0)
++                has_docstring = any([
++                    "Dictionary with PyScaffold" in section and name == 'ScaffoldOpts',
++                    "When the file content" in section and name == 'FileContents', 
++                    "Signature of functions" in section and name == 'FileOp'
++                ])
++                has_alias_of = "alias of" in section
++                
++                print(f"\n{name}:")
++                print(f"  Has docstring: {has_docstring}")
++                print(f"  Has 'alias of': {has_alias_of}")
++                if not has_docstring and has_alias_of:
++                    print(f"  ❌ ISSUE: Only showing 'alias of' without docstring!")
++                elif has_docstring and has_alias_of:
++                    print(f"  ✓ Showing both docstring and 'alias of'")
++                elif has_docstring and not has_alias_of:
++                    print(f"  ✓ Showing only docstring")
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 000000000..458b2fa8c
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,106 @@
++"""Final test to verify the fix for the reported issue."""
++import os
++import sys
++import tempfile
++import shutil
++import time
++from pathlib import Path
++
++# Create a test directory
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++print("Test: Type alias documentation with incremental builds\n")
++
++# Step 1: Create initial module WITHOUT docstrings
++print("Step 1: Creating module without docstrings...")
++with open('file.py', 'w') as f:
++    f.write('''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++ScaffoldOpts = Dict[str, Any]
++FileContents = Union[str, None]
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst
++with open('index.rst', 'w') as f:
++    f.write('''Type Aliases
++============
++
++.. autodata:: file.ScaffoldOpts
++.. autodata:: file.FileContents
++.. autodata:: file.FileOp
++''')
++
++# First build
++from sphinx.cmd.build import build_main
++print("Building documentation (first time)...")
++build_main(['-b', 'text', '.', '_build'])
++
++# Check first output
++with open('_build/index.txt', 'r') as f:
++    first_content = f.read()
++    print("\nFirst build output:")
++    print("-" * 40)
++    print(first_content)
++    print("-" * 40)
++
++# Step 2: Add docstrings to the module
++print("\nStep 2: Adding docstrings to the module...")
++time.sleep(0.1)  # Ensure different mtime
++with open('file.py', 'w') as f:
++    f.write('''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations.
++"""
++''')
++
++# Second build (incremental)
++print("\nBuilding documentation (incremental)...")
++build_main(['-b', 'text', '.', '_build'])
++
++# Check second output
++with open('_build/index.txt', 'r') as f:
++    second_content = f.read()
++    print("\nSecond build output:")
++    print("-" * 40)
++    print(second_content)
++    print("-" * 40)
++
++# Verify the fix
++print("\nVerification:")
++for name, docstring_text in [
++    ('ScaffoldOpts', 'Dictionary with PyScaffold'),
++    ('FileContents', 'When the file content'),
++    ('FileOp', 'Signature of functions')
++]:
++    if docstring_text in second_content:
++        print(f"✓ {name}: Docstring correctly shown after incremental build")
++    else:
++        print(f"✗ {name}: Docstring NOT shown (BUG!)")
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 000000000..117228517
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,136 @@
++"""Test the fix for type alias documentation."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create the test module
++with open('test_module.py', 'w') as f:
++    f.write('''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++
++# Test alias without docstring
++SimpleAlias = Dict[str, int]
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst
++with open('index.rst', 'w') as f:
++    f.write('''Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++   :undoc-members:
++   
++Specific Members
++----------------
++
++.. autodata:: test_module.ScaffoldOpts
++.. autodata:: test_module.FileContents
++.. autodata:: test_module.FileOp
++.. autodata:: test_module.SimpleAlias
++''')
++
++# Build the documentation
++from sphinx.cmd.build import build_main
++result = build_main(['-b', 'text', '.', '_build'])
++
++# Read the output
++output_file = Path('_build/index.txt')
++if output_file.exists():
++    with open(output_file, 'r') as f:
++        content = f.read()
++        print("Generated documentation:")
++        print("=" * 50)
++        print(content)
++        print("=" * 50)
++        
++        # Check if our docstrings are present
++        if "Dictionary with PyScaffold's options" in content:
++            print("✓ ScaffoldOpts docstring found!")
++        else:
++            print("✗ ScaffoldOpts docstring NOT found!")
++            
++        if "When the file content is" in content:
++            print("✓ FileContents docstring found!")
++        else:
++            print("✗ FileContents docstring NOT found!")
++            
++        if "Signature of functions considered file operations" in content:
++            print("✓ FileOp docstring found!")
++        else:
++            print("✗ FileOp docstring NOT found!")
++            
++        # Check if SimpleAlias shows "alias of"
++        if "SimpleAlias" in content:
++            # Find the SimpleAlias section
++            lines = content.split('\n')
++            for i, line in enumerate(lines):
++                if "SimpleAlias" in line:
++                    # Check next few lines for "alias of"
++                    for j in range(i, min(i+5, len(lines))):
++                        if "alias of" in lines[j]:
++                            print("✓ SimpleAlias shows 'alias of' (no docstring)")
++                            break
++                    else:
++                        print("✗ SimpleAlias doesn't show 'alias of'")
++                    break
++        else:
++            print("✗ SimpleAlias not found in output")
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_inheritance.py b/test_inheritance.py
+new file mode 100644
+index 000000000..b4e15172c
+--- /dev/null
++++ b/test_inheritance.py
+@@ -0,0 +1,25 @@
++"""Check inheritance of generic alias types."""
++import typing
++from typing import Dict, Union, Callable, Any
++
++# Create test aliases
++dict_alias = Dict[str, Any]
++union_alias = Union[str, None]
++callable_alias = Callable[[str], None]
++
++print("Dict alias type:", type(dict_alias))
++print("Union alias type:", type(union_alias))
++print("Callable alias type:", type(callable_alias))
++
++# Check inheritance
++if hasattr(typing, '_GenericAlias'):
++    print("\nChecking isinstance for _GenericAlias:")
++    print("  Dict:", isinstance(dict_alias, typing._GenericAlias))
++    print("  Union:", isinstance(union_alias, typing._GenericAlias))
++    print("  Callable:", isinstance(callable_alias, typing._GenericAlias))
++
++# Check MRO
++print("\nMRO for each type:")
++print("Dict alias MRO:", type(dict_alias).__mro__)
++print("Union alias MRO:", type(union_alias).__mro__)
++print("Callable alias MRO:", type(callable_alias).__mro__)
+diff --git a/test_minimal.py b/test_minimal.py
+new file mode 100644
+index 000000000..0b4cd9f15
+--- /dev/null
++++ b/test_minimal.py
+@@ -0,0 +1,73 @@
++"""Minimal test to understand the issue."""
++import tempfile
++import os
++import sys
++
++# Create temp dir
++tmpdir = tempfile.mkdtemp()
++os.chdir(tmpdir)
++
++# Create module
++with open('test.py', 'w') as f:
++    f.write('''from typing import Dict, Any
++MyAlias = Dict[str, Any]
++"""This is my alias."""
++''')
++
++# Test with pycode analyzer
++from sphinx.pycode import ModuleAnalyzer
++analyzer = ModuleAnalyzer.for_file('test.py', 'test')
++analyzer.analyze()
++print("Analyzer found:", analyzer.attr_docs)
++
++# Test with autodoc
++sys.path.insert(0, '.')
++from sphinx.ext.autodoc import DataDocumenter
++
++# Mock the necessary objects
++class MockDirective:
++    class MockEnv:
++        config = type('Config', (), {
++            'autodoc_mock_imports': [],
++            'autodoc_type_aliases': {},
++            'autodoc_warningiserror': False,
++            'autodoc_inherit_docstrings': True
++        })()
++        temp_data = {}
++        app = None
++    
++    env = MockEnv()
++    genopt = {}
++    filename_set = set()
++    result = []
++    
++    class state:
++        class document:
++            settings = type('Settings', (), {'tab_width': 8})()
++
++# Create documenter
++directive = MockDirective()
++documenter = DataDocumenter(directive, 'test.MyAlias')
++
++# Parse the name first
++documenter.parse_name()
++documenter.resolve_name(None, None, None, None)
++
++# Import the object
++if documenter.import_object():
++    print("\nObject imported successfully")
++    print("Object:", documenter.object)
++    print("Object type:", type(documenter.object))
++    
++    # Get docstring
++    doc = documenter.get_doc()
++    print("\nget_doc() returned:", doc)
++    
++    # Get module comment
++    comment = documenter.get_module_comment('MyAlias')
++    print("get_module_comment() returned:", comment)
++
++# Cleanup
++os.chdir('..')
++import shutil
++shutil.rmtree(tmpdir)
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 000000000..6445a3bfe
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,127 @@
++"""Test with the exact code from the problem statement."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create the exact test module from the problem statement
++with open('file.py', 'w') as f:
++    f.write('''# file.py
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst
++with open('index.rst', 'w') as f:
++    f.write('''API
++===
++
++.. automodule:: file
++   :members:
++''')
++
++# Build the documentation
++from sphinx.cmd.build import build_main
++result = build_main(['-b', 'text', '.', '_build'])
++
++# Read the output
++output_file = Path('_build/index.txt')
++if output_file.exists():
++    with open(output_file, 'r') as f:
++        content = f.read()
++        print("Generated documentation:")
++        print("=" * 50)
++        print(content)
++        print("=" * 50)
++        
++        # Check if our docstrings are present or if we get "alias of"
++        scaffold_section = None
++        file_section = None
++        fileop_section = None
++        
++        lines = content.split('\n')
++        for i, line in enumerate(lines):
++            if 'ScaffoldOpts' in line and not scaffold_section:
++                scaffold_section = '\n'.join(lines[i:i+10])
++            elif 'FileContents' in line and not file_section:
++                file_section = '\n'.join(lines[i:i+10])
++            elif 'FileOp' in line and not fileop_section:
++                fileop_section = '\n'.join(lines[i:i+10])
++        
++        print("\nScaffoldOpts section:")
++        print(scaffold_section)
++        if scaffold_section and "alias of" in scaffold_section and "Dictionary with PyScaffold" not in scaffold_section:
++            print("❌ ScaffoldOpts shows only 'alias of' without docstring")
++        else:
++            print("✓ ScaffoldOpts shows docstring")
++            
++        print("\nFileContents section:")
++        print(file_section)
++        if file_section and "alias of" in file_section and "When the file content" not in file_section:
++            print("❌ FileContents shows only 'alias of' without docstring")
++        else:
++            print("✓ FileContents shows docstring")
++            
++        print("\nFileOp section:")
++        print(fileop_section)
++        if fileop_section and "alias of" in fileop_section and "Signature of functions" not in fileop_section:
++            print("❌ FileOp shows only 'alias of' without docstring")
++        else:
++            print("✓ FileOp shows docstring")
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_parser.py b/test_parser.py
+new file mode 100644
+index 000000000..bd35a1aa1
+--- /dev/null
++++ b/test_parser.py
+@@ -0,0 +1,68 @@
++"""Test the parser to see how it handles docstrings after type aliases."""
++from sphinx.pycode import ModuleAnalyzer
++import tempfile
++import os
++
++# Create a test file with type aliases and docstrings
++test_code = '''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++'''
++
++# Write to a temporary file
++with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
++    f.write(test_code)
++    temp_file = f.name
++
++try:
++    # Analyze the module
++    analyzer = ModuleAnalyzer.for_file(temp_file, 'test_module')
++    analyzer.analyze()
++    
++    print("Found attribute docs:")
++    for key, value in analyzer.attr_docs.items():
++        print(f"  {key}: {value[:50]}..." if len(str(value)) > 50 else f"  {key}: {value}")
++        
++    print("\nFound annotations:")
++    for key, value in analyzer.annotations.items():
++        print(f"  {key}: {value}")
++        
++finally:
++    os.unlink(temp_file)
+diff --git a/test_parser_detailed.py b/test_parser_detailed.py
+new file mode 100644
+index 000000000..adc7f15ec
+--- /dev/null
++++ b/test_parser_detailed.py
+@@ -0,0 +1,63 @@
++"""Test the parser in detail to understand the issue."""
++import ast
++from sphinx.pycode.parser import VariableCommentPicker
++
++# Test code
++test_code = '''from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++'''
++
++# Parse the code
++tree = ast.parse(test_code)
++picker = VariableCommentPicker(test_code.splitlines(True), 'utf-8')
++picker.visit(tree)
++
++print("Comments found by picker:")
++for key, value in picker.comments.items():
++    print(f"  {key}: {value[:50]}..." if len(value) > 50 else f"  {key}: {value}")
++    
++# Let's also manually check the AST
++print("\nAST structure:")
++for i, node in enumerate(ast.walk(tree)):
++    if isinstance(node, (ast.Assign, ast.AnnAssign)):
++        print(f"  Assignment at index {i}: {ast.dump(node)[:100]}...")
++    elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Str):
++        print(f"  String expr at index {i}: {node.value.s[:50]}...")
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 000000000..f7796d399
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,147 @@
++"""Try to reproduce the exact issue from the problem statement."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++print(f"Test directory: {test_dir}")
++os.chdir(test_dir)
++
++# Create the exact test module from the problem statement
++with open('file.py', 'w') as f:
++    f.write('''# file.py
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++''')
++
++# Test the module analyzer directly
++from sphinx.pycode import ModuleAnalyzer
++
++try:
++    analyzer = ModuleAnalyzer.for_file('file.py', 'file')
++    analyzer.analyze()
++    
++    print("\nModule analyzer results:")
++    print("Found attribute docs:")
++    for key, value in analyzer.attr_docs.items():
++        print(f"  {key}: {len(value)} lines")
++except Exception as e:
++    print(f"Error analyzing module: {e}")
++
++# Now test with autodoc
++from sphinx.testing.util import SphinxTestApp
++from sphinx.testing.path import path
++from docutils.statemachine import StringList
++
++# Create a minimal Sphinx app
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++''')
++
++with open('index.rst', 'w') as f:
++    f.write('')
++
++# Create the app
++app = SphinxTestApp(srcdir=path(test_dir))
++app.builder.env.temp_data['docname'] = 'index'
++
++# Test each type alias
++from sphinx.ext.autodoc import DataDocumenter
++
++for name in ['ScaffoldOpts', 'FileContents', 'FileOp']:
++    print(f"\n\nTesting {name}:")
++    
++    # Create a documenter using the autodoc directive approach
++    from sphinx.ext.autodoc.directive import AutodocDirective
++    from docutils.parsers.rst import directives
++    from docutils.statemachine import StringList, ViewList
++    from docutils import nodes
++    from sphinx.util.docutils import SphinxDirective
++    
++    # Create a mock directive
++    class MockDirective:
++        env = app.env
++        state = type('MockState', (), {
++            'document': type('MockDoc', (), {'settings': type('MockSettings', (), {'tab_width': 8})})()
++        })()
++        result = ViewList()
++        
++    directive = MockDirective()
++    
++    # Create the documenter
++    documenter = DataDocumenter(directive, f'file.{name}')
++    documenter.generate(more_content=StringList())
++    
++    # Check what was generated
++    content = '\n'.join(documenter.directive.result)
++    print("Generated content:")
++    print(content)
++    
++    # Check if docstring is present
++    has_docstring = False
++    has_alias_of = False
++    
++    if name == 'ScaffoldOpts':
++        has_docstring = "Dictionary with PyScaffold" in content
++    elif name == 'FileContents':
++        has_docstring = "When the file content" in content
++    elif name == 'FileOp':
++        has_docstring = "Signature of functions" in content
++        
++    has_alias_of = "alias of" in content
++    
++    print(f"  Has docstring: {has_docstring}")
++    print(f"  Has 'alias of': {has_alias_of}")
++    
++    if not has_docstring and has_alias_of:
++        print(f"  ❌ ISSUE: Only showing 'alias of' without docstring!")
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_simple_repro.py b/test_simple_repro.py
+new file mode 100644
+index 000000000..f17af0403
+--- /dev/null
++++ b/test_simple_repro.py
+@@ -0,0 +1,103 @@
++"""Simple test to check the autodoc behavior."""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory structure
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create the test module
++with open('file.py', 'w') as f:
++    f.write('''# file.py
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""
++''')
++
++# Create conf.py
++with open('conf.py', 'w') as f:
++    f.write('''
++import os
++import sys
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++''')
++
++# Create index.rst with individual autodata directives
++with open('index.rst', 'w') as f:
++    f.write('''Test
++====
++
++ScaffoldOpts
++------------
++
++.. autodata:: file.ScaffoldOpts
++
++FileContents
++------------
++
++.. autodata:: file.FileContents
++
++FileOp
++------
++
++.. autodata:: file.FileOp
++''')
++
++# Build the documentation
++from sphinx.cmd.build import build_main
++result = build_main(['-b', 'text', '.', '_build'])
++
++# Read the output
++output_file = Path('_build/index.txt')
++if output_file.exists():
++    with open(output_file, 'r') as f:
++        content = f.read()
++        print("\nGenerated documentation:")
++        print("=" * 50)
++        print(content)
++
++# Cleanup
++os.chdir('..')
++shutil.rmtree(test_dir)
+diff --git a/test_type_alias_issue.py b/test_type_alias_issue.py
+new file mode 100644
+index 000000000..82fbefeae
+--- /dev/null
++++ b/test_type_alias_issue.py
+@@ -0,0 +1,41 @@
++"""Test script to reproduce the type alias documentation issue."""
++from pathlib import Path
++from typing import Any, Callable, Dict, Union
++
++# Signatures for the documentation purposes
++
++ScaffoldOpts = Dict[str, Any]
++"""Dictionary with PyScaffold's options, see ``pyscaffold.api.create_project``.
++Should be treated as immutable (if required, copy before changing).
++
++Please notice some behaviours given by the options **SHOULD** be observed. For example,
++files should be overwritten when the **force** option is ``True``. Similarly when
++**pretend** is ``True``, no operation should be really performed, but any action should
++be logged as if realized.
++"""
++
++FileContents = Union[str, None]
++"""When the file content is ``None``, the file should not be written to
++disk (empty files are represented by an empty string ``""`` as content).
++"""
++
++FileOp = Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++"""Signature of functions considered file operations::
++
++    Callable[[Path, FileContents, ScaffoldOpts], Union[Path, None]]
++
++- **path** (:obj:`pathlib.Path`): file path potentially to be written to/changed
++  in the disk.
++- **contents** (:obj:`FileContents`): usually a string that represents a text content
++  of the file. :obj:`None` indicates the file should not be written.
++- **opts** (:obj:`ScaffoldOpts`): a dict with PyScaffold's options.
++
++If the file is written (or more generally changed, such as new access permissions),
++by convention they should return the :obj:`file path <pathlib.Path>`.
++If no file was touched, :obj:`None` should be returned. Please notice a **FileOp**
++might return :obj:`None` if a pre-existing file in the disk is not modified.
++
++.. note::
++    A **FileOp** usually has side effects (e.g. write a file to the disk), see
++    :obj:`FileFileContents` and :obj:`ScaffoldOpts` for other conventions.
++"""

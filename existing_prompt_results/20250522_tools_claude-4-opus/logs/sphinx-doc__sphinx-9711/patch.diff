@@ -1,0 +1,176 @@
+diff --git a/sphinx/extension.py b/sphinx/extension.py
+index 7ec6c8518..104abcf05 100644
+--- a/sphinx/extension.py
++++ b/sphinx/extension.py
+@@ -10,6 +10,8 @@
+ 
+ from typing import TYPE_CHECKING, Any, Dict
+ 
++from packaging.version import InvalidVersion, Version
++
+ from sphinx.config import Config
+ from sphinx.errors import VersionRequirementError
+ from sphinx.locale import __
+@@ -51,11 +53,20 @@ def verify_needs_extensions(app: "Sphinx", config: Config) -> None:
+                               'but it is not loaded.'), extname)
+             continue
+ 
+-        if extension.version == 'unknown version' or reqversion > extension.version:
+-            raise VersionRequirementError(__('This project needs the extension %s at least in '
+-                                             'version %s and therefore cannot be built with '
+-                                             'the loaded version (%s).') %
+-                                          (extname, reqversion, extension.version))
++        if extension.version == 'unknown version':
++            logger.warning(__('Version of %s extension is unknown, cannot check if it '
++                              'satisfies the required version (%s).'), extname, reqversion)
++        else:
++            try:
++                req_version = Version(reqversion)
++                ext_version = Version(extension.version)
++                if ext_version < req_version:
++                    raise VersionRequirementError(__('This project needs the extension %s at least in '
++                                                     'version %s and therefore cannot be built with '
++                                                     'the loaded version (%s).') %
++                                                  (extname, reqversion, extension.version))
++            except InvalidVersion as exc:
++                logger.warning(__('Version check for %s extension failed: %s'), extname, exc)
+ 
+ 
+ def setup(app: "Sphinx") -> Dict[str, Any]:
+diff --git a/tests/test_needs_extensions.py b/tests/test_needs_extensions.py
+new file mode 100644
+index 000000000..261822c10
+--- /dev/null
++++ b/tests/test_needs_extensions.py
+@@ -0,0 +1,131 @@
++"""Test needs_extensions functionality."""
++
++import pytest
++
++from sphinx.config import Config
++from sphinx.errors import VersionRequirementError
++from sphinx.extension import Extension, verify_needs_extensions
++
++
++class MockApp:
++    """Mock Sphinx application for testing."""
++    def __init__(self):
++        self.extensions = {}
++
++
++def test_needs_extensions_version_check():
++    """Test that version comparison works correctly for versions."""
++    app = MockApp()
++    config = Config()
++    
++    # Add a mock extension with version 0.10.0
++    app.extensions['test_ext'] = Extension('test_ext', None, version='0.10.0')
++    
++    # Test: 0.10.0 should satisfy requirement for 0.6.0
++    config.needs_extensions = {'test_ext': '0.6.0'}
++    verify_needs_extensions(app, config)  # Should not raise
++    
++    # Test: 0.10.0 should satisfy requirement for 0.9.0
++    config.needs_extensions = {'test_ext': '0.9.0'}
++    verify_needs_extensions(app, config)  # Should not raise
++    
++    # Test: 0.10.0 should satisfy requirement for 0.10.0
++    config.needs_extensions = {'test_ext': '0.10.0'}
++    verify_needs_extensions(app, config)  # Should not raise
++    
++    # Test: 0.10.0 should NOT satisfy requirement for 0.11.0
++    config.needs_extensions = {'test_ext': '0.11.0'}
++    with pytest.raises(VersionRequirementError):
++        verify_needs_extensions(app, config)
++    
++    # Test: 0.10.0 should NOT satisfy requirement for 1.0.0
++    config.needs_extensions = {'test_ext': '1.0.0'}
++    with pytest.raises(VersionRequirementError):
++        verify_needs_extensions(app, config)
++
++
++def test_needs_extensions_missing_extension():
++    """Test behavior when required extension is not loaded."""
++    app = MockApp()
++    config = Config()
++    
++    # No extension loaded, but one is required
++    config.needs_extensions = {'missing_ext': '1.0.0'}
++    
++    # Should issue warning but not raise error
++    verify_needs_extensions(app, config)
++
++
++def test_needs_extensions_unknown_version():
++    """Test behavior when extension version is unknown."""
++    app = MockApp()
++    config = Config()
++    
++    # Extension with unknown version
++    app.extensions['test_ext'] = Extension('test_ext', None, version='unknown version')
++    config.needs_extensions = {'test_ext': '1.0.0'}
++    
++    # Should issue warning but not raise error
++    verify_needs_extensions(app, config)
++
++
++def test_needs_extensions_invalid_version():
++    """Test behavior with invalid version strings."""
++    app = MockApp()
++    config = Config()
++    
++    # Extension with invalid version format
++    app.extensions['test_ext'] = Extension('test_ext', None, version='invalid-version')
++    config.needs_extensions = {'test_ext': '1.0.0'}
++    
++    # Should issue warning but not raise error
++    verify_needs_extensions(app, config)
++    
++    # Required version is invalid
++    app.extensions['test_ext'] = Extension('test_ext', None, version='1.0.0')
++    config.needs_extensions = {'test_ext': 'invalid-version'}
++    
++    # Should issue warning but not raise error
++    verify_needs_extensions(app, config)
++
++
++def test_needs_extensions_none_config():
++    """Test behavior when needs_extensions is None."""
++    app = MockApp()
++    config = Config()
++    config.needs_extensions = None
++    
++    # Should return early without any checks
++    verify_needs_extensions(app, config)
++
++
++def test_needs_extensions_complex_versions():
++    """Test with more complex version numbers."""
++    app = MockApp()
++    config = Config()
++    
++    # Test with alpha/beta/rc versions
++    app.extensions['test_ext'] = Extension('test_ext', None, version='1.0.0a1')
++    config.needs_extensions = {'test_ext': '1.0.0'}
++    with pytest.raises(VersionRequirementError):
++        verify_needs_extensions(app, config)
++    
++    # Alpha version should satisfy alpha requirement
++    config.needs_extensions = {'test_ext': '1.0.0a1'}
++    verify_needs_extensions(app, config)
++    
++    # Stable version should satisfy alpha requirement
++    app.extensions['test_ext'] = Extension('test_ext', None, version='1.0.0')
++    config.needs_extensions = {'test_ext': '1.0.0a1'}
++    verify_needs_extensions(app, config)
++    
++    # Test with version with extra components
++    app.extensions['test_ext'] = Extension('test_ext', None, version='1.2.3.4')
++    config.needs_extensions = {'test_ext': '1.2.3'}
++    verify_needs_extensions(app, config)
++    
++    # But not the other way around
++    app.extensions['test_ext'] = Extension('test_ext', None, version='1.2.3')
++    config.needs_extensions = {'test_ext': '1.2.3.4'}
++    with pytest.raises(VersionRequirementError):
++        verify_needs_extensions(app, config)

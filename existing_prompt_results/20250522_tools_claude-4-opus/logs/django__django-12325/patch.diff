@@ -1,0 +1,591 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 8ea6c05ef9..c3930538ee 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -204,7 +204,13 @@ class ModelBase(type):
+             for field in base._meta.local_fields:
+                 if isinstance(field, OneToOneField):
+                     related = resolve_relation(new_class, field.remote_field.model)
+-                    parent_links[make_model_tuple(related)] = field
++                    related_key = make_model_tuple(related)
++                    # Only add the field if:
++                    # 1. There's no existing field for this related model, OR
++                    # 2. This field has parent_link=True (prefer explicit parent links)
++                    if (related_key not in parent_links or 
++                        field.remote_field.parent_link):
++                        parent_links[related_key] = field
+ 
+         # Track fields inherited from base models.
+         inherited_attributes = set()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..2a6783d9b4
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,122 @@
++"""Test edge cases for the MTI fix"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ImproperlyConfigured, FieldError
++
++print("Testing edge cases...")
++
++# Test 1: Multiple parent_link=True fields (should fail)
++print("\nTest 1: Multiple parent_link=True fields")
++try:
++    class Document1(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class BadPicking1(Document1):
++        ptr1 = models.OneToOneField(Document1, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        ptr2 = models.OneToOneField(Document1, on_delete=models.CASCADE, parent_link=True, related_name='bad1')
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("UNEXPECTED: Multiple parent_link fields allowed!")
++except (ImproperlyConfigured, FieldError) as e:
++    print(f"EXPECTED: Multiple parent_link fields correctly rejected with: {type(e).__name__}")
++
++# Test 2: parent_link on wrong model (should work - Django allows this)
++print("\nTest 2: parent_link pointing to non-parent model")
++try:
++    class Document2(models.Model):
++        class Meta:
++            app_label = 'test_app'
++    
++    class OtherModel(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class Picking2(Document2):
++        # This is allowed by Django - parent_link to a non-parent model
++        other_ptr = models.OneToOneField(OtherModel, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("SUCCESS: parent_link to non-parent model allowed (Django behavior)")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test 3: No parent_link field at all (should auto-create)
++print("\nTest 3: No explicit parent_link field")
++try:
++    class Document3(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class Picking3(Document3):
++        origin = models.OneToOneField(Document3, related_name='picking3', on_delete=models.PROTECT)
++        other_field = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Check if auto parent link was created
++    has_parent_link = any(
++        f.remote_field.parent_link 
++        for f in Picking3._meta.local_fields 
++        if hasattr(f, 'remote_field') and f.remote_field
++    )
++    if has_parent_link:
++        print("SUCCESS: Auto parent_link field created")
++    else:
++        print("FAILED: No auto parent_link field created")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++# Test 4: Complex inheritance chain
++print("\nTest 4: Complex inheritance chain")
++try:
++    class GrandParent(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class Parent(GrandParent):
++        grandparent_ptr = models.OneToOneField(GrandParent, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        related_gp = models.OneToOneField(GrandParent, related_name='parent_rel', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++
++    class Child(Parent):
++        parent_ptr = models.OneToOneField(Parent, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        related_p = models.OneToOneField(Parent, related_name='child_rel', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("SUCCESS: Complex inheritance chain with multiple OneToOne fields works")
++except Exception as e:
++    print(f"FAILED: {type(e).__name__}: {e}")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..e73a55949c
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,64 @@
++"""Test the exact issue from the problem statement"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ImproperlyConfigured
++
++print("Testing the exact issue from the problem statement...")
++
++# This should now work (was failing before)
++try:
++    class Document(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class Picking(Document):
++        document_ptr = models.OneToOneField(Document, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        origin = models.OneToOneField(Document, related_name='picking', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("SUCCESS: First case (document_ptr first) now works!")
++except ImproperlyConfigured as e:
++    print(f"FAILED: First case still fails with: {e}")
++
++# This should continue to work
++try:
++    class Document2(models.Model):
++        class Meta:
++            app_label = 'test_app'
++
++    class Picking2(Document2):
++        origin = models.OneToOneField(Document2, related_name='picking2', on_delete=models.PROTECT)
++        document_ptr = models.OneToOneField(Document2, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("SUCCESS: Second case (origin first) still works!")
++except ImproperlyConfigured as e:
++    print(f"FAILED: Second case now fails with: {e}")
++
++print("\nBoth cases now work regardless of field order!")
+diff --git a/test_final_behavior.py b/test_final_behavior.py
+new file mode 100644
+index 0000000000..f3a6c3aeb5
+--- /dev/null
++++ b/test_final_behavior.py
+@@ -0,0 +1,133 @@
++"""Final test to document the expected behavior after the fix"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ImproperlyConfigured
++
++print("Testing final behavior after fix...")
++print("=" * 60)
++
++# Test 1: Multiple OneToOne fields with parent_link=True specified (order shouldn't matter)
++print("\n1. Multiple OneToOne fields with explicit parent_link=True:")
++try:
++    class Doc1(models.Model):
++        class Meta:
++            app_label = 'test'
++
++    class Child1(Doc1):
++        # parent_link field first
++        doc1_ptr = models.OneToOneField(Doc1, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        other_ref = models.OneToOneField(Doc1, related_name='child1', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test'
++    
++    print("   PASS: parent_link field first: SUCCESS")
++except Exception as e:
++    print(f"   FAIL: parent_link field first: FAILED - {e}")
++
++try:
++    class Doc2(models.Model):
++        class Meta:
++            app_label = 'test'
++
++    class Child2(Doc2):
++        # parent_link field last
++        other_ref = models.OneToOneField(Doc2, related_name='child2', on_delete=models.PROTECT)
++        doc2_ptr = models.OneToOneField(Doc2, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        
++        class Meta:
++            app_label = 'test'
++    
++    print("   PASS: parent_link field last: SUCCESS")
++except Exception as e:
++    print(f"   FAIL: parent_link field last: FAILED - {e}")
++
++# Test 2: OneToOne to parent without parent_link=True (should fail)
++print("\n2. OneToOne to parent without parent_link=True:")
++try:
++    class Doc3(models.Model):
++        class Meta:
++            app_label = 'test'
++
++    class Child3(Doc3):
++        # No parent_link=True
++        doc3_ref = models.OneToOneField(Doc3, related_name='child3', on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test'
++    
++    print("   FAIL: UNEXPECTED: Should have raised ImproperlyConfigured")
++except ImproperlyConfigured as e:
++    print(f"   PASS: Correctly raised: {e}")
++
++# Test 3: No OneToOne fields (should auto-create parent link)
++print("\n3. No explicit OneToOne fields (auto-create parent link):")
++try:
++    class Doc4(models.Model):
++        class Meta:
++            app_label = 'test'
++
++    class Child4(Doc4):
++        extra_field = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test'
++    
++    # Check for auto-created parent link
++    parent_link = None
++    for field in Child4._meta.local_fields:
++        if hasattr(field, 'remote_field') and field.remote_field and field.remote_field.parent_link:
++            parent_link = field
++            break
++    
++    if parent_link:
++        print(f"   PASS: Auto-created parent link: {parent_link.name}")
++    else:
++        print("   FAIL: No auto-created parent link found")
++except Exception as e:
++    print(f"   FAIL: FAILED - {e}")
++
++# Test 4: Verify the fix - the original problem case
++print("\n4. Original problem case (document_ptr defined before origin):")
++try:
++    class Document(models.Model):
++        class Meta:
++            app_label = 'test'
++
++    class Picking(Document):
++        document_ptr = models.OneToOneField(Document, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        origin = models.OneToOneField(Document, related_name='picking', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test'
++    
++    print("   PASS: SUCCESS - The fix works! Order no longer matters.")
++except Exception as e:
++    print(f"   FAIL: FAILED - {e}")
++
++print("\n" + "=" * 60)
++print("Summary: The fix ensures that when multiple OneToOne fields")
++print("reference the parent model, Django correctly identifies the one") 
++print("with parent_link=True regardless of declaration order.")
+diff --git a/test_mti_comprehensive.py b/test_mti_comprehensive.py
+new file mode 100644
+index 0000000000..08f8e96294
+--- /dev/null
++++ b/test_mti_comprehensive.py
+@@ -0,0 +1,145 @@
++"""Comprehensive test for MTI with multiple OneToOne fields"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ImproperlyConfigured
++
++print("Running comprehensive MTI tests...")
++
++# Test 1: Multiple OneToOne fields with parent_link first
++try:
++    class BaseModel1(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++    
++    class ChildModel1(BaseModel1):
++        base_ptr = models.OneToOneField(BaseModel1, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        related_base = models.OneToOneField(BaseModel1, related_name='child1', on_delete=models.PROTECT)
++        extra_field = models.CharField(max_length=50)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test 1: Multiple OneToOne fields with parent_link first")
++except Exception as e:
++    print(f"FAILED Test 1: {e}")
++
++# Test 2: Multiple OneToOne fields with parent_link last
++try:
++    class BaseModel2(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++    
++    class ChildModel2(BaseModel2):
++        related_base = models.OneToOneField(BaseModel2, related_name='child2', on_delete=models.PROTECT)
++        extra_field = models.CharField(max_length=50)
++        base_ptr = models.OneToOneField(BaseModel2, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test 2: Multiple OneToOne fields with parent_link last")
++except Exception as e:
++    print(f"FAILED Test 2: {e}")
++
++# Test 3: Multiple OneToOne fields with parent_link in the middle
++try:
++    class BaseModel3(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++    
++    class ChildModel3(BaseModel3):
++        related_base1 = models.OneToOneField(BaseModel3, related_name='child3_1', on_delete=models.PROTECT)
++        base_ptr = models.OneToOneField(BaseModel3, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        related_base2 = models.OneToOneField(BaseModel3, related_name='child3_2', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test 3: Multiple OneToOne fields with parent_link in the middle")
++except Exception as e:
++    print(f"FAILED Test 3: {e}")
++
++# Test 4: Verify that the parent link field is correctly identified
++try:
++    class BaseModel4(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++    
++    class ChildModel4(BaseModel4):
++        custom_ptr = models.OneToOneField(BaseModel4, on_delete=models.CASCADE, parent_link=True, related_name='+', primary_key=True)
++        related_base = models.OneToOneField(BaseModel4, related_name='child4', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Check that the parent link is correctly identified
++    parent_link_field = None
++    for field in ChildModel4._meta.local_fields:
++        if isinstance(field, models.OneToOneField) and field.remote_field.parent_link:
++            parent_link_field = field
++            break
++    
++    if parent_link_field and parent_link_field.name == 'custom_ptr':
++        print("PASSED Test 4: Parent link field correctly identified")
++    else:
++        print(f"FAILED Test 4: Parent link field not correctly identified. Found: {parent_link_field.name if parent_link_field else 'None'}")
++        
++except Exception as e:
++    print(f"FAILED Test 4: {e}")
++
++# Test 5: Ensure auto-created parent link still works
++try:
++    class BaseModel5(models.Model):
++        name = models.CharField(max_length=100)
++        class Meta:
++            app_label = 'test_app'
++    
++    class ChildModel5(BaseModel5):
++        related_base = models.OneToOneField(BaseModel5, related_name='child5', on_delete=models.PROTECT)
++        extra_field = models.CharField(max_length=50)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Check that an auto parent link was created
++    parent_link_field = None
++    for field in ChildModel5._meta.local_fields:
++        if isinstance(field, models.OneToOneField) and field.remote_field.parent_link:
++            parent_link_field = field
++            break
++    
++    if parent_link_field and parent_link_field.name == 'basemodel5_ptr':
++        print("PASSED Test 5: Auto-created parent link works correctly")
++    else:
++        print(f"FAILED Test 5: Auto parent link not created correctly. Found: {parent_link_field.name if parent_link_field else 'None'}")
++        
++except Exception as e:
++    print(f"FAILED Test 5: {e}")
++
++print("\nAll tests completed!")
+diff --git a/test_mti_issue.py b/test_mti_issue.py
+new file mode 100644
+index 0000000000..cc8caa6d07
+--- /dev/null
++++ b/test_mti_issue.py
+@@ -0,0 +1,78 @@
++"""Test script to reproduce the MTI OneToOne field ordering issue"""
++
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ImproperlyConfigured
++
++print("Testing MTI with multiple OneToOne fields...")
++
++# Test Case 1: document_ptr defined first (should fail according to the issue)
++try:
++    class Document1(models.Model):
++        class Meta:
++            app_label = 'test_app'
++    
++    class Picking1(Document1):
++        document_ptr = models.OneToOneField(Document1, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        origin = models.OneToOneField(Document1, related_name='picking1', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test Case 1: document_ptr defined first - No exception raised")
++except ImproperlyConfigured as e:
++    print(f"FAILED Test Case 1: document_ptr defined first - Exception: {e}")
++
++# Test Case 2: origin defined first (should work according to the issue)
++try:
++    class Document2(models.Model):
++        class Meta:
++            app_label = 'test_app'
++    
++    class Picking2(Document2):
++        origin = models.OneToOneField(Document2, related_name='picking2', on_delete=models.PROTECT)
++        document_ptr = models.OneToOneField(Document2, on_delete=models.CASCADE, parent_link=True, related_name='+')
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test Case 2: origin defined first - No exception raised")
++except ImproperlyConfigured as e:
++    print(f"FAILED Test Case 2: origin defined first - Exception: {e}")
++
++# Test Case 3: No explicit parent_link field (should auto-create one)
++try:
++    class Document3(models.Model):
++        class Meta:
++            app_label = 'test_app'
++    
++    class Picking3(Document3):
++        origin = models.OneToOneField(Document3, related_name='picking3', on_delete=models.PROTECT)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    print("PASSED Test Case 3: No explicit parent_link - No exception raised")
++except ImproperlyConfigured as e:
++    print(f"FAILED Test Case 3: No explicit parent_link - Exception: {e}")

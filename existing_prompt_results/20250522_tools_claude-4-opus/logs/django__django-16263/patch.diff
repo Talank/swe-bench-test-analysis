@@ -1,0 +1,872 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 9735ce10c8..934637f3bc 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -435,6 +435,52 @@ class Query(BaseExpression):
+         annotation.set_source_expressions(new_exprs)
+         return annotation, col_cnt
+ 
++    def _get_referenced_annotations_in_where(self, where_node):
++        """
++        Find all annotations referenced in a WHERE clause.
++        """
++        annotations = set()
++        for child in where_node.children:
++            if hasattr(child, 'lhs'):
++                # This is a Lookup
++                if isinstance(child.lhs, Ref):
++                    annotations.add(child.lhs.refs)
++                elif isinstance(child.lhs, F):
++                    # Check if F() references an annotation
++                    parts = child.lhs.name.split(LOOKUP_SEP)
++                    if parts[0] in self.annotations:
++                        annotations.add(parts[0])
++                # Also check if the lookup contains aggregates that reference annotations
++                if hasattr(child.lhs, 'contains_aggregate') and child.lhs.contains_aggregate:
++                    # This might be an aggregate expression, check its source
++                    refs = self._get_referenced_annotations_in_expression(child.lhs, self.annotations)
++                    annotations.update(refs)
++            elif isinstance(child, WhereNode):
++                # Recursively check nested WHERE nodes
++                annotations.update(self._get_referenced_annotations_in_where(child))
++        return annotations
++    
++    def _get_referenced_annotations_in_expression(self, expression, all_annotations):
++        """
++        Find all annotations referenced in an expression.
++        """
++        annotations = set()
++        
++        # Get all sub-expressions
++        if hasattr(expression, 'get_source_expressions'):
++            for expr in expression.get_source_expressions():
++                if expr:
++                    if isinstance(expr, Ref) and expr.refs in all_annotations:
++                        annotations.add(expr.refs)
++                    elif isinstance(expr, F):
++                        parts = expr.name.split(LOOKUP_SEP)
++                        if parts[0] in all_annotations:
++                            annotations.add(parts[0])
++                    # Recursively check nested expressions
++                    annotations.update(self._get_referenced_annotations_in_expression(expr, all_annotations))
++        
++        return annotations
++
+     def get_aggregation(self, using, added_aggregate_names):
+         """
+         Return the dictionary with the values of the existing aggregations.
+@@ -550,8 +596,79 @@ class Query(BaseExpression):
+         Perform a COUNT() query using the current filter constraints.
+         """
+         obj = self.clone()
+-        obj.add_annotation(Count("*"), alias="__count", is_summary=True)
+-        return obj.get_aggregation(using, ["__count"])["__count"]
++        
++        # Check if we have annotations that are not used in filters or ordering
++        has_unused_annotations = False
++        has_aggregate_filter = False
++        if obj.annotations:
++            # Find which annotations are actually referenced
++            used_annotations = set()
++            
++            # Check if annotations are used in WHERE clause
++            if obj.where:
++                used_annotations.update(self._get_referenced_annotations_in_where(obj.where))
++                # Check if we have aggregate filters (which create HAVING clauses)
++                def check_aggregate_in_where(node):
++                    for child in node.children:
++                        if isinstance(child, WhereNode):
++                            if check_aggregate_in_where(child):
++                                return True
++                        elif hasattr(child, 'lhs') and hasattr(child.lhs, 'contains_aggregate') and child.lhs.contains_aggregate:
++                            return True
++                    return False
++                
++                has_aggregate_filter = check_aggregate_in_where(obj.where)
++            
++            # Check if annotations are used in ORDER BY
++            for field in obj.order_by:
++                if field.startswith('-'):
++                    field = field[1:]
++                if field in obj.annotations:
++                    used_annotations.add(field)
++            
++            # If we have annotations that aren't used, we can optimize
++            has_unused_annotations = bool(set(obj.annotations.keys()) - used_annotations)
++        
++        # For optimized count queries without unused annotations, we can skip the subquery
++        # But not if we have aggregate filters (HAVING clause) as they need the full query structure
++        if has_unused_annotations and not has_aggregate_filter and not obj.distinct and not obj.is_sliced and not obj.combinator and not isinstance(obj.group_by, tuple):
++            # Create a completely fresh query to avoid JOINs from unused annotations
++            fresh_query = self.__class__(self.model)
++            
++            # Copy essential query attributes
++            fresh_query.where = obj.where.clone()
++            fresh_query.default_cols = False
++            fresh_query.select = ()
++            
++            # Copy other important attributes that affect count
++            fresh_query.distinct = obj.distinct
++            fresh_query.distinct_fields = obj.distinct_fields
++            fresh_query.select_for_update = obj.select_for_update
++            fresh_query.select_for_update_nowait = obj.select_for_update_nowait
++            fresh_query.select_for_update_skip_locked = obj.select_for_update_skip_locked
++            fresh_query.select_for_update_of = obj.select_for_update_of
++            fresh_query.select_for_no_key_update = obj.select_for_no_key_update
++            fresh_query.max_depth = obj.max_depth
++            fresh_query.values_select = obj.values_select
++            fresh_query.annotation_select_mask = None
++            fresh_query._annotation_select_cache = None
++            
++            # Re-add only the used annotations if any
++            if used_annotations:
++                for alias in used_annotations:
++                    if alias in self.annotations:
++                        fresh_query.add_annotation(
++                            self.annotations[alias], 
++                            alias=alias,
++                            is_summary=getattr(self.annotations[alias], 'is_summary', False)
++                        )
++            
++            fresh_query.add_annotation(Count("*"), alias="__count", is_summary=True)
++            return fresh_query.get_aggregation(using, ["__count"])["__count"]
++        else:
++            # Standard path
++            obj.add_annotation(Count("*"), alias="__count", is_summary=True)
++            return obj.get_aggregation(using, ["__count"])["__count"]
+ 
+     def has_filters(self):
+         return self.where
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..4d2bf9cf04
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,129 @@
++"""
++Comprehensive test for count() optimization with annotations
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-key',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Sum, Avg, Max, Min, F, Q
++from django.contrib.auth.models import User, Group
++from django.test.utils import CaptureQueriesContext
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    for model in [User, Group]:
++        try:
++            schema_editor.create_model(model)
++        except:
++            pass
++
++# Create test data
++user1 = User.objects.create(username='user1')
++user2 = User.objects.create(username='user2')
++group1 = Group.objects.create(name='group1')
++group2 = Group.objects.create(name='group2')
++user1.groups.add(group1, group2)
++user2.groups.add(group1)
++
++print("Testing count() optimization with various annotation scenarios...")
++print("=" * 70)
++
++test_cases = [
++    # (description, queryset, should_optimize)
++    ("Simple unused annotation", 
++     User.objects.annotate(group_count=Count('groups')), 
++     True),
++    
++    ("Multiple unused annotations", 
++     User.objects.annotate(
++         group_count=Count('groups'),
++         group_sum=Sum('groups__id'),
++         username_upper=F('username')
++     ), 
++     True),
++    
++    ("Annotation used in filter", 
++     User.objects.annotate(group_count=Count('groups')).filter(group_count__gt=1), 
++     False),
++    
++    ("Annotation used in exclude", 
++     User.objects.annotate(group_count=Count('groups')).exclude(group_count=0), 
++     False),
++    
++    ("Annotation used in Q object", 
++     User.objects.annotate(group_count=Count('groups')).filter(Q(group_count__gte=1)), 
++     False),
++    
++    ("Annotation used in ordering", 
++     User.objects.annotate(group_count=Count('groups')).order_by('group_count'), 
++     False),
++    
++    ("Annotation used in reverse ordering", 
++     User.objects.annotate(group_count=Count('groups')).order_by('-group_count'), 
++     False),
++    
++    ("Mixed - one used, one unused annotation", 
++     User.objects.annotate(
++         group_count=Count('groups'),
++         id_plus_one=F('id') + 1
++     ).filter(group_count__gt=0), 
++     False),  # Can't optimize because one is used
++    
++    ("Annotation referencing another annotation", 
++     User.objects.annotate(
++         group_count=Count('groups'),
++         double_count=F('group_count') * 2
++     ), 
++     True),  # Both unused
++    
++    ("Distinct query with annotation", 
++     User.objects.annotate(group_count=Count('groups')).distinct(), 
++     False),  # Can't optimize distinct queries
++    
++    ("Sliced query with annotation", 
++     User.objects.annotate(group_count=Count('groups'))[:10], 
++     False),  # Can't optimize sliced queries
++]
++
++for description, queryset, should_optimize in test_cases:
++    print(f"\nTest: {description}")
++    print("-" * 50)
++    
++    with CaptureQueriesContext(connection) as queries:
++        count = queryset.count()
++        sql = queries[0]['sql']
++        
++        # Check if query was optimized (no subquery, no unnecessary JOINs)
++        is_optimized = "subquery" not in sql.lower() and sql.count("JOIN") == 0
++        
++        print(f"Count: {count}")
++        print(f"Optimized: {is_optimized} (expected: {should_optimize})")
++        print(f"SQL: {sql}")
++        
++        if is_optimized != should_optimize:
++            print("❌ UNEXPECTED RESULT!")
++        else:
++            print("✓ As expected")
++
++print("\n" + "=" * 70)
++print("All tests completed!")
+diff --git a/test_count_annotations.py b/test_count_annotations.py
+new file mode 100644
+index 0000000000..9f72e787ab
+--- /dev/null
++++ b/test_count_annotations.py
+@@ -0,0 +1,124 @@
++import os
++import django
++from django.db import models, connection
++from django.db.models import Count, Sum, Avg
++from django.test import TestCase
++from django.test.utils import CaptureQueriesContext
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = False
++""")
++
++django.setup()
++
++# Define test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name='books')
++    pages = models.IntegerField(default=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Chapter(models.Model):
++    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='chapters')
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++    schema_editor.create_model(Chapter)
++
++# Create test data
++try:
++    author = Author.objects.create(name="Test Author")
++    book1 = Book.objects.create(title="Book 1", author=author, pages=200)
++    book2 = Book.objects.create(title="Book 2", author=author, pages=300)
++    Chapter.objects.create(book=book1, title="Chapter 1")
++    Chapter.objects.create(book=book1, title="Chapter 2")
++    Chapter.objects.create(book=book2, title="Chapter 1")
++except Exception as e:
++    print(f"Error creating data: {e}")
++    # Check available fields
++    print(f"Book fields: {[f.name for f in Book._meta.get_fields()]}")
++
++print("Testing count() with unused annotations...")
++print("-" * 50)
++
++# Check available fields
++print(f"Book fields: {[f.name for f in Book._meta.get_fields()]}")
++print()
++
++# Test 1: Simple count with annotation
++with CaptureQueriesContext(connection) as queries:
++    count1 = Book.objects.annotate(Count('chapters')).count()
++    print(f"Count with annotation: {count1}")
++    print(f"SQL: {queries[0]['sql']}")
++    print()
++
++# Test 2: Count without annotation
++with CaptureQueriesContext(connection) as queries:
++    count2 = Book.objects.count()
++    print(f"Count without annotation: {count2}")
++    print(f"SQL: {queries[0]['sql']}")
++    print()
++
++# Test 3: Count with multiple unused annotations
++with CaptureQueriesContext(connection) as queries:
++    count3 = Book.objects.annotate(
++        chapter_count=Count('chapters'),
++        total_pages=Sum('pages'),
++        avg_pages=Avg('pages')
++    ).count()
++    print(f"Count with multiple annotations: {count3}")
++    print(f"SQL: {queries[0]['sql']}")
++    print()
++
++# Test 4: Count with annotation used in filter (should keep annotation)
++with CaptureQueriesContext(connection) as queries:
++    count4 = Book.objects.annotate(
++        chapter_count=Count('chapters')
++    ).filter(chapter_count__gt=1).count()
++    print(f"Count with annotation used in filter: {count4}")
++    print(f"SQL: {queries[0]['sql']}")
++    print()
++
++# Test 5: Count with annotation used in ordering (should keep annotation)
++with CaptureQueriesContext(connection) as queries:
++    count5 = Book.objects.annotate(
++        chapter_count=Count('chapters')
++    ).order_by('chapter_count').count()
++    print(f"Count with annotation used in ordering: {count5}")
++    print(f"SQL: {queries[0]['sql']}")
++    print()
++
++print("\nAll counts should be equal (except filtered one):")
++print(f"count1={count1}, count2={count2}, count3={count3}, count5={count5}")
++print(f"Filtered count: count4={count4}")
+diff --git a/test_count_simple.py b/test_count_simple.py
+new file mode 100644
+index 0000000000..fd6978593c
+--- /dev/null
++++ b/test_count_simple.py
+@@ -0,0 +1,86 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-key',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, Sum, Avg, F
++from django.test.utils import CaptureQueriesContext
++
++# Create a simple test to show the SQL queries
++print("Testing Django count() with annotations...")
++print("-" * 60)
++
++# First, let's look at existing tests
++print("\nLooking for existing aggregation tests...")
++
++# Let's check what happens in the actual Django code
++from django.contrib.auth.models import User
++
++# Create the User table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.create_model(User)
++    except:
++        pass  # Table might already exist
++
++# Test with User model which has groups relation
++print("\nTesting with User model...")
++
++# Test 1: Count with unused annotation
++with CaptureQueriesContext(connection) as queries:
++    count1 = User.objects.annotate(group_count=Count('groups')).count()
++    if queries:
++        print(f"\nQuery 1 - Count with unused annotation:")
++        print(f"Result: {count1}")
++        print(f"SQL: {queries[0]['sql']}\n")
++
++# Test 2: Plain count
++with CaptureQueriesContext(connection) as queries:
++    count2 = User.objects.count()
++    if queries:
++        print(f"Query 2 - Plain count:")
++        print(f"Result: {count2}")
++        print(f"SQL: {queries[0]['sql']}\n")
++
++# Test 3: Count with annotation used in filter
++with CaptureQueriesContext(connection) as queries:
++    count3 = User.objects.annotate(group_count=Count('groups')).filter(group_count__gt=0).count()
++    if queries:
++        print(f"Query 3 - Count with annotation used in filter:")
++        print(f"Result: {count3}")
++        print(f"SQL: {queries[0]['sql']}\n")
++
++# Test 4: Multiple unused annotations
++with CaptureQueriesContext(connection) as queries:
++    count4 = User.objects.annotate(
++        group_count=Count('groups'),
++        perm_count=Count('user_permissions'),
++        id_plus_one=F('id') + 1
++    ).count()
++    if queries:
++        print(f"Query 4 - Count with multiple unused annotations:")
++        print(f"Result: {count4}")
++        print(f"SQL: {queries[0]['sql']}\n")
++
++print("\nAs we can see, the COUNT queries include unnecessary annotations!")
++print("This is the issue we need to fix.")
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..5f0f93d348
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,40 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-key',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count
++from django.contrib.auth.models import User
++
++# Create the User table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.create_model(User)
++    except:
++        pass
++
++# Test the query
++qs = User.objects.annotate(group_count=Count('groups'))
++print(f"Annotations before count: {list(qs.query.annotations.keys())}")
++count = qs.count()
++print(f"Count result: {count}")
+diff --git a/test_debug2.py b/test_debug2.py
+new file mode 100644
+index 0000000000..d1d901d80b
+--- /dev/null
++++ b/test_debug2.py
+@@ -0,0 +1,63 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-key',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count
++from django.contrib.auth.models import User
++from django.test.utils import CaptureQueriesContext
++
++# Create the User table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.create_model(User)
++    except:
++        pass
++
++# Test the query with filter
++print("Testing count with annotation used in filter...")
++qs = User.objects.annotate(group_count=Count('groups')).filter(group_count__gt=0)
++
++# Check what's in the where clause
++print(f"\nQuery annotations: {list(qs.query.annotations.keys())}")
++print(f"Where clause children: {qs.query.where.children}")
++
++for child in qs.query.where.children:
++    print(f"Child type: {type(child)}")
++    if hasattr(child, 'lhs'):
++        print(f"  LHS: {child.lhs}")
++        print(f"  LHS type: {type(child.lhs)}")
++    if hasattr(child, 'rhs'):
++        print(f"  RHS: {child.rhs}")
++
++# Try the count
++with CaptureQueriesContext(connection) as queries:
++    try:
++        count = qs.count()
++        print(f"\nCount result: {count}")
++        if queries:
++            print(f"SQL: {queries[0]['sql']}")
++    except Exception as e:
++        print(f"\nError: {e}")
++        if queries:
++            print(f"SQL attempted: {queries[0]['sql']}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..17f7272cd7
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,101 @@
++"""
++Edge case tests for count() optimization
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-key',
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Count, F, Value, Case, When
++from django.contrib.auth.models import User
++from django.test.utils import CaptureQueriesContext
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.create_model(User)
++    except:
++        pass
++
++print("Testing edge cases for count() optimization...")
++print("=" * 70)
++
++# Test 1: Annotation with complex expression
++print("\nTest 1: Complex annotation expression")
++with CaptureQueriesContext(connection) as queries:
++    count = User.objects.annotate(
++        complex=Case(
++            When(is_active=True, then=Value(1)),
++            default=Value(0)
++        )
++    ).count()
++    print(f"Count: {count}")
++    print(f"SQL: {queries[0]['sql']}")
++    print("✓ Complex unused annotation removed" if "CASE" not in queries[0]['sql'] else "❌ Complex annotation not removed")
++
++# Test 2: Chained annotations where one references another
++print("\nTest 2: Chained annotations")
++with CaptureQueriesContext(connection) as queries:
++    count = User.objects.annotate(
++        group_count=Count('groups'),
++        double_count=F('group_count') * 2,
++        triple_count=F('double_count') + F('group_count')
++    ).count()
++    print(f"Count: {count}")
++    print(f"SQL: {queries[0]['sql']}")
++    print("✓ Chained unused annotations removed" if "group_count" not in queries[0]['sql'] else "❌ Chained annotations not removed")
++
++# Test 3: Empty queryset
++print("\nTest 3: Empty queryset")
++with CaptureQueriesContext(connection) as queries:
++    count = User.objects.none().annotate(group_count=Count('groups')).count()
++    print(f"Count: {count}")
++    # Empty querysets might not generate SQL
++    if queries:
++        print(f"SQL: {queries[0]['sql']}")
++    else:
++        print("No SQL generated (empty queryset optimization)")
++
++# Test 4: Annotation used in values()
++print("\nTest 4: Annotation with values()")
++qs = User.objects.annotate(group_count=Count('groups')).values('username', 'group_count')
++with CaptureQueriesContext(connection) as queries:
++    count = qs.count()
++    print(f"Count: {count}")
++    print(f"SQL: {queries[0]['sql']}")
++    # values() changes the query structure, so optimization might not apply
++
++# Test 5: Multiple annotations where only some are used
++print("\nTest 5: Partially used annotations")
++with CaptureQueriesContext(connection) as queries:
++    count = User.objects.annotate(
++        a=Count('groups'),
++        b=F('id') + 1,
++        c=F('id') + 2,
++        d=F('a') * 2  # References 'a'
++    ).filter(b__gt=0).count()  # Only 'b' is used in filter
++    print(f"Count: {count}")
++    print(f"SQL: {queries[0]['sql']}")
++    # Should keep 'b' but remove 'a', 'c', and 'd'
++
++print("\n" + "=" * 70)
++print("Edge case tests completed!")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..c1d75419f7
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,105 @@
++"""
++Test the exact scenario from the problem statement
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'testapp',
++    ],
++    SECRET_KEY='test-key',
++)
++
++# Create test app
++os.makedirs('/testbed/testapp', exist_ok=True)
++with open('/testbed/testapp/__init__.py', 'w') as f:
++    pass
++
++with open('/testbed/testapp/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'testapp'
++
++class Chapter(models.Model):
++    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='chapters')
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'testapp'
++''')
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from django.db import connection
++from django.db.models import Count
++from testapp.models import Book, Chapter
++from django.test.utils import CaptureQueriesContext
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Book)
++    schema_editor.create_model(Chapter)
++
++# Create test data
++book1 = Book.objects.create(title="Book 1")
++book2 = Book.objects.create(title="Book 2")
++Chapter.objects.create(book=book1, title="Chapter 1")
++Chapter.objects.create(book=book1, title="Chapter 2")
++Chapter.objects.create(book=book2, title="Chapter 1")
++
++print("Testing the exact scenario from the problem statement...")
++print("=" * 70)
++
++# Test from problem statement
++print("\nBook.objects.annotate(Count('chapters')).count()")
++with CaptureQueriesContext(connection) as queries:
++    result1 = Book.objects.annotate(Count('chapters')).count()
++    sql1 = queries[0]['sql']
++    print(f"Result: {result1}")
++    print(f"SQL: {sql1}")
++
++print("\nBook.objects.count()")
++with CaptureQueriesContext(connection) as queries:
++    result2 = Book.objects.count()
++    sql2 = queries[0]['sql']
++    print(f"Result: {result2}")
++    print(f"SQL: {sql2}")
++
++print("\nComparison:")
++print(f"Results are equal: {result1 == result2}")
++print(f"First query has JOIN: {'JOIN' in sql1}")
++print(f"Second query has JOIN: {'JOIN' in sql2}")
++print(f"First query optimized: {'JOIN' not in sql1}")
++
++if result1 == result2 and 'JOIN' not in sql1:
++    print("\n✓ SUCCESS: The optimization works! Unused annotations are stripped from count queries.")
++else:
++    print("\n❌ FAILED: The optimization did not work as expected.")
++
++# Additional test: verify that used annotations are kept
++print("\n" + "=" * 70)
++print("Verifying that used annotations are kept...")
++print("\nBook.objects.annotate(chapter_count=Count('chapters')).filter(chapter_count__gt=1).count()")
++with CaptureQueriesContext(connection) as queries:
++    result3 = Book.objects.annotate(chapter_count=Count('chapters')).filter(chapter_count__gt=1).count()
++    sql3 = queries[0]['sql']
++    print(f"Result: {result3}")
++    print(f"SQL: {sql3}")
++    print(f"Query has JOIN (as expected): {'JOIN' in sql3}")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..3d19a6eb8e
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,13 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = False
+diff --git a/testapp/__init__.py b/testapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testapp/models.py b/testapp/models.py
+new file mode 100644
+index 0000000000..d9abbd5c2c
+--- /dev/null
++++ b/testapp/models.py
+@@ -0,0 +1,15 @@
++
++from django.db import models
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'testapp'
++
++class Chapter(models.Model):
++    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='chapters')
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'testapp'

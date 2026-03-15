@@ -1,0 +1,1108 @@
+diff --git a/debug_field_names.py b/debug_field_names.py
+new file mode 100644
+index 000000000..2f51a15ae
+--- /dev/null
++++ b/debug_field_names.py
+@@ -0,0 +1,111 @@
++"""Debug script to see what field names are being generated."""
++
++import tempfile
++import os
++import shutil
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++from docutils import nodes
++
++
++# Patch the augment_descriptions_with_types function to debug
++original_augment = None
++
++def debug_augment_descriptions_with_types(node, annotations):
++    print("\n=== DEBUG: augment_descriptions_with_types called ===")
++    print(f"Annotations: {annotations}")
++    
++    fields = node
++    for field in fields:
++        field_name = field[0].astext()
++        print(f"Field name: '{field_name}'")
++    
++    # Call original function
++    return original_augment(node, annotations)
++
++
++def test_napoleon_typehints_debug():
++    """Test that return types are shown when using napoleon with autodoc_typehints_description_target."""
++    
++    # Monkey patch the function
++    import sphinx.ext.autodoc.typehints
++    global original_augment
++    original_augment = sphinx.ext.autodoc.typehints.augment_descriptions_with_types
++    sphinx.ext.autodoc.typehints.augment_descriptions_with_types = debug_augment_descriptions_with_types
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str, param2: int) -> str:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++        param2: Second parameter.
++
++    Returns:
++        The returned value.
++    """
++    return f"{param1} {param2}"
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++
++
++if __name__ == "__main__":
++    test_napoleon_typehints_debug()
+diff --git a/sphinx/ext/autodoc/typehints.py b/sphinx/ext/autodoc/typehints.py
+index af4b47bb0..4a9b0db37 100644
+--- a/sphinx/ext/autodoc/typehints.py
++++ b/sphinx/ext/autodoc/typehints.py
+@@ -103,6 +103,8 @@ def modify_field_list(node: nodes.field_list, annotations: Dict[str, str]) -> No
+             arg['type'] = True
+         elif parts[0] == 'rtype':
+             arguments['return'] = {'type': True}
++        elif parts[0] == 'returns':
++            arguments['return'] = {'param': True}
+ 
+     for name, annotation in annotations.items():
+         if name == 'return':
+@@ -151,6 +153,8 @@ def augment_descriptions_with_types(
+             has_type.add(name)
+         elif parts[0] == 'return':
+             has_description.add('return')
++        elif parts[0] == 'returns':
++            has_description.add('return')
+         elif parts[0] == 'rtype':
+             has_type.add('return')
+ 
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..1f7fcf486
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,204 @@
++"""Test edge cases for the Napoleon + typehints fix."""
++
++import tempfile
++import os
++import shutil
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_multiple_returns():
++    """Test function with multiple returns (should not add rtype)."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++from typing import Union
++
++def example_function(param1: str) -> Union[str, int]:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++
++    Returns:
++        * str -- when param1 is 'str'
++        * int -- when param1 is 'int'
++    """
++    if param1 == 'str':
++        return "string"
++    else:
++        return 42
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("Multiple returns test:")
++            print("-" * 80)
++            # Extract just the function documentation part
++            import re
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            print("-" * 80)
++            
++            # For multiple returns, typehints still adds rtype when documented
++            if "Return type" in html_content:
++                print("SUCCESS: Return type is added for multiple returns (as expected)")
++            else:
++                print("FAILURE: Return type should be added for multiple returns")
++
++
++def test_no_return_section():
++    """Test function without Returns section."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str) -> str:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++    """
++    return param1
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("\nNo Returns section test:")
++            print("-" * 80)
++            # Extract just the function documentation part
++            import re
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            print("-" * 80)
++            
++            # Should not have return type when using "documented" target
++            if "Return type" in html_content:
++                print("FAILURE: Return type should not be added without Returns section")
++            else:
++                print("SUCCESS: Return type correctly not added without Returns section")
++
++
++if __name__ == "__main__":
++    test_multiple_returns()
++    test_no_return_section()
+diff --git a/test_napoleon_all.py b/test_napoleon_all.py
+new file mode 100644
+index 000000000..bc5c0194c
+--- /dev/null
++++ b/test_napoleon_all.py
+@@ -0,0 +1,108 @@
++"""Test script to verify 'all' target still works."""
++
++import tempfile
++import os
++import shutil
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_napoleon_all_target():
++    """Test that return types work with autodoc_typehints_description_target = 'all'."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module - function without documented return
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str, param2: int) -> str:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++        param2: Second parameter.
++    """
++    return f"{param1} {param2}"
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "all"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("Generated HTML content:")
++            print("-" * 80)
++            # Extract just the function documentation part
++            import re
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            else:
++                print(html_content[:3000])
++            print("-" * 80)
++            
++            # Check if return type is present (should be present even without Returns section)
++            if "Return type" in html_content or "rtype" in html_content:
++                print("SUCCESS: Return type is present even without documented Returns")
++            else:
++                print("FAILURE: Return type is missing from the documentation")
++        else:
++            print("ERROR: HTML file not generated")
++
++
++if __name__ == "__main__":
++    test_napoleon_all_target()
+diff --git a/test_napoleon_numpy.py b/test_napoleon_numpy.py
+new file mode 100644
+index 000000000..f228ec8ed
+--- /dev/null
++++ b/test_napoleon_numpy.py
+@@ -0,0 +1,116 @@
++"""Test script to verify NumPy style still works."""
++
++import tempfile
++import os
++import shutil
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_napoleon_numpy_typehints():
++    """Test that return types work with NumPy style docstrings."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str, param2: int) -> str:
++    """
++    Description.
++
++    Parameters
++    ----------
++    param1 : str
++        First parameter.
++    param2 : int
++        Second parameter.
++
++    Returns
++    -------
++    str
++        The returned value.
++    """
++    return f"{param1} {param2}"
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = False
++napoleon_numpy_docstring = True
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("Generated HTML content:")
++            print("-" * 80)
++            # Extract just the function documentation part
++            import re
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            else:
++                print(html_content[:3000])
++            print("-" * 80)
++            
++            # Check if return type is present
++            if "Return type" in html_content or "→ str" in html_content:
++                print("SUCCESS: Return type is present in the documentation")
++            else:
++                print("FAILURE: Return type is missing from the documentation")
++        else:
++            print("ERROR: HTML file not generated")
++
++
++if __name__ == "__main__":
++    test_napoleon_numpy_typehints()
+diff --git a/test_napoleon_returns_fix.py b/test_napoleon_returns_fix.py
+new file mode 100644
+index 000000000..99a23f9b3
+--- /dev/null
++++ b/test_napoleon_returns_fix.py
+@@ -0,0 +1,95 @@
++"""Test case for Napoleon + autodoc_typehints_description_target fix."""
++
++import pytest
++from sphinx.testing.fixtures import make_app, test_params
++
++
++@pytest.mark.sphinx('text', testroot='ext-autodoc',
++                    confoverrides={'extensions': ['sphinx.ext.autodoc', 'sphinx.ext.napoleon'],
++                                   'autodoc_typehints': 'description',
++                                   'autodoc_typehints_description_target': 'documented',
++                                   'napoleon_google_docstring': True,
++                                   'napoleon_numpy_docstring': False})
++def test_napoleon_google_returns_with_typehints(app, status, warning):
++    """Test that return types are shown with Google style docstrings when using documented target."""
++    # Create a test module with Google style docstring
++    test_py = app.srcdir / 'napoleon_test.py'
++    test_py.write_text('''
++def google_style_function(param1: str, param2: int) -> str:
++    """
++    Test function with Google style docstring.
++
++    Args:
++        param1: First parameter.
++        param2: Second parameter.
++
++    Returns:
++        The returned value.
++    """
++    return f"{param1} {param2}"
++''')
++    
++    # Create index.rst
++    index_rst = app.srcdir / 'index.rst'
++    index_rst.write_text('''
++.. automodule:: napoleon_test
++   :members:
++''')
++    
++    app.build(force_all=True)
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Check that return type is present
++    assert 'Return type:' in content or 'rtype' in content, \
++        f"Return type not found in output:\n{content}"
++
++
++@pytest.mark.sphinx('text', testroot='ext-autodoc',
++                    confoverrides={'extensions': ['sphinx.ext.autodoc', 'sphinx.ext.napoleon'],
++                                   'autodoc_typehints': 'description',
++                                   'autodoc_typehints_description_target': 'documented',
++                                   'napoleon_google_docstring': False,
++                                   'napoleon_numpy_docstring': True})
++def test_napoleon_numpy_returns_with_typehints(app, status, warning):
++    """Test that return types are shown with NumPy style docstrings when using documented target."""
++    # Create a test module with NumPy style docstring
++    test_py = app.srcdir / 'napoleon_test.py'
++    test_py.write_text('''
++def numpy_style_function(param1: str, param2: int) -> str:
++    """
++    Test function with NumPy style docstring.
++
++    Parameters
++    ----------
++    param1 : str
++        First parameter.
++    param2 : int
++        Second parameter.
++
++    Returns
++    -------
++    str
++        The returned value.
++    """
++    return f"{param1} {param2}"
++''')
++    
++    # Create index.rst
++    index_rst = app.srcdir / 'index.rst'
++    index_rst.write_text('''
++.. automodule:: napoleon_test
++   :members:
++''')
++    
++    app.build(force_all=True)
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Check that return type is present
++    assert 'Return type:' in content or 'rtype' in content, \
++        f"Return type not found in output:\n{content}"
++
++
++if __name__ == "__main__":
++    # Run the tests
++    import sys
++    sys.exit(pytest.main([__file__, '-v']))
+diff --git a/test_napoleon_typehints.py b/test_napoleon_typehints.py
+new file mode 100644
+index 000000000..ef59e02f5
+--- /dev/null
++++ b/test_napoleon_typehints.py
+@@ -0,0 +1,116 @@
++"""Test script to reproduce the Napoleon + typehints issue."""
++
++import tempfile
++import os
++import shutil
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_napoleon_typehints_issue():
++    """Test that return types are shown when using napoleon with autodoc_typehints_description_target."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str, param2: int) -> str:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++        param2: Second parameter.
++
++    Returns:
++        The returned value.
++    """
++    return f"{param1} {param2}"
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("Generated HTML content:")
++            print("-" * 80)
++            # Look for the relevant section
++            import re
++            # Extract just the function documentation part
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            else:
++                print(html_content[:3000])  # Print first 3000 chars if pattern not found
++            print("-" * 80)
++            
++            # Check if return type is present
++            if "Return type" in html_content or "→ str" in html_content:
++                print("SUCCESS: Return type is present in the documentation")
++            else:
++                print("FAILURE: Return type is missing from the documentation")
++        else:
++            print("ERROR: HTML file not generated")
++            # List files in output directory
++            print("Files in output directory:")
++            for f in outdir.rglob("*"):
++                print(f)
++
++
++if __name__ == "__main__":
++    test_napoleon_typehints_issue()
+diff --git a/test_napoleon_typehints_regression.py b/test_napoleon_typehints_regression.py
+new file mode 100644
+index 000000000..ebc2f76e4
+--- /dev/null
++++ b/test_napoleon_typehints_regression.py
+@@ -0,0 +1,104 @@
++"""Regression test for Napoleon + autodoc_typehints_description_target issue."""
++
++import pytest
++from pathlib import Path
++
++
++@pytest.mark.sphinx('text', testroot='ext-autodoc',
++                    confoverrides={'extensions': ['sphinx.ext.autodoc', 'sphinx.ext.napoleon'],
++                                   'autodoc_typehints': 'description',
++                                   'autodoc_typehints_description_target': 'documented',
++                                   'napoleon_google_docstring': True,
++                                   'napoleon_numpy_docstring': False})
++def test_napoleon_returns_with_typehints_documented_target(app):
++    """Test that return types are shown with Napoleon when Returns section is documented."""
++    # Create a test module with Google style docstring
++    test_py = app.srcdir / 'napoleon_google_test.py'
++    test_py.write_text('''
++def google_style_returns(param1: str, param2: int) -> str:
++    """
++    Test function with Google style docstring.
++
++    Args:
++        param1: First parameter.
++        param2: Second parameter.
++
++    Returns:
++        The returned value.
++    """
++    return f"{param1} {param2}"
++
++def google_style_no_returns(param1: str) -> str:
++    """
++    Test function without Returns section.
++
++    Args:
++        param1: First parameter.
++    """
++    return param1
++''')
++    
++    # Create index.rst
++    (app.srcdir / 'index.rst').write_text('''
++.. automodule:: napoleon_google_test
++   :members:
++''')
++    
++    app.build(force_all=True)
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Check that return type is present for function with Returns section
++    assert 'google_style_returns(param1, param2)' in content
++    # Find the section for google_style_returns
++    returns_idx = content.find('google_style_returns')
++    no_returns_idx = content.find('google_style_no_returns')
++    returns_section = content[returns_idx:no_returns_idx]
++    
++    assert 'Return type:' in returns_section, \
++        f"Return type not found for google_style_returns:\n{returns_section}"
++    
++    # Check that return type is NOT present for function without Returns section
++    no_returns_section = content[no_returns_idx:]
++    assert 'Return type:' not in no_returns_section, \
++        f"Return type should not be present for google_style_no_returns:\n{no_returns_section}"
++
++
++@pytest.mark.sphinx('text', testroot='ext-autodoc',
++                    confoverrides={'extensions': ['sphinx.ext.autodoc', 'sphinx.ext.napoleon'],
++                                   'autodoc_typehints': 'description',
++                                   'autodoc_typehints_description_target': 'all',
++                                   'napoleon_google_docstring': True,
++                                   'napoleon_numpy_docstring': False})
++def test_napoleon_returns_with_typehints_all_target(app):
++    """Test that return types are shown with Napoleon when target is 'all'."""
++    # Create a test module with Google style docstring
++    test_py = app.srcdir / 'napoleon_google_test.py'
++    test_py.write_text('''
++def google_style_no_returns(param1: str) -> str:
++    """
++    Test function without Returns section.
++
++    Args:
++        param1: First parameter.
++    """
++    return param1
++''')
++    
++    # Create index.rst
++    (app.srcdir / 'index.rst').write_text('''
++.. automodule:: napoleon_google_test
++   :members:
++''')
++    
++    app.build(force_all=True)
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Check that return type IS present even without Returns section when target is 'all'
++    assert 'Return type:' in content, \
++        f"Return type should be present with target='all' even without Returns section:\n{content}"
++
++
++if __name__ == "__main__":
++    # Run the tests
++    import sys
++    sys.exit(pytest.main([__file__, '-v']))
+diff --git a/test_no_returns.py b/test_no_returns.py
+new file mode 100644
+index 000000000..38cb67de6
+--- /dev/null
++++ b/test_no_returns.py
+@@ -0,0 +1,101 @@
++"""Test function without Returns section."""
++
++import tempfile
++from pathlib import Path
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_no_return_section():
++    """Test function without Returns section."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / "source"
++        outdir = Path(tmpdir) / "build"
++        srcdir.mkdir()
++        outdir.mkdir()
++        
++        # Create test module
++        test_module = srcdir / "test_module.py"
++        test_module.write_text('''
++def example_function(param1: str) -> str:
++    """
++    Description.
++
++    Parameters:
++        param1: First parameter.
++    """
++    return param1
++''')
++        
++        # Create conf.py
++        conf_py = srcdir / "conf.py"
++        conf_py.write_text(f'''
++import sys
++sys.path.insert(0, r'{srcdir}')
++
++extensions = [
++    'sphinx.ext.autodoc',
++    'sphinx.ext.napoleon',
++]
++
++autodoc_typehints = "description"
++autodoc_typehints_description_target = "documented"
++
++napoleon_google_docstring = True
++napoleon_numpy_docstring = False
++napoleon_use_rtype = True
++''')
++        
++        # Create index.rst
++        index_rst = srcdir / "index.rst"
++        index_rst.write_text('''
++Test Module
++===========
++
++.. automodule:: test_module
++   :members:
++''')
++        
++        # Build documentation
++        with docutils_namespace():
++            app = Sphinx(
++                srcdir=str(srcdir),
++                confdir=str(srcdir),
++                outdir=str(outdir),
++                doctreedir=str(outdir / ".doctrees"),
++                buildername="html",
++                confoverrides={},
++                status=None,
++                warning=None,
++                freshenv=True,
++                warningiserror=False,
++                tags=[],
++                verbosity=0,
++                parallel=1
++            )
++            app.build(force_all=True)
++        
++        # Read the generated HTML
++        html_file = outdir / "index.html"
++        if html_file.exists():
++            html_content = html_file.read_text()
++            print("\nNo Returns section test:")
++            print("-" * 80)
++            # Extract just the function documentation part
++            import re
++            match = re.search(r'example_function.*?(?=</section>)', html_content, re.DOTALL)
++            if match:
++                print(match.group(0))
++            print("-" * 80)
++            
++            # Should not have return type when using "documented" target
++            if "Return type" in html_content:
++                print("FAILURE: Return type should not be added without Returns section")
++            else:
++                print("SUCCESS: Return type correctly not added without Returns section")
++
++
++if __name__ == "__main__":
++    test_no_return_section()
+diff --git a/tests/test_ext_autodoc_configs.py b/tests/test_ext_autodoc_configs.py
+index f6436f541..ef9867707 100644
+--- a/tests/test_ext_autodoc_configs.py
++++ b/tests/test_ext_autodoc_configs.py
+@@ -1261,3 +1261,78 @@ def test_autodoc_default_options_with_values(app):
+         assert '      list of weak references to the object (if defined)' not in actual
+     assert '   .. py:method:: CustomIter.snafucate()' not in actual
+     assert '      Makes this snafucated.' not in actual
++
++
++@pytest.mark.sphinx('text', testroot='ext-autodoc',
++                    confoverrides={'extensions': ['sphinx.ext.autodoc', 'sphinx.ext.napoleon'],
++                                   'autodoc_typehints': 'description',
++                                   'autodoc_typehints_description_target': 'documented',
++                                   'napoleon_google_docstring': True,
++                                   'napoleon_numpy_docstring': False})
++def test_napoleon_returns_with_typehints_documented_target(app):
++    """Test that return types are shown with Napoleon when Returns section is documented."""
++    # Create a test module with Google style docstring
++    test_py = app.srcdir / 'napoleon_google_test.py'
++    test_py.write_text('''
++def google_style_returns(param1: str, param2: int) -> str:
++    """
++    Test function with Google style docstring.
++
++    Args:
++        param1: First parameter.
++        param2: Second parameter.
++
++    Returns:
++        The returned value.
++    """
++    return f"{param1} {param2}"
++
++def google_style_no_returns(param1: str) -> str:
++    """
++    Test function without Returns section.
++
++    Args:
++        param1: First parameter.
++    """
++    return param1
++''')
++    
++    # Create index.rst
++    (app.srcdir / 'index.rst').write_text('''
++.. automodule:: napoleon_google_test
++   :members:
++''')
++    
++    app.build(force_all=True)
++    content = (app.outdir / 'index.txt').read_text()
++    
++    # Check that return type is present for function with Returns section
++    assert 'google_style_returns(param1, param2)' in content
++    assert 'google_style_no_returns(param1)' in content
++    
++    # The output shows that Return type is correctly added for google_style_returns
++    # and correctly NOT added for google_style_no_returns
++    assert 'Return type:' in content  # Should be present for google_style_returns
++    
++    # Split content by function names to check each section
++    parts = content.split('napoleon_google_test.')
++    
++    # Find the sections
++    returns_section = None
++    no_returns_section = None
++    
++    for part in parts:
++        if part.startswith('google_style_returns'):
++            returns_section = part
++        elif part.startswith('google_style_no_returns'):
++            no_returns_section = part
++    
++    # Check google_style_returns has Return type
++    assert returns_section is not None
++    assert 'Return type:' in returns_section, \
++        f"Return type not found for google_style_returns:\n{returns_section}"
++    
++    # Check google_style_no_returns does NOT have Return type
++    assert no_returns_section is not None
++    assert 'Return type:' not in no_returns_section, \
++        f"Return type should not be present for google_style_no_returns:\n{no_returns_section}"

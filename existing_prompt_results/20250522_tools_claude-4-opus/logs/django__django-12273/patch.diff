@@ -1,0 +1,929 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 844c01e95e..200a7d978d 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -569,7 +569,13 @@ class Model(metaclass=ModelBase):
+         return getattr(self, meta.pk.attname)
+ 
+     def _set_pk_val(self, value):
+-        return setattr(self, self._meta.pk.attname, value)
++        # Set the primary key value on the current model
++        setattr(self, self._meta.pk.attname, value)
++        # For models with multi-table inheritance, also set the parent's pk field
++        for parent, field in self._meta.parents.items():
++            if field:
++                # Set the parent's primary key value as well
++                setattr(self, parent._meta.pk.attname, value)
+ 
+     pk = property(_get_pk_val, _set_pk_val)
+ 
+@@ -804,8 +810,10 @@ class Model(metaclass=ModelBase):
+         inserted = False
+         for parent, field in meta.parents.items():
+             # Make sure the link fields are synced between parent and self.
++            # Only sync if the parent's pk field is not explicitly set in the instance
+             if (field and getattr(self, parent._meta.pk.attname) is None and
+-                    getattr(self, field.attname) is not None):
++                    getattr(self, field.attname) is not None and
++                    parent._meta.pk.attname not in self.__dict__):
+                 setattr(self, parent._meta.pk.attname, getattr(self, field.attname))
+             parent_inserted = self._save_parents(cls=parent, using=using, update_fields=update_fields)
+             updated = self._save_table(
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..d424f1d9fc
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,153 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++import uuid
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset_uid(self):
++        self.uid = None
++        self.f = False
++        
++    def reset_pk(self):
++        self.pk = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    extra = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ItemUUID(models.Model):
++    uid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        self.uid = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++class DerivedUUID(ItemUUID):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++    schema_editor.create_model(ItemUUID)
++    schema_editor.create_model(DerivedUUID)
++
++print("Test 1: Setting uid=None on Derived (AutoField)")
++print("=" * 50)
++d1 = Derived.objects.create(f=True, extra='first')
++pk1 = d1.pk
++print(f"Created: pk={d1.pk}, uid={d1.uid}, f={d1.f}, extra='{d1.extra}'")
++
++d1.reset_uid()
++print(f"After reset_uid: pk={d1.pk}, uid={d1.uid}")
++
++d1.save()
++print(f"After save: pk={d1.pk}, uid={d1.uid}, f={d1.f}")
++
++print(f"\nChecking original: ", end='')
++orig = Derived.objects.get(pk=pk1)
++print(f"pk={orig.pk}, f={orig.f}, extra='{orig.extra}'")
++
++print(f"Total Derived objects: {Derived.objects.count()}")
++print(f"Test 1: {'PASSED' if orig.f and Derived.objects.count() == 2 else 'FAILED'}")
++
++print("\n\nTest 2: Setting pk=None on Derived (AutoField)")
++print("=" * 50)
++d2 = Derived.objects.create(f=True, extra='second')
++pk2 = d2.pk
++print(f"Created: pk={d2.pk}, uid={d2.uid}, f={d2.f}, extra='{d2.extra}'")
++
++d2.reset_pk()
++print(f"After reset_pk: pk={d2.pk}, uid={d2.uid}")
++
++d2.save()
++print(f"After save: pk={d2.pk}, uid={d2.uid}, f={d2.f}")
++
++print(f"\nChecking original: ", end='')
++orig2 = Derived.objects.get(pk=pk2)
++print(f"pk={orig2.pk}, f={orig2.f}, extra='{orig2.extra}'")
++
++print(f"Total Derived objects: {Derived.objects.count()}")
++print(f"Test 2: {'PASSED' if orig2.f and Derived.objects.count() == 4 else 'FAILED'}")
++
++print("\n\nTest 3: Setting uid=None on DerivedUUID (UUIDField)")
++print("=" * 50)
++d3 = DerivedUUID.objects.create(f=True)
++pk3 = d3.pk
++print(f"Created: pk={d3.pk}, f={d3.f}")
++
++d3.reset()
++print(f"After reset: pk={d3.pk}, uid={d3.uid}")
++
++d3.save()
++print(f"After save: pk={d3.pk}, f={d3.f}")
++
++print(f"\nChecking original: ", end='')
++orig3 = DerivedUUID.objects.get(pk=pk3)
++print(f"pk={orig3.pk}, f={orig3.f}")
++
++print(f"Total DerivedUUID objects: {DerivedUUID.objects.count()}")
++print(f"Test 3: {'PASSED' if orig3.f and DerivedUUID.objects.count() == 2 else 'FAILED'}")
++
++print("\n\nTest 4: Direct Item model (no inheritance)")
++print("=" * 50)
++item = Item.objects.create(f=True)
++pk4 = item.pk
++print(f"Created: pk={item.pk}, uid={item.uid}, f={item.f}")
++
++item.reset_uid()
++print(f"After reset_uid: pk={item.pk}, uid={item.uid}")
++
++item.save()
++print(f"After save: pk={item.pk}, uid={item.uid}, f={item.f}")
++
++print(f"\nChecking original: ", end='')
++orig4 = Item.objects.get(pk=pk4)
++print(f"pk={orig4.pk}, f={orig4.f}")
++
++# Count all Item objects (including Derived)
++total_item_count = Item.objects.count()
++print(f"Total Item objects: {total_item_count}")
++# We created 4 Derived objects (which are also Items) + 2 direct Item objects = 6 total
++print(f"Test 4: {'PASSED' if orig4.f and total_item_count == 6 else 'FAILED'}")
++
++print("\n\nSummary:")
++print("All tests check that setting primary key to None creates a new object")
++print("instead of overwriting the existing one.")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..16ecfe8e5a
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,101 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    extra = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++print("Edge Case 1: Setting uid=None without explicit assignment")
++print("=" * 60)
++d1 = Derived.objects.create(f=True, extra='test1')
++pk1 = d1.pk
++# Delete uid from __dict__ to simulate it not being explicitly set
++if 'uid' in d1.__dict__:
++    del d1.__dict__['uid']
++d1.save()
++print(f"After save without uid in __dict__: pk={d1.pk}")
++print(f"Original still exists: {Derived.objects.filter(pk=pk1).exists()}")
++print(f"Total objects: {Derived.objects.count()}")
++
++print("\n\nEdge Case 2: Setting uid through setattr")
++print("=" * 60)
++d2 = Derived.objects.create(f=True, extra='test2')
++pk2 = d2.pk
++setattr(d2, 'uid', None)
++d2.f = False
++d2.save()
++print(f"After setattr(d2, 'uid', None) and save: pk={d2.pk}")
++print(f"Original still exists: {Derived.objects.filter(pk=pk2).exists()}")
++print(f"Total objects: {Derived.objects.count()}")
++
++print("\n\nEdge Case 3: Direct assignment to __dict__")
++print("=" * 60)
++d3 = Derived.objects.create(f=True, extra='test3')
++pk3 = d3.pk
++d3.__dict__['uid'] = None
++d3.f = False
++d3.save()
++print(f"After d3.__dict__['uid'] = None and save: pk={d3.pk}")
++print(f"Original still exists: {Derived.objects.filter(pk=pk3).exists()}")
++print(f"Total objects: {Derived.objects.count()}")
++
++print("\n\nEdge Case 4: Multiple inheritance levels")
++print("=" * 60)
++
++class GrandChild(Derived):
++    more = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(GrandChild)
++
++gc = GrandChild.objects.create(f=True, extra='grand', more='child')
++pk4 = gc.pk
++gc.uid = None
++gc.f = False
++gc.save()
++print(f"After gc.uid = None and save: pk={gc.pk}")
++print(f"Original still exists: {GrandChild.objects.filter(pk=pk4).exists()}")
++print(f"Total GrandChild objects: {GrandChild.objects.count()}")
++
++print("\n\nAll edge cases completed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..e0a922cbdf
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,74 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        self.uid = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Test the issue
++print("Creating initial Derived object with f=True...")
++derived = Derived.objects.create(f=True)
++initial_pk = derived.pk
++print(f"Initial object created with pk={initial_pk}, f={derived.f}")
++
++print("\nGetting the object as Item and accessing derived...")
++item = Item.objects.get(pk=derived.pk)
++obj1 = item.derived
++print(f"Retrieved object: pk={obj1.pk}, f={obj1.f}")
++
++print("\nResetting the object...")
++obj1.reset()
++print(f"After reset: pk={obj1.pk}, f={obj1.f}")
++
++print("\nSaving the reset object...")
++obj1.save()
++print(f"After save: pk={obj1.pk}, f={obj1.f}")
++
++print("\nChecking the original object...")
++obj = Item.objects.get(pk=initial_pk)
++print(f"Original object: pk={obj.pk}, f={obj.f}")
++
++print("\nExpected: f=True (original object should not be overwritten)")
++print(f"Actual: f={obj.f}")
++print(f"Test {'PASSED' if obj.f else 'FAILED'}")
+diff --git a/test_issue_detailed.py b/test_issue_detailed.py
+new file mode 100644
+index 0000000000..b4cc493a0b
+--- /dev/null
++++ b/test_issue_detailed.py
+@@ -0,0 +1,91 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        print(f"  Before reset: uid={self.uid}")
++        self.uid = None
++        self.f = False
++        print(f"  After reset: uid={self.uid}")
++        
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Test the issue
++print("1. Creating initial Derived object with f=True...")
++derived = Derived.objects.create(f=True)
++initial_pk = derived.pk
++print(f"   Initial object created with pk={initial_pk}, f={derived.f}")
++
++print("\n2. Getting the object as Item and accessing derived...")
++item = Item.objects.get(pk=derived.pk)
++obj1 = item.derived
++print(f"   Retrieved object: pk={obj1.pk}, f={obj1.f}")
++
++print("\n3. Resetting the object...")
++obj1.reset()
++
++print("\n4. Checking pk before save...")
++print(f"   obj1.pk = {obj1.pk}")
++print(f"   obj1.uid = {obj1.uid}")
++
++# Let's also check the parent pointer field
++for field in obj1._meta.parents.values():
++    if field:
++        print(f"   Parent pointer field: {field.name} = {getattr(obj1, field.attname)}")
++
++print("\n5. Saving the reset object...")
++obj1.save()
++print(f"   After save: pk={obj1.pk}, f={obj1.f}")
++
++print("\n6. Checking the database...")
++all_items = list(Item.objects.all().values('uid', 'f'))
++print(f"   All items in database: {all_items}")
++
++print("\n7. Checking the original object...")
++try:
++    obj = Item.objects.get(pk=initial_pk)
++    print(f"   Original object: pk={obj.pk}, f={obj.f}")
++except Item.DoesNotExist:
++    print(f"   Original object with pk={initial_pk} does not exist!")
++
++print("\nExpected: Two objects in database, original with f=True")
++print(f"Actual: {len(all_items)} object(s) in database")
++print(f"Test {'PASSED' if len(all_items) == 2 else 'FAILED'}")
+diff --git a/test_issue_fixed.py b/test_issue_fixed.py
+new file mode 100644
+index 0000000000..4707cbcd3f
+--- /dev/null
++++ b/test_issue_fixed.py
+@@ -0,0 +1,79 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        # Use self.pk instead of self.uid to properly handle inheritance
++        self.pk = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Test the issue
++print("Creating initial Derived object with f=True...")
++derived = Derived.objects.create(f=True)
++initial_pk = derived.pk
++print(f"Initial object created with pk={initial_pk}, f={derived.f}")
++
++print("\nGetting the object as Item and accessing derived...")
++item = Item.objects.get(pk=derived.pk)
++obj1 = item.derived
++print(f"Retrieved object: pk={obj1.pk}, f={obj1.f}")
++
++print("\nResetting the object...")
++obj1.reset()
++print(f"After reset: pk={obj1.pk}, f={obj1.f}")
++
++print("\nSaving the reset object...")
++obj1.save()
++print(f"After save: pk={obj1.pk}, f={obj1.f}")
++
++print("\nChecking all objects...")
++all_items = list(Item.objects.all().order_by('pk').values('uid', 'f'))
++print(f"All items in database: {all_items}")
++
++print("\nChecking the original object...")
++obj = Item.objects.get(pk=initial_pk)
++print(f"Original object: pk={obj.pk}, f={obj.f}")
++
++print("\nExpected: f=True (original object should not be overwritten)")
++print(f"Actual: f={obj.f}")
++print(f"Test {'PASSED' if obj.f and len(all_items) == 2 else 'FAILED'}")
+diff --git a/test_pk_field.py b/test_pk_field.py
+new file mode 100644
+index 0000000000..5cf19cd0dc
+--- /dev/null
++++ b/test_pk_field.py
+@@ -0,0 +1,76 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Analyze the model structure
++print("Item model:")
++print(f"  Primary key field: {Item._meta.pk}")
++print(f"  Primary key attname: {Item._meta.pk.attname}")
++print(f"  Parents: {Item._meta.parents}")
++
++print("\nDerived model:")
++print(f"  Primary key field: {Derived._meta.pk}")
++print(f"  Primary key attname: {Derived._meta.pk.attname}")
++print(f"  Parents: {Derived._meta.parents}")
++
++for parent, field in Derived._meta.parents.items():
++    print(f"  Parent {parent.__name__}: field={field}, attname={field.attname if field else None}")
++
++# Test instance
++print("\nCreating Derived instance:")
++d = Derived(f=True)
++d.save()
++print(f"  d.pk = {d.pk}")
++print(f"  d.uid = {d.uid}")
++print(f"  d.item_ptr_id = {d.item_ptr_id}")
++
++print("\nSetting pk to None:")
++d.pk = None
++print(f"  d.pk = {d.pk}")
++print(f"  d.uid = {d.uid}")
++print(f"  d.item_ptr_id = {d.item_ptr_id}")
++
++print("\nSetting uid to None:")
++d.uid = None
++print(f"  d.pk = {d.pk}")
++print(f"  d.uid = {d.uid}")
++print(f"  d.item_ptr_id = {d.item_ptr_id}")
+diff --git a/test_pk_reset_inheritance.py b/test_pk_reset_inheritance.py
+new file mode 100644
+index 0000000000..e1a3a8252d
+--- /dev/null
++++ b/test_pk_reset_inheritance.py
+@@ -0,0 +1,122 @@
++"""
++Test for resetting primary key on child models in multi-table inheritance.
++This test should be added to Django's test suite.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY='test-secret-key',
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.test import TestCase
++from django.db import models
++
++
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        self.uid = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++
++class Derived(Item):
++    extra = models.CharField(max_length=100, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class PrimaryKeyResetInheritanceTests(TestCase):
++    def test_reset_primary_key_on_child_model(self):
++        """
++        Setting primary key to None on a child model should create a new
++        instance on save, not overwrite the existing one.
++        """
++        # Create initial object
++        derived = Derived.objects.create(f=True, extra='original')
++        original_pk = derived.pk
++        
++        # Get the object through parent model and access child
++        item = Item.objects.get(pk=original_pk)
++        obj = item.derived
++        
++        # Reset the object (sets uid=None)
++        obj.reset()
++        
++        # Save should create a new object
++        obj.save()
++        
++        # Check that original object still exists and wasn't overwritten
++        original = Item.objects.get(pk=original_pk)
++        self.assertTrue(original.f)
++        
++        # Check that we have two objects now
++        self.assertEqual(Item.objects.count(), 2)
++        self.assertEqual(Derived.objects.count(), 2)
++        
++        # Check that the new object has different pk and correct values
++        self.assertNotEqual(obj.pk, original_pk)
++        self.assertFalse(obj.f)
++    
++    def test_set_pk_none_on_child_model(self):
++        """
++        Setting pk property to None on a child model should also work.
++        """
++        # Create initial object
++        derived = Derived.objects.create(f=True, extra='original')
++        original_pk = derived.pk
++        
++        # Set pk to None
++        derived.pk = None
++        derived.f = False
++        
++        # Save should create a new object
++        derived.save()
++        
++        # Check that original object still exists
++        original = Derived.objects.get(pk=original_pk)
++        self.assertTrue(original.f)
++        
++        # Check that we have two objects
++        self.assertEqual(Derived.objects.count(), 2)
++        
++        # Check that the new object has different pk
++        self.assertNotEqual(derived.pk, original_pk)
++        self.assertFalse(derived.f)
++
++
++if __name__ == '__main__':
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Item)
++        schema_editor.create_model(Derived)
++    
++    # Run tests
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2, interactive=True)
++    failures = test_runner.run_tests(['__main__'])
++    sys.exit(bool(failures))
+diff --git a/test_save_parents.py b/test_save_parents.py
+new file mode 100644
+index 0000000000..a30405e780
+--- /dev/null
++++ b/test_save_parents.py
+@@ -0,0 +1,71 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    def reset(self):
++        self.uid = None
++        self.f = False
++        
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Test the _save_parents logic
++print("Creating initial Derived object...")
++d = Derived.objects.create(f=True)
++print(f"Created: pk={d.pk}, uid={d.uid}, item_ptr_id={d.item_ptr_id}")
++
++print("\nSetting uid to None...")
++d.uid = None
++print(f"After setting uid=None: pk={d.pk}, uid={d.uid}, item_ptr_id={d.item_ptr_id}")
++
++# Manually trace what happens in _save_parents
++print("\nWhat happens in _save_parents:")
++parent_cls = Item
++field = Derived._meta.parents[parent_cls]
++print(f"  Parent class: {parent_cls}")
++print(f"  Parent pointer field: {field}")
++print(f"  getattr(d, parent_cls._meta.pk.attname) = {getattr(d, parent_cls._meta.pk.attname)}")
++print(f"  getattr(d, field.attname) = {getattr(d, field.attname)}")
++
++# This is the problematic line 815
++if (field and getattr(d, parent_cls._meta.pk.attname) is None and
++        getattr(d, field.attname) is not None):
++    print(f"  Line 815 would execute: setting parent pk to {getattr(d, field.attname)}")
++    setattr(d, parent_cls._meta.pk.attname, getattr(d, field.attname))
++    print(f"  After line 815: uid={d.uid}")
+diff --git a/test_set_pk_val.py b/test_set_pk_val.py
+new file mode 100644
+index 0000000000..ba0f106c5e
+--- /dev/null
++++ b/test_set_pk_val.py
+@@ -0,0 +1,57 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++
++# Define models
++class Item(models.Model):
++    uid = models.AutoField(primary_key=True, editable=False)
++    f = models.BooleanField(default=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Derived(Item):
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++    schema_editor.create_model(Derived)
++
++# Test _set_pk_val
++print("Creating Derived instance...")
++d = Derived.objects.create(f=True)
++print(f"Created: pk={d.pk}, uid={d.uid}, item_ptr_id={d.item_ptr_id}")
++
++print("\nUsing _set_pk_val(None)...")
++d._set_pk_val(None)
++print(f"After _set_pk_val(None): pk={d.pk}, uid={d.uid}, item_ptr_id={d.item_ptr_id}")
++
++print("\nCreating another instance and using pk property...")
++d2 = Derived.objects.create(f=True)
++print(f"Created: pk={d2.pk}, uid={d2.uid}, item_ptr_id={d2.item_ptr_id}")
++d2.pk = None
++print(f"After pk=None: pk={d2.pk}, uid={d2.uid}, item_ptr_id={d2.item_ptr_id}")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..ba94a45295
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,14 @@
++SECRET_KEY = 'test-secret-key'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++USE_TZ = True

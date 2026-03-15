@@ -1,0 +1,617 @@
+diff --git a/debug_metaclass.py b/debug_metaclass.py
+new file mode 100644
+index 0000000000..410eed083d
+--- /dev/null
++++ b/debug_metaclass.py
+@@ -0,0 +1,96 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.forms.models import ModelFormMetaclass
++
++# Monkey patch to add debugging
++original_new = ModelFormMetaclass.__new__
++
++def debug_new(mcs, name, bases, attrs):
++    print(f"\n=== ModelFormMetaclass.__new__ for {name} ===")
++    
++    # Check what's happening with formfield_callback
++    base_formfield_callback = None
++    for b in bases:
++        print(f"Checking base: {b}")
++        if hasattr(b, "Meta") and hasattr(b.Meta, "formfield_callback"):
++            print(f"  Found Meta.formfield_callback: {b.Meta.formfield_callback}")
++            base_formfield_callback = b.Meta.formfield_callback
++            break
++    
++    # If not found in Meta, check for class attribute
++    if base_formfield_callback is None:
++        print("  Checking for class attribute...")
++        for b in bases:
++            print(f"  Checking {b} for formfield_callback...")
++            print(f"    hasattr result: {hasattr(b, 'formfield_callback')}")
++            if hasattr(b, 'formfield_callback'):
++                print(f"    Value: {getattr(b, 'formfield_callback', 'NOT FOUND')}")
++            if hasattr(b, "formfield_callback"):
++                print(f"  Found class formfield_callback in {b}: {b.formfield_callback}")
++                base_formfield_callback = b.formfield_callback
++                break
++    
++    print(f"base_formfield_callback: {base_formfield_callback}")
++    print(f"'formfield_callback' in attrs: {'formfield_callback' in attrs}")
++    if 'formfield_callback' in attrs:
++        print(f"attrs['formfield_callback']: {attrs['formfield_callback']}")
++    
++    # Call original
++    result = original_new(mcs, name, bases, attrs)
++    
++    return result
++
++ModelFormMetaclass.__new__ = debug_new
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    print(f"all_required called for field: {field.name}")
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++class MyFormWithClassAttribute(forms.ModelForm):
++    formfield_callback = all_required
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++print("\n=== Checking MyFormWithClassAttribute ===")
++print(f"Has formfield_callback: {hasattr(MyFormWithClassAttribute, 'formfield_callback')}")
++print(f"formfield_callback value: {getattr(MyFormWithClassAttribute, 'formfield_callback', 'NOT FOUND')}")
++print(f"Dir: {[x for x in dir(MyFormWithClassAttribute) if 'formfield' in x]}")
++
++print("\n=== Creating FactoryForm ===")
++FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithClassAttribute)
+diff --git a/debug_test.py b/debug_test.py
+new file mode 100644
+index 0000000000..4b374ade0a
+--- /dev/null
++++ b/debug_test.py
+@@ -0,0 +1,74 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    print(f"all_required called for field: {field.name}")
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++class MyFormWithClassAttribute(forms.ModelForm):
++    formfield_callback = all_required  # Class attribute way
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++# Test 1: Create form directly
++print("=== Creating MyFormWithClassAttribute directly ===")
++form1 = MyFormWithClassAttribute()
++print(f"Active field required: {form1.fields['active'].required}")
++print(f"Name field required: {form1.fields['name'].required}")
++
++# Test 2: Create form using modelform_factory
++print("\n=== Creating form using modelform_factory ===")
++FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithClassAttribute)
++print(f"FactoryForm has formfield_callback: {hasattr(FactoryForm, 'formfield_callback')}")
++if hasattr(FactoryForm, 'formfield_callback'):
++    print(f"FactoryForm.formfield_callback: {FactoryForm.formfield_callback}")
++
++form2 = FactoryForm()
++print(f"Active field required: {form2.fields['active'].required}")
++print(f"Name field required: {form2.fields['name'].required}")
++
++# Test 3: Check what's in Meta
++print("\n=== Checking Meta inheritance ===")
++print(f"MyFormWithClassAttribute.Meta exists: {hasattr(MyFormWithClassAttribute, 'Meta')}")
++print(f"FactoryForm.Meta exists: {hasattr(FactoryForm, 'Meta')}")
++print(f"FactoryForm.Meta.__bases__: {FactoryForm.Meta.__bases__}")
++if hasattr(MyFormWithClassAttribute.Meta, 'formfield_callback'):
++    print(f"MyFormWithClassAttribute.Meta.formfield_callback: {MyFormWithClassAttribute.Meta.formfield_callback}")
++if hasattr(FactoryForm.Meta, 'formfield_callback'):
++    print(f"FactoryForm.Meta.formfield_callback: {FactoryForm.Meta.formfield_callback}")
+diff --git a/debug_test2.py b/debug_test2.py
+new file mode 100644
+index 0000000000..4ac2ea4e66
+--- /dev/null
++++ b/debug_test2.py
+@@ -0,0 +1,72 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    print(f"all_required called for field: {field.name}")
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++# Patch ModelFormMetaclass to add debugging
++original_new = forms.models.ModelFormMetaclass.__new__
++
++def debug_new(mcs, name, bases, attrs):
++    print(f"\n=== ModelFormMetaclass.__new__ called for {name} ===")
++    print(f"Bases: {bases}")
++    print(f"Attrs keys: {list(attrs.keys())}")
++    
++    # Check formfield_callback in bases
++    for b in bases:
++        if hasattr(b, 'formfield_callback'):
++            print(f"Base {b} has formfield_callback: {b.formfield_callback}")
++        if hasattr(b, "Meta") and hasattr(b.Meta, "formfield_callback"):
++            print(f"Base {b} Meta has formfield_callback: {b.Meta.formfield_callback}")
++    
++    result = original_new(mcs, name, bases, attrs)
++    return result
++
++forms.models.ModelFormMetaclass.__new__ = staticmethod(debug_new)
++
++
++class MyFormWithClassAttribute(forms.ModelForm):
++    formfield_callback = all_required  # Class attribute way
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++# Test: Create form using modelform_factory
++print("\n=== Creating form using modelform_factory ===")
++FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithClassAttribute)
+diff --git a/debug_test3.py b/debug_test3.py
+new file mode 100644
+index 0000000000..f2d2c639e4
+--- /dev/null
++++ b/debug_test3.py
+@@ -0,0 +1,62 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    print(f"all_required called for field: {field.name}")
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++class MyFormWithClassAttribute(forms.ModelForm):
++    formfield_callback = all_required  # Class attribute way
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++# Test: Create form using modelform_factory
++print("\n=== Creating form using modelform_factory ===")
++FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithClassAttribute)
++
++print(f"\nMyFormWithClassAttribute.base_fields: {list(MyFormWithClassAttribute.base_fields.keys())}")
++print(f"FactoryForm.base_fields: {list(FactoryForm.base_fields.keys())}")
++print(f"Are they the same object? {MyFormWithClassAttribute.base_fields is FactoryForm.base_fields}")
++
++# Check if fields are required
++form = MyFormWithClassAttribute()
++print(f"\nMyFormWithClassAttribute instance - active required: {form.fields['active'].required}")
++
++form2 = FactoryForm()
++print(f"FactoryForm instance - active required: {form2.fields['active'].required}")
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 192d9fad94..736d7d6bb2 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -253,6 +253,7 @@ class ModelFormOptions:
+         self.help_texts = getattr(options, "help_texts", None)
+         self.error_messages = getattr(options, "error_messages", None)
+         self.field_classes = getattr(options, "field_classes", None)
++        self.formfield_callback = getattr(options, "formfield_callback", None)
+ 
+ 
+ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+@@ -262,6 +263,13 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+             if hasattr(b, "Meta") and hasattr(b.Meta, "formfield_callback"):
+                 base_formfield_callback = b.Meta.formfield_callback
+                 break
++        
++        # If not found in Meta, check for class attribute
++        if base_formfield_callback is None:
++            for b in bases:
++                if hasattr(b, "formfield_callback"):
++                    base_formfield_callback = b.formfield_callback
++                    break
+ 
+         formfield_callback = attrs.pop("formfield_callback", base_formfield_callback)
+ 
+@@ -308,7 +316,7 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+                 opts.fields,
+                 opts.exclude,
+                 opts.widgets,
+-                formfield_callback,
++                formfield_callback or opts.formfield_callback,
+                 opts.localized_fields,
+                 opts.labels,
+                 opts.help_texts,
+@@ -332,6 +340,10 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+             fields = new_class.declared_fields
+ 
+         new_class.base_fields = fields
++        
++        # Store formfield_callback on the class so it can be inherited
++        if formfield_callback is not None:
++            new_class.formfield_callback = formfield_callback
+ 
+         return new_class
+ 
+@@ -636,7 +648,9 @@ def modelform_factory(
+     class_name = model.__name__ + "Form"
+ 
+     # Class attributes for the new form class.
+-    form_class_attrs = {"Meta": Meta, "formfield_callback": formfield_callback}
++    form_class_attrs = {"Meta": Meta}
++    if formfield_callback is not None:
++        form_class_attrs["formfield_callback"] = formfield_callback
+ 
+     if getattr(Meta, "fields", None) is None and getattr(Meta, "exclude", None) is None:
+         raise ImproperlyConfigured(
+diff --git a/test_final_demo.py b/test_final_demo.py
+new file mode 100644
+index 0000000000..7080669fe0
+--- /dev/null
++++ b/test_final_demo.py
+@@ -0,0 +1,102 @@
++"""
++Demonstration of the fix for modelform_factory respecting formfield_callback.
++"""
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    """Make all fields required."""
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++# Test 1: formfield_callback as class attribute
++class MyFormClassAttribute(forms.ModelForm):
++    formfield_callback = all_required
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++# Test 2: formfield_callback in Meta
++class MyFormMetaAttribute(forms.ModelForm):
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++        formfield_callback = all_required
++
++
++print("=== Testing formfield_callback inheritance ===\n")
++
++# Test class attribute version
++print("1. Class attribute version:")
++form1 = MyFormClassAttribute()
++print(f"   MyFormClassAttribute - active.required: {form1.fields['active'].required}")
++print(f"   MyFormClassAttribute - name.required: {form1.fields['name'].required}")
++
++FactoryForm1 = forms.modelform_factory(MyModel, form=MyFormClassAttribute)
++factory_form1 = FactoryForm1()
++print(f"   FactoryForm (from class attr) - active.required: {factory_form1.fields['active'].required}")
++print(f"   FactoryForm (from class attr) - name.required: {factory_form1.fields['name'].required}")
++
++# Test Meta attribute version
++print("\n2. Meta attribute version:")
++form2 = MyFormMetaAttribute()
++print(f"   MyFormMetaAttribute - active.required: {form2.fields['active'].required}")
++print(f"   MyFormMetaAttribute - name.required: {form2.fields['name'].required}")
++
++FactoryForm2 = forms.modelform_factory(MyModel, form=MyFormMetaAttribute)
++factory_form2 = FactoryForm2()
++print(f"   FactoryForm (from Meta attr) - active.required: {factory_form2.fields['active'].required}")
++print(f"   FactoryForm (from Meta attr) - name.required: {factory_form2.fields['name'].required}")
++
++# Test explicit callback override
++print("\n3. Explicit callback override:")
++def make_optional(field, **kwargs):
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = False
++    return formfield
++
++FactoryForm3 = forms.modelform_factory(
++    MyModel, 
++    form=MyFormClassAttribute,
++    formfield_callback=make_optional
++)
++factory_form3 = FactoryForm3()
++print(f"   FactoryForm (explicit override) - active.required: {factory_form3.fields['active'].required}")
++print(f"   FactoryForm (explicit override) - name.required: {factory_form3.fields['name'].required}")
++
++print("\n✅ All tests demonstrate that formfield_callback is properly inherited!")
+diff --git a/test_formfield_callback.py b/test_formfield_callback.py
+new file mode 100644
+index 0000000000..c766450d78
+--- /dev/null
++++ b/test_formfield_callback.py
+@@ -0,0 +1,118 @@
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.test import TestCase
++
++
++class MyModel(models.Model):
++    active = models.BooleanField()
++    name = models.CharField(max_length=64, blank=True, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def all_required(field, **kwargs):
++    formfield = field.formfield(**kwargs)
++    if formfield:
++        formfield.required = True
++    return formfield
++
++
++class MyFormWithClassAttribute(forms.ModelForm):
++    formfield_callback = all_required  # Class attribute way
++    
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++
++
++class MyFormWithMetaAttribute(forms.ModelForm):
++    class Meta:
++        model = MyModel
++        fields = ['active', 'name']
++        formfield_callback = all_required  # Meta way
++
++
++class FormFieldCallbackTest(TestCase):
++    def test_modelform_factory_respects_class_formfield_callback(self):
++        """Test that modelform_factory respects formfield_callback from class attribute."""
++        # Create a form using modelform_factory with MyFormWithClassAttribute as base
++        FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithClassAttribute)
++        
++        # Create instances of both forms
++        my_form = MyFormWithClassAttribute()
++        factory_form = FactoryForm()
++        
++        # Both forms should have required fields due to formfield_callback
++        self.assertTrue(my_form.fields['active'].required)
++        self.assertTrue(my_form.fields['name'].required)
++        
++        # This is the bug - factory_form fields should also be required
++        self.assertTrue(factory_form.fields['active'].required)
++        self.assertTrue(factory_form.fields['name'].required)
++    
++    def test_modelform_factory_respects_meta_formfield_callback(self):
++        """Test that modelform_factory respects formfield_callback from Meta."""
++        # Create a form using modelform_factory with MyFormWithMetaAttribute as base
++        FactoryForm = forms.modelform_factory(MyModel, form=MyFormWithMetaAttribute)
++        
++        # Create instances of both forms
++        my_form = MyFormWithMetaAttribute()
++        factory_form = FactoryForm()
++        
++        # Both forms should have required fields due to formfield_callback
++        self.assertTrue(my_form.fields['active'].required)
++        self.assertTrue(my_form.fields['name'].required)
++        
++        # This is the bug - factory_form fields should also be required
++        self.assertTrue(factory_form.fields['active'].required)
++        self.assertTrue(factory_form.fields['name'].required)
++    
++    def test_modelform_factory_explicit_callback_overrides_meta(self):
++        """Test that explicit formfield_callback parameter takes precedence."""
++        def make_not_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            if formfield:
++                formfield.required = False
++            return formfield
++        
++        # Create a form with explicit callback that should override Meta callback
++        FactoryForm = forms.modelform_factory(
++            MyModel, 
++            form=MyFormWithClassAttribute,
++            formfield_callback=make_not_required
++        )
++        
++        factory_form = FactoryForm()
++        
++        # Fields should not be required due to explicit callback
++        self.assertFalse(factory_form.fields['active'].required)
++        self.assertFalse(factory_form.fields['name'].required)
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(['__main__'])

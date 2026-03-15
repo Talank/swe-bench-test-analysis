@@ -1,0 +1,391 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index d9c9b0db04..e8aaa11d58 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -689,8 +689,17 @@ class QuerySet:
+         """
+         assert not self.query.is_sliced, \
+             "Cannot use 'limit' or 'offset' with in_bulk"
+-        if field_name != 'pk' and not self.model._meta.get_field(field_name).unique:
+-            raise ValueError("in_bulk()'s field_name must be a unique field but %r isn't." % field_name)
++        if field_name != 'pk':
++            field = self.model._meta.get_field(field_name)
++            if not field.unique:
++                # Check if field is unique by UniqueConstraint
++                is_unique_by_constraint = False
++                for constraint in self.model._meta.total_unique_constraints:
++                    if constraint.fields == (field_name,):
++                        is_unique_by_constraint = True
++                        break
++                if not is_unique_by_constraint:
++                    raise ValueError("in_bulk()'s field_name must be a unique field but %r isn't." % field_name)
+         if id_list is not None:
+             if not id_list:
+                 return {}
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..acac934612
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,84 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Test 1: Field with both unique=True and UniqueConstraint
++class BothUnique(models.Model):
++    slug = models.CharField(max_length=255, unique=True)
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(fields=["slug"], name="redundant_constraint")
++        ]
++
++# Test 2: Multiple UniqueConstraints on same field
++class MultipleConstraints(models.Model):
++    slug = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(fields=["slug"], name="constraint1"),
++            models.UniqueConstraint(fields=["slug"], name="constraint2"),  # Redundant but valid
++        ]
++
++# Test 3: Empty constraints list
++class NoConstraints(models.Model):
++    slug = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = []
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(BothUnique)
++    schema_editor.create_model(MultipleConstraints)
++    schema_editor.create_model(NoConstraints)
++
++# Test 1: Field with both unique=True and UniqueConstraint should work
++print("Test 1: Field with both unique=True and UniqueConstraint")
++try:
++    BothUnique.objects.in_bulk(field_name="slug")
++    print("PASS: Works with both unique=True and UniqueConstraint")
++except ValueError as e:
++    print("FAIL:", str(e))
++
++# Test 2: Multiple UniqueConstraints on same field should work
++print("\nTest 2: Multiple UniqueConstraints on same field")
++try:
++    MultipleConstraints.objects.in_bulk(field_name="slug")
++    print("PASS: Works with multiple UniqueConstraints on same field")
++except ValueError as e:
++    print("FAIL:", str(e))
++
++# Test 3: No constraints should fail
++print("\nTest 3: No constraints")
++try:
++    NoConstraints.objects.in_bulk(field_name="slug")
++    print("FAIL: Should have raised ValueError")
++except ValueError as e:
++    print("PASS: Got expected error:", str(e))
++
++print("\nAll edge case tests completed!")
+diff --git a/test_unique_constraint_in_bulk.py b/test_unique_constraint_in_bulk.py
+new file mode 100644
+index 0000000000..c46b7ea847
+--- /dev/null
++++ b/test_unique_constraint_in_bulk.py
+@@ -0,0 +1,64 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Define test model
++class Article(models.Model):
++    slug = models.CharField(max_length=255)
++    title = models.CharField(max_length=255, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(fields=["slug"], name="%(app_label)s_%(class)s_slug_unq")
++        ]
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++
++# Test the issue
++try:
++    result = Article.objects.in_bulk(field_name="slug")
++    print("FAIL: Expected ValueError but got result:", result)
++except ValueError as e:
++    print("SUCCESS: Got expected error:", str(e))
++    
++# Let's also test with a field that has unique=True
++class ArticleWithUnique(models.Model):
++    slug = models.CharField(max_length=255, unique=True)
++    title = models.CharField(max_length=255, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ArticleWithUnique)
++    
++# This should work
++try:
++    result = ArticleWithUnique.objects.in_bulk(field_name="slug")
++    print("SUCCESS: in_bulk works with unique=True field")
++except ValueError as e:
++    print("FAIL: Got unexpected error with unique=True:", str(e))
+diff --git a/test_unique_constraint_in_bulk_full.py b/test_unique_constraint_in_bulk_full.py
+new file mode 100644
+index 0000000000..8ba78c1c92
+--- /dev/null
++++ b/test_unique_constraint_in_bulk_full.py
+@@ -0,0 +1,111 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Define test models
++class Article(models.Model):
++    slug = models.CharField(max_length=255)
++    title = models.CharField(max_length=255, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(fields=["slug"], name="%(app_label)s_%(class)s_slug_unq")
++        ]
++
++class ArticleMultiFieldConstraint(models.Model):
++    slug = models.CharField(max_length=255)
++    category = models.CharField(max_length=255)
++    title = models.CharField(max_length=255, default='')
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(fields=["slug", "category"], name="%(app_label)s_%(class)s_slug_cat_unq")
++        ]
++
++class ArticleWithCondition(models.Model):
++    slug = models.CharField(max_length=255)
++    title = models.CharField(max_length=255, default='')
++    is_active = models.BooleanField(default=True)
++    
++    class Meta:
++        app_label = 'test_app'
++        constraints = [
++            models.UniqueConstraint(
++                fields=["slug"], 
++                condition=models.Q(is_active=True),
++                name="%(app_label)s_%(class)s_slug_active_unq"
++            )
++        ]
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Article)
++    schema_editor.create_model(ArticleMultiFieldConstraint)
++    schema_editor.create_model(ArticleWithCondition)
++
++# Test 1: Single field UniqueConstraint should work
++print("Test 1: Single field UniqueConstraint")
++a1 = Article.objects.create(slug='article-1', title='Article 1')
++a2 = Article.objects.create(slug='article-2', title='Article 2')
++a3 = Article.objects.create(slug='article-3', title='Article 3')
++
++result = Article.objects.in_bulk(['article-1', 'article-2'], field_name='slug')
++assert len(result) == 2
++assert result['article-1'] == a1
++assert result['article-2'] == a2
++print("PASS: in_bulk works with single field UniqueConstraint")
++
++# Test 2: Multi-field UniqueConstraint should not work for single field
++print("\nTest 2: Multi-field UniqueConstraint")
++try:
++    ArticleMultiFieldConstraint.objects.in_bulk(field_name='slug')
++    print("FAIL: Expected ValueError for multi-field constraint")
++except ValueError as e:
++    print("PASS: Got expected error:", str(e))
++
++# Test 3: Conditional UniqueConstraint should not work
++print("\nTest 3: Conditional UniqueConstraint")
++try:
++    ArticleWithCondition.objects.in_bulk(field_name='slug')
++    print("FAIL: Expected ValueError for conditional constraint")
++except ValueError as e:
++    print("PASS: Got expected error:", str(e))
++
++# Test 4: Test with no IDs provided (should return all objects)
++print("\nTest 4: No IDs provided")
++result = Article.objects.in_bulk(field_name='slug')
++assert len(result) == 3
++assert result['article-1'] == a1
++assert result['article-2'] == a2
++assert result['article-3'] == a3
++print("PASS: in_bulk works without id_list parameter")
++
++# Test 5: Test with empty list
++print("\nTest 5: Empty list")
++result = Article.objects.in_bulk([], field_name='slug')
++assert len(result) == 0
++print("PASS: in_bulk works with empty list")
++
++print("\nAll tests passed!")
+diff --git a/tests/lookup/models.py b/tests/lookup/models.py
+index fbc9fa606f..71701cf058 100644
+--- a/tests/lookup/models.py
++++ b/tests/lookup/models.py
+@@ -108,3 +108,39 @@ class Freebie(models.Model):
+         to_fields=['id', 'product'],
+         on_delete=models.CASCADE,
+     )
++
++
++class ArticleWithUniqueConstraint(models.Model):
++    headline = models.CharField(max_length=100)
++    slug = models.CharField(max_length=100)
++    
++    class Meta:
++        constraints = [
++            models.UniqueConstraint(fields=['slug'], name='unique_slug'),
++        ]
++
++
++class ArticleWithMultiFieldConstraint(models.Model):
++    headline = models.CharField(max_length=100)
++    slug = models.CharField(max_length=100)
++    category = models.CharField(max_length=100)
++    
++    class Meta:
++        constraints = [
++            models.UniqueConstraint(fields=['slug', 'category'], name='unique_slug_category'),
++        ]
++
++
++class ArticleWithConditionalConstraint(models.Model):
++    headline = models.CharField(max_length=100)
++    slug = models.CharField(max_length=100)
++    is_published = models.BooleanField(default=False)
++    
++    class Meta:
++        constraints = [
++            models.UniqueConstraint(
++                fields=['slug'], 
++                condition=models.Q(is_published=True),
++                name='unique_slug_when_published'
++            ),
++        ]
+diff --git a/tests/lookup/tests.py b/tests/lookup/tests.py
+index baefdf9701..63bc0cae09 100644
+--- a/tests/lookup/tests.py
++++ b/tests/lookup/tests.py
+@@ -194,6 +194,41 @@ class LookupTests(TestCase):
+         with self.assertRaisesMessage(ValueError, msg):
+             Article.objects.in_bulk([self.au1], field_name='author')
+ 
++    def test_in_bulk_with_unique_constraint(self):
++        from .models import ArticleWithUniqueConstraint, ArticleWithMultiFieldConstraint, ArticleWithConditionalConstraint
++        # Create test data
++        a1 = ArticleWithUniqueConstraint.objects.create(headline='Article 1', slug='article-1')
++        a2 = ArticleWithUniqueConstraint.objects.create(headline='Article 2', slug='article-2')
++        a3 = ArticleWithUniqueConstraint.objects.create(headline='Article 3', slug='article-3')
++        
++        # Test in_bulk with UniqueConstraint field
++        self.assertEqual(
++            ArticleWithUniqueConstraint.objects.in_bulk(['article-1', 'article-2'], field_name='slug'),
++            {
++                'article-1': a1,
++                'article-2': a2,
++            }
++        )
++        
++        # Test with all objects
++        self.assertEqual(
++            ArticleWithUniqueConstraint.objects.in_bulk(field_name='slug'),
++            {
++                'article-1': a1,
++                'article-2': a2,
++                'article-3': a3,
++            }
++        )
++        
++        # Test that multi-field constraint doesn't work
++        msg = "in_bulk()'s field_name must be a unique field but 'slug' isn't."
++        with self.assertRaisesMessage(ValueError, msg):
++            ArticleWithMultiFieldConstraint.objects.in_bulk(field_name='slug')
++            
++        # Test that conditional constraint doesn't work
++        with self.assertRaisesMessage(ValueError, msg):
++            ArticleWithConditionalConstraint.objects.in_bulk(field_name='slug')
++
+     def test_values(self):
+         # values() returns a list of dictionaries instead of object instances --
+         # and you can specify which fields you want to retrieve.

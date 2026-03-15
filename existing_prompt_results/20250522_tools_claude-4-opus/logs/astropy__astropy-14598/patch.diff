@@ -1,0 +1,1020 @@
+diff --git a/astropy/io/fits/card.py b/astropy/io/fits/card.py
+index 1b3285ddce..55dc35030b 100644
+--- a/astropy/io/fits/card.py
++++ b/astropy/io/fits/card.py
+@@ -859,9 +859,18 @@ class Card(_Verify):
+                     return kw, vc
+ 
+                 value = m.group("strg") or ""
+-                value = value.rstrip().replace("''", "'")
+-                if value and value[-1] == "&":
++                value = value.rstrip()
++                
++                # Check if this value will be continued
++                has_continuation = value and value[-1] == "&"
++                if has_continuation:
+                     value = value[:-1]
++                
++                # Don't do quote replacement here for CONTINUE cards
++                # because the quotes will be replaced later in _parse_value
++                # after all the pieces are joined together
++                # value = value.replace("''", "'")
++                    
+                 values.append(value)
+                 comment = m.group("comm")
+                 if comment:
+diff --git a/debug_after_fix.py b/debug_after_fix.py
+new file mode 100644
+index 0000000000..5fd29266f1
+--- /dev/null
++++ b/debug_after_fix.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++"""Debug after the fix"""
++
++from astropy.io import fits
++import re
++
++# Test the n=65 case
++value = "x" * 65 + "''"
++card = fits.Card('CONFIG', value)
++card_str = str(card)
++
++print(f"Card string: {repr(card_str)}")
++
++# Manually trace through _split
++from astropy.io.fits.card import Card
++
++# The regex patterns
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++# Split into cards
++cards = []
++for i in range(0, len(card_str), 80):
++    cards.append(card_str[i:i+80])
++
++print("\nProcessing cards:")
++values = []
++for i, card_str in enumerate(cards):
++    print(f"\nCard {i}: {repr(card_str)}")
++    
++    # Extract keyword and value/comment part
++    if i == 0:
++        kw, vc = card_str.split("= ", 1)
++        kw = kw.strip()
++    else:
++        kw, vc = card_str.split(" ", 1)
++        kw = kw.strip()
++    
++    print(f"  Keyword: {repr(kw)}")
++    print(f"  Value/comment: {repr(vc)}")
++    
++    # Parse the value
++    m = _strg_comment_RE.match(vc)
++    if m:
++        value = m.group("strg") or ""
++        print(f"  Matched string: {repr(value)}")
++        
++        value = value.rstrip()
++        print(f"  After rstrip: {repr(value)}")
++        
++        if value and value[-1] == "&":
++            value = value[:-1]
++            print(f"  After removing &: {repr(value)}")
++        
++        value = value.replace("''", "'")
++        print(f"  After replace: {repr(value)}")
++        
++        values.append(value)
++
++print(f"\nFinal joined values: {repr(''.join(values))}")
++expected = "x" * 65 + "''"
++print(f"Expected: {repr(expected)}")
+diff --git a/debug_continue.py b/debug_continue.py
+new file mode 100644
+index 0000000000..3ba12fbe73
+--- /dev/null
++++ b/debug_continue.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python
++"""Debug CONTINUE card handling"""
++
++from astropy.io import fits
++import re
++
++# Create a card with a value that will require CONTINUE
++value = "x" * 65 + "''"
++print(f"Original value: {repr(value)}")
++print(f"Length: {len(value)}")
++
++card1 = fits.Card('CONFIG', value)
++print(f"\nCard image:\n{repr(str(card1))}")
++
++# Now let's manually parse this like fromstring would
++image = str(card1)
++
++# Split into 80-char cards
++cards = []
++for i in range(0, len(image), 80):
++    cards.append(image[i:i+80])
++
++print(f"\nIndividual cards:")
++for i, c in enumerate(cards):
++    print(f"  Card {i}: {repr(c)}")
++
++# Now let's trace through the _split logic
++print("\n" + "="*50)
++print("Tracing through _split logic:")
++
++# The regex patterns from card.py
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++# For the first card
++first_card = cards[0]
++# Extract value part (after "CONFIG  = ")
++vc1 = first_card[10:]
++print(f"\nFirst card value/comment part: {repr(vc1)}")
++m1 = _strg_comment_RE.match(vc1)
++if m1:
++    value1 = m1.group("strg") or ""
++    print(f"  Matched string: {repr(value1)}")
++    value1 = value1.rstrip()
++    print(f"  After rstrip: {repr(value1)}")
++    if value1 and value1[-1] == "&":
++        value1 = value1[:-1]
++        print(f"  After removing &: {repr(value1)}")
++    value1_replaced = value1.replace("''", "'")
++    print(f"  After replace: {repr(value1_replaced)}")
++
++# For the CONTINUE card
++continue_card = cards[1]
++# Extract value part (after "CONTINUE  ")
++vc2 = continue_card[10:]
++print(f"\nCONTINUE card value/comment part: {repr(vc2)}")
++m2 = _strg_comment_RE.match(vc2)
++if m2:
++    value2 = m2.group("strg") or ""
++    print(f"  Matched string: {repr(value2)}")
++    value2 = value2.rstrip()
++    print(f"  After rstrip: {repr(value2)}")
++    if value2 and value2[-1] == "&":
++        value2 = value2[:-1]
++        print(f"  After removing &: {repr(value2)}")
++    value2_replaced = value2.replace("''", "'")
++    print(f"  After replace: {repr(value2_replaced)}")
++
++print(f"\nFinal concatenated value: {repr(value1_replaced + value2_replaced)}")
++print(f"Expected value: {repr(value)}")
++print(f"Match: {value1_replaced + value2_replaced == value}")
+diff --git a/debug_continue2.py b/debug_continue2.py
+new file mode 100644
+index 0000000000..f0cb154025
+--- /dev/null
++++ b/debug_continue2.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python
++"""Debug CONTINUE card handling - more detailed"""
++
++from astropy.io import fits
++import re
++
++# Create a card with a value that will require CONTINUE
++value = "x" * 65 + "''"
++print(f"Original value: {repr(value)}")
++
++# Let's see how the value is formatted
++formatted_value = value.replace("'", "''")
++print(f"Formatted value (quotes doubled): {repr(formatted_value)}")
++
++# Now let's see how it's split into words
++from astropy.io.fits.card import _words_group
++
++value_length = 67
++words = _words_group(formatted_value, value_length)
++print(f"\nWords from _words_group:")
++for i, word in enumerate(words):
++    print(f"  Word {i}: {repr(word)}")
++
++# Now let's trace the actual issue
++print("\n" + "="*50)
++print("The actual issue:")
++print("When the first card value ends with ''''& (4 quotes + &):")
++print("  - The 4 quotes represent two literal single quotes")
++print("  - After removing &, we have '''' (4 quotes)")
++print("  - But the code replaces '' with ', turning '''' into '' (2 quotes)")
++print("  - This loses one of the literal quotes!")
++
++print("\nThe CONTINUE card has '''':")
++print("  - This is parsed as a string containing ''")
++print("  - The replace turns '' into '")
++print("  - So we get ' instead of ''")
++
++print("\nThe problem is that replace('', ') is too aggressive!")
+diff --git a/debug_continue3.py b/debug_continue3.py
+new file mode 100644
+index 0000000000..d3e5cce212
+--- /dev/null
++++ b/debug_continue3.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Debug CONTINUE card handling - understanding the real issue"""
++
++from astropy.io import fits
++import re
++
++# Let's trace exactly what happens
++value = "x" * 65 + "''"
++card1 = fits.Card('CONFIG', value)
++card_str = str(card1)
++
++print("Step by step:")
++print(f"1. Original value: {repr(value)}")
++print(f"2. Card string: {repr(card_str)}")
++
++# Parse it back
++card2 = fits.Card.fromstring(card_str)
++print(f"3. Parsed value: {repr(card2.value)}")
++
++# Now let's see what's in the actual card strings
++print("\nLooking at the card format:")
++print("First card ends with: ...x''&'")
++print("  This means: ...x (then two quotes for one literal quote)(then &)(then closing quote)")
++
++print("\nCONTINUE card has: ''''")
++print("  This is: (opening quote)(two quotes for one literal quote)(closing quote)")
++print("  So it represents a string containing a single quote character")
++
++print("\nBUT WAIT! That's wrong! The original value ends with two literal quotes.")
++print("So the formatting is incorrect!")
++
++# Let's check how the value is split
++from astropy.io.fits.card import _words_group
++formatted = value.replace("'", "''")
++print(f"\nFormatted value: {repr(formatted)}")
++print(f"Length: {len(formatted)}")
++
++words = _words_group(formatted, 67)
++print(f"\nWords:")
++for i, w in enumerate(words):
++    print(f"  {i}: {repr(w)} (len={len(w)})")
++
++# The issue is in _words_group!
++print("\nThe issue is that _words_group splits at position 67,")
++print("which cuts the '''' (4 quotes) in half!")
++print("First part gets: ...x'' (ending with 2 quotes)")
++print("Second part gets: '' (the remaining 2 quotes)")
+diff --git a/debug_escaped_quotes.py b/debug_escaped_quotes.py
+new file mode 100644
+index 0000000000..f2a89fcf29
+--- /dev/null
++++ b/debug_escaped_quotes.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python
++"""Debug escaped quotes issue"""
++
++from astropy.io import fits
++
++value = "x" * 50 + " with 'quotes' " + "x" * 50
++print(f"Original value: {repr(value)}")
++print(f"Length: {len(value)}")
++
++card1 = fits.Card('TEST', value)
++card_str = str(card1)
++print(f"\nCard string: {repr(card_str)}")
++print(f"Length: {len(card_str)}")
++
++card2 = fits.Card.fromstring(card_str)
++print(f"\nParsed value: {repr(card2.value)}")
++print(f"Match: {card1.value == card2.value}")
++
++if card1.value != card2.value:
++    print(f"\nExpected: {repr(card1.value)}")
++    print(f"Got: {repr(card2.value)}")
++    
++    # Find the difference
++    for i, (c1, c2) in enumerate(zip(card1.value, card2.value)):
++        if c1 != c2:
++            print(f"First difference at position {i}: {repr(c1)} vs {repr(c2)}")
++            break
+diff --git a/debug_n67.py b/debug_n67.py
+new file mode 100644
+index 0000000000..e8ae8f15c3
+--- /dev/null
++++ b/debug_n67.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python
++"""Debug the n=67 case specifically"""
++
++from astropy.io import fits
++from astropy.io.fits.card import _words_group
++
++# The n=67 case
++value = "x" * 67 + "''"
++print(f"Original value: {repr(value)} (len={len(value)})")
++
++# See how it's formatted
++formatted = value.replace("'", "''")
++print(f"After quote doubling: {repr(formatted)} (len={len(formatted)})")
++
++# See how it's split
++words = _words_group(formatted, 67)
++print(f"\nWords from _words_group:")
++for i, w in enumerate(words):
++    print(f"  {i}: {repr(w)} (len={len(w)})")
++
++# Now let's manually trace what happens
++print("\nWhat gets written to the cards:")
++print(f"First card value: '{words[0]}&'")
++print(f"Continue card value: '{words[1]}'")
++
++# And what happens when parsing
++print("\nWhen parsing back:")
++print("First card captures: " + repr(words[0]))
++print("After replace('', '): " + repr(words[0].replace("''", "'")))
++
++print("\nContinue card captures: " + repr(words[1]))  
++print("After replace('', '): " + repr(words[1].replace("''", "'")))
++
++final = words[0].replace("''", "'") + words[1].replace("''", "'")
++print(f"\nFinal result: {repr(final)}")
++print(f"Expected: {repr(value)}")
++print(f"Lost characters: {repr(value[len(final):])}")
+diff --git a/debug_n67_detailed.py b/debug_n67_detailed.py
+new file mode 100644
+index 0000000000..6b7812522e
+--- /dev/null
++++ b/debug_n67_detailed.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""Debug n=67 case in detail"""
++
++import re
++
++# Simulate the parsing for n=67 case
++# CONTINUE card value: ''''''
++
++vc = "''''''"
++print(f"CONTINUE card value: {repr(vc)}")
++
++# The regex
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++m = _strg_comment_RE.match(vc)
++if m:
++    value = m.group("strg") or ""
++    print(f"Matched string: {repr(value)}")
++    
++    # Count trailing quotes
++    trailing_quotes = 0
++    for c in reversed(value):
++        if c == "'":
++            trailing_quotes += 1
++        else:
++            break
++    
++    print(f"Trailing quotes: {trailing_quotes}")
++    all_quotes = all(c == "'" for c in value)
++    print(f"All quotes? {all_quotes}")
++    
++    # Apply the logic
++    if value and all(c == "'" for c in value):
++        if len(value) % 2 == 0:
++            result = "'" * (len(value) // 2)
++            print(f"Result: {repr(result)}")
++        else:
++            result = value.replace("''", "'")
++            print(f"Result (odd): {repr(result)}")
++
++# The issue is that '''''' parses to '''' (4 quotes)
++# Our logic converts this to '' (2 quotes) 
++# But we expect it to stay as '''' because it represents two literal quotes
++print("\nThe problem:")
++print("'''''' in FITS means a string containing ''''")
++print("'''' should be converted to '' (two escaped quotes become two literal)")
++print("But our logic treats it as 4 quotes -> 2 quotes")
+diff --git a/debug_real_issue.py b/debug_real_issue.py
+new file mode 100644
+index 0000000000..5212200680
+--- /dev/null
++++ b/debug_real_issue.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++"""Debug the real issue more carefully"""
++
++from astropy.io import fits
++
++# Test the exact case from the problem statement
++for n in [65, 67]:
++    print(f"\nTesting n={n}")
++    print("="*60)
++    
++    value = "x" * n + "''"
++    print(f"Original value: {repr(value)} (len={len(value)})")
++    
++    card1 = fits.Card('CONFIG', value)
++    card_str = str(card1)
++    print(f"Card string length: {len(card_str)}")
++    print(f"Card string: {repr(card_str)}")
++    
++    # Parse it back
++    card2 = fits.Card.fromstring(card_str)
++    print(f"Parsed value: {repr(card2.value)} (len={len(card2.value)})")
++    print(f"Values equal: {card1.value == card2.value}")
++    
++    if card1.value != card2.value:
++        print(f"MISMATCH!")
++        print(f"  Expected: {repr(card1.value)}")
++        print(f"  Got: {repr(card2.value)}")
++        
++        # Let's see what's in the individual cards
++        if len(card_str) > 80:
++            print(f"\nIndividual cards:")
++            for i in range(0, len(card_str), 80):
++                print(f"  {i//80}: {repr(card_str[i:i+80])}")
+diff --git a/debug_valuecomment.py b/debug_valuecomment.py
+new file mode 100644
+index 0000000000..39a2832ab7
+--- /dev/null
++++ b/debug_valuecomment.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python
++"""Debug valuecomment parsing"""
++
++from astropy.io import fits
++import re
++
++# Create the problematic card
++value = "x" * 67 + "''"
++card1 = fits.Card('CONFIG', value)
++card_str = str(card1)
++
++print(f"Original card string:\n{repr(card_str)}")
++
++# Now let's manually trace what happens in fromstring
++card2 = fits.Card()
++card2._image = card_str
++card2._verified = False
++
++# Get the keyword
++keyword = card2._parse_keyword()
++print(f"\nKeyword: {repr(keyword)}")
++
++# This will trigger _split for multi-line cards
++value = card2._parse_value()
++print(f"Parsed value: {repr(value)}")
++
++# Let's manually run through _split to see what valuecomment it produces
++from astropy.io.fits.card import Card
++values = []
++comments = []
++
++# First, let's see what _split returns
++kw, vc = card2._split()
++print(f"\n_split returned:")
++print(f"  Keyword: {repr(kw)}")
++print(f"  Valuecomment: {repr(vc)}")
++
++# The valuecomment should be the reconstructed string
++# Let's see if the issue is in how this is parsed
++_value_NFSC_RE = Card._value_NFSC_RE
++m = _value_NFSC_RE.match(vc)
++if m and m.group("strg") is not None:
++    strg_value = m.group("strg")
++    print(f"\nString value matched: {repr(strg_value)}")
++    final_value = re.sub("''", "'", strg_value)
++    print(f"After re.sub: {repr(final_value)}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d4d17abcc4
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,35 @@
++#!/usr/bin/env python
++"""Reproduction script for the double single-quote issue in FITS Card"""
++
++from astropy.io import fits
++
++print("Test 1: Double quotes at the end")
++print("=" * 50)
++for n in range(60, 70):
++    card1 = fits.Card('CONFIG', "x" * n + "''")
++    card2 = fits.Card.fromstring(str(card1))
++    print(f"n={n}, len={len(card1.value)}, equal={card1.value == card2.value}")
++    if card1.value != card2.value:
++        print(f"  card1.value: {repr(card1.value)}")
++        print(f"  card2.value: {repr(card2.value)}")
++        print(f"  str(card1): {repr(str(card1))}")
++
++print("\nTest 2: Double quotes in the middle")
++print("=" * 50)
++for n in range(50, 70):
++    card1 = fits.Card('CONFIG', "x" * n + "''" + "x"*10)
++    card2 = fits.Card.fromstring(str(card1))
++    print(f"n={n}, len={len(card1.value)}, equal={card1.value == card2.value}")
++    if card1.value != card2.value:
++        print(f"  card1.value: {repr(card1.value)}")
++        print(f"  card2.value: {repr(card2.value)}")
++        print(f"  str(card1): {repr(str(card1))}")
++
++print("\nTest 3: Just double quotes")
++print("=" * 50)
++card1 = fits.Card('CONFIG', "''")
++card2 = fits.Card.fromstring(str(card1))
++print(f"equal={card1.value == card2.value}")
++print(f"  card1.value: {repr(card1.value)}")
++print(f"  card2.value: {repr(card2.value)}")
++print(f"  str(card1): {repr(str(card1))}")
+diff --git a/test_continue_regex.py b/test_continue_regex.py
+new file mode 100644
+index 0000000000..e06fcc2c79
+--- /dev/null
++++ b/test_continue_regex.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python
++"""Test the regex on CONTINUE card"""
++
++import re
++
++# The regex patterns
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++# Test the CONTINUE card value
++vc = " ''''                                                                  "
++print(f"Testing: {repr(vc)}")
++
++# Try with leading space removed
++vc_stripped = vc.strip()
++print(f"Stripped: {repr(vc_stripped)}")
++
++m = _strg_comment_RE.match(vc)
++if m:
++    print(f"Match found!")
++    print(f"  Full match: {repr(m.group(0))}")
++    print(f"  String group: {repr(m.group('strg') if m.group('strg') is not None else 'None')}")
++else:
++    print("No match!")
++
++# Try on the stripped version
++m2 = _strg_comment_RE.match(vc_stripped)
++if m2:
++    print(f"\nMatch on stripped:")
++    print(f"  Full match: {repr(m2.group(0))}")
++    print(f"  String group: {repr(m2.group('strg') if m2.group('strg') is not None else 'None')}")
+diff --git a/test_continue_split.py b/test_continue_split.py
+new file mode 100644
+index 0000000000..13b4c08990
+--- /dev/null
++++ b/test_continue_split.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++"""Test _split on CONTINUE card"""
++
++from astropy.io import fits
++
++# Create a CONTINUE card directly
++continue_card_str = "CONTINUE  ''''                                                                  "
++continue_card = fits.Card.fromstring(continue_card_str)
++
++# Call _split on it
++kw, vc = continue_card._split()
++print(f"Card string: {repr(continue_card_str)}")
++print(f"Keyword: {repr(kw)}")
++print(f"Value/comment: {repr(vc)}")
++
++# The issue might be that for CONTINUE cards, _split behaves differently
++# Let's check for special keywords
++print(f"\nIs CONTINUE a special keyword? {'CONTINUE' in fits.Card._special_keywords}")
+diff --git a/test_double_quote_fix.py b/test_double_quote_fix.py
+new file mode 100644
+index 0000000000..f1baaa2486
+--- /dev/null
++++ b/test_double_quote_fix.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python
++"""Test the fix for double single-quote issue"""
++
++import pytest
++from astropy.io import fits
++
++
++def test_double_quotes_at_end():
++    """Test that double quotes at the end of long strings are preserved"""
++    # Test cases from the issue
++    for n in range(60, 70):
++        value = "x" * n + "''"
++        card1 = fits.Card('CONFIG', value)
++        card2 = fits.Card.fromstring(str(card1))
++        assert card1.value == card2.value, f"Failed for n={n}"
++
++
++def test_double_quotes_in_middle():
++    """Test that double quotes in the middle of long strings are preserved"""
++    for n in range(50, 70):
++        value = "x" * n + "''" + "x" * 10
++        card1 = fits.Card('CONFIG', value)
++        card2 = fits.Card.fromstring(str(card1))
++        assert card1.value == card2.value, f"Failed for n={n}"
++
++
++def test_various_quote_patterns():
++    """Test various patterns of quotes"""
++    test_cases = [
++        "",  # Empty string
++        "''",  # Just double quotes
++        "x''",  # x followed by double quotes
++        "'x'",  # Single quote, x, single quote
++        "x''x",  # x, double quotes, x
++        "x''''",  # x followed by four quotes
++        "x''''''",  # x followed by six quotes
++        "x" * 100 + "''",  # Very long string with double quotes at end
++        "x" * 50 + "''" + "x" * 50,  # Long string with double quotes in middle
++    ]
++    
++    for value in test_cases:
++        card1 = fits.Card('TEST', value)
++        card2 = fits.Card.fromstring(str(card1))
++        assert card1.value == card2.value, f"Failed for value={repr(value)}"
++
++
++def test_continue_card_quote_handling():
++    """Test that CONTINUE cards handle quotes correctly"""
++    # This specific case was problematic
++    value = "x" * 65 + "''"
++    card = fits.Card('CONFIG', value)
++    card_str = str(card)
++    
++    # Should create a CONTINUE card
++    assert len(card_str) > 80
++    assert "CONTINUE" in card_str
++    
++    # Parse it back
++    card2 = fits.Card.fromstring(card_str)
++    assert card.value == card2.value
++
++
++def test_escaped_quotes():
++    """Test that escaped quotes within strings work correctly"""
++    test_cases = [
++        "This is a string with 'quotes' inside",
++        "String with ''double quotes'' inside",
++        "Mix of 'single' and ''double'' quotes",
++        "x" * 50 + " with 'quotes' " + "x" * 50,  # Long string with quotes
++    ]
++    
++    for value in test_cases:
++        card1 = fits.Card('TEST', value)
++        card2 = fits.Card.fromstring(str(card1))
++        assert card1.value == card2.value, f"Failed for value={repr(value)}"
++
++
++if __name__ == "__main__":
++    test_double_quotes_at_end()
++    print("✓ test_double_quotes_at_end passed")
++    
++    test_double_quotes_in_middle()
++    print("✓ test_double_quotes_in_middle passed")
++    
++    test_various_quote_patterns()
++    print("✓ test_various_quote_patterns passed")
++    
++    test_continue_card_quote_handling()
++    print("✓ test_continue_card_quote_handling passed")
++    
++    test_escaped_quotes()
++    print("✓ test_escaped_quotes passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..afd8f1a6e2
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python
++"""Test a potential fix"""
++
++import re
++
++def parse_continued_string(cards):
++    """Parse a string value that spans multiple cards."""
++    
++    # The regex patterns from card.py
++    _strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++    _comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++    _strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++    
++    values = []
++    
++    for i, vc in enumerate(cards):
++        m = _strg_comment_RE.match(vc)
++        if not m:
++            continue
++            
++        value = m.group("strg") or ""
++        value = value.rstrip()
++        
++        # Check if this card continues to the next
++        has_continuation = value and value[-1] == "&"
++        if has_continuation:
++            value = value[:-1]
++        
++        # Special handling for quotes at the boundary
++        if i < len(cards) - 1 and value.endswith("''"):
++            # Check if the next card starts with quotes
++            next_vc = cards[i + 1]
++            next_m = _strg_comment_RE.match(next_vc)
++            if next_m:
++                next_value = next_m.group("strg") or ""
++                # If next value starts with '', this might be a split sequence
++                if next_value.startswith("''"):
++                    # Don't do the replacement yet
++                    values.append(value)
++                    continue
++        
++        # Normal replacement
++        value = value.replace("''", "'")
++        values.append(value)
++    
++    return ''.join(values)
++
++# Test cases
++test_cases = [
++    # Normal case - should work fine
++    (["'hello world'"], "hello world"),
++    
++    # Case with escaped quote in middle
++    (["'hello''world'"], "hello'world"),
++    
++    # The problematic case
++    (["'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx''&'",
++      "''''                                                                  "],
++     "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx''"),
++]
++
++for cards, expected in test_cases:
++    result = parse_continued_string(cards)
++    print(f"Cards: {cards}")
++    print(f"Expected: {repr(expected)}")
++    print(f"Got: {repr(result)}")
++    print(f"Match: {result == expected}")
++    print()
+diff --git a/test_quote_issue.py b/test_quote_issue.py
+new file mode 100644
+index 0000000000..db7748d440
+--- /dev/null
++++ b/test_quote_issue.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python
++"""Test to understand the quote issue better"""
++
++from astropy.io import fits
++
++# Test various cases
++test_cases = [
++    ("", "Empty string"),
++    ("''", "Just double quotes"),
++    ("x''", "x followed by double quotes"),
++    ("'x'", "Single quote, x, single quote"),
++    ("x''x", "x, double quotes, x"),
++    ("x''''", "x followed by four quotes"),
++    ("x''''''", "x followed by six quotes"),
++]
++
++for value, desc in test_cases:
++    print(f"\nTest: {desc}")
++    print(f"Input value: {repr(value)}")
++    
++    card1 = fits.Card('TEST', value)
++    print(f"card1.value: {repr(card1.value)}")
++    print(f"str(card1): {repr(str(card1))}")
++    
++    card2 = fits.Card.fromstring(str(card1))
++    print(f"card2.value: {repr(card2.value)}")
++    print(f"Equal: {card1.value == card2.value}")
++
++# Now let's test the specific problematic case
++print("\n" + "="*50)
++print("Testing the specific problematic case:")
++value = "x" * 65 + "''"
++card1 = fits.Card('CONFIG', value)
++print(f"\nOriginal value: {repr(value)}")
++print(f"card1.value: {repr(card1.value)}")
++print(f"Card image:\n{repr(str(card1))}")
++
++# Parse it manually to see what happens
++card_str = str(card1)
++print(f"\nCard has {len(card_str)} characters")
++print(f"Number of 80-char cards: {len(card_str) // 80}")
++
++# Let's see the individual cards
++for i in range(0, len(card_str), 80):
++    print(f"Card {i//80}: {repr(card_str[i:i+80])}")
+diff --git a/test_regex.py b/test_regex.py
+new file mode 100644
+index 0000000000..4f2646ca5d
+--- /dev/null
++++ b/test_regex.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Test the regex patterns"""
++
++import re
++
++# The string regex from card.py
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++# Test cases
++test_strings = [
++    "'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx''&'",
++    "''''",
++    "'x''''x'",
++    "'x'''",
++    "'x''&'",
++]
++
++for test in test_strings:
++    print(f"\nTesting: {repr(test)}")
++    m = _strg_comment_RE.match(test)
++    if m:
++        print(f"  Full match: {repr(m.group(0))}")
++        print(f"  String group: {repr(m.group('strg'))}")
++    else:
++        print("  No match!")
++
++# Let's also test the specific CONTINUE card case
++print("\n" + "="*50)
++print("Testing CONTINUE card parsing:")
++
++# Simulate what happens in _split for CONTINUE cards
++vc = "''''                                                                  "
++m = _strg_comment_RE.match(vc)
++if m:
++    value = m.group("strg") or ""
++    print(f"Original vc: {repr(vc)}")
++    print(f"Matched string: {repr(value)}")
++    value = value.rstrip().replace("''", "'")
++    print(f"After rstrip and replace: {repr(value)}")
+diff --git a/test_specific_case.py b/test_specific_case.py
+new file mode 100644
+index 0000000000..4f9288b5e4
+--- /dev/null
++++ b/test_specific_case.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python
++"""Test specific failing case"""
++
++from astropy.io import fits
++
++# Test n=67 case specifically
++value = "x" * 67 + "''"
++print(f"Original value: {repr(value)} (len={len(value)})")
++
++card1 = fits.Card('CONFIG', value)
++card_str = str(card1)
++print(f"\nCard string: {repr(card_str)}")
++print(f"Length: {len(card_str)}")
++
++# Parse it back
++card2 = fits.Card.fromstring(card_str)
++print(f"\nParsed value: {repr(card2.value)} (len={len(card2.value)})")
++print(f"Match: {card1.value == card2.value}")
++
++if card1.value != card2.value:
++    print(f"\nMISMATCH!")
++    print(f"Expected: {repr(card1.value)}")
++    print(f"Got: {repr(card2.value)}")
++    print(f"Difference: Lost {repr(card1.value[len(card2.value):])}")
+diff --git a/trace_continue_parsing.py b/trace_continue_parsing.py
+new file mode 100644
+index 0000000000..218878a7ee
+--- /dev/null
++++ b/trace_continue_parsing.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python
++"""Trace CONTINUE card parsing"""
++
++import re
++
++# The regex patterns
++_strg = r"\'(?P<strg>([ -~]+?|\'\'|) *?)\'(?=$|/| )"
++_comm_field = r"(?P<comm_field>(?P<sepr>/ *)(?P<comm>(.|\n)*))"
++_strg_comment_RE = re.compile(f"({_strg})? *{_comm_field}?")
++
++# CONTINUE card value
++vc = "''''"
++print(f"CONTINUE card value/comment: {repr(vc)}")
++
++m = _strg_comment_RE.match(vc)
++if m:
++    print(f"\nRegex match found!")
++    print(f"  Full match: {repr(m.group(0))}")
++    print(f"  String group: {repr(m.group('strg'))}")
++    
++    # Simulate the processing
++    value = m.group("strg") or ""
++    print(f"\nProcessing:")
++    print(f"  Initial value: {repr(value)}")
++    
++    value = value.rstrip()
++    print(f"  After rstrip: {repr(value)}")
++    
++    if value and value[-1] == "&":
++        value = value[:-1]
++        print(f"  After removing &: {repr(value)}")
++    
++    value_after_replace = value.replace("''", "'")
++    print(f"  After replace('', '): {repr(value_after_replace)}")
++    
++    print(f"\nThis is the issue! The string '''' contains '' which gets replaced to '")
++    print(f"But in this context, '' should remain as '' because it's the actual content!")
+diff --git a/trace_n67_full.py b/trace_n67_full.py
+new file mode 100644
+index 0000000000..f0f1a2dd8a
+--- /dev/null
++++ b/trace_n67_full.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""Trace n=67 case completely"""
++
++from astropy.io import fits
++from astropy.io.fits.card import _words_group
++
++# Original value
++value = "x" * 67 + "''"
++print(f"Original value: {repr(value)}")
++print(f"Length: {len(value)}")
++
++# Format for FITS
++formatted = value.replace("'", "''")
++print(f"\nFormatted (quotes doubled): {repr(formatted)}")
++print(f"Length: {len(formatted)}")
++
++# Split into words
++words = _words_group(formatted, 67)
++print(f"\nWords:")
++for i, w in enumerate(words):
++    print(f"  {i}: {repr(w)} (len={len(w)})")
++
++# What gets written
++print(f"\nFirst card: '{words[0]}&'")
++print(f"CONTINUE card: '{words[1]}'")
++
++# Now trace the parsing
++print("\n" + "="*50)
++print("Parsing back:")
++
++# First card
++first_value = words[0]
++print(f"\nFirst card captures: {repr(first_value)}")
++# No quotes to replace in first card
++first_result = first_value.replace("''", "'")
++print(f"After replace: {repr(first_result)}")
++
++# CONTINUE card  
++cont_value = words[1]
++print(f"\nCONTINUE card captures: {repr(cont_value)}")
++# This is '''' which should become ''
++cont_result = cont_value.replace("''", "'")
++print(f"After replace: {repr(cont_result)}")
++
++# Final result
++final = first_result + cont_result
++print(f"\nFinal concatenated: {repr(final)}")
++print(f"Expected: {repr(value)}")
++print(f"Match: {final == value}")
+diff --git a/verify_issue.py b/verify_issue.py
+new file mode 100644
+index 0000000000..5a639e552f
+--- /dev/null
++++ b/verify_issue.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python
++"""Verify the issue is in the order of operations"""
++
++# Simulate what happens in the current code
++value_with_amp = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx''&"
++
++# Current code does replace first
++step1 = value_with_amp.replace("''", "'")
++print(f"After replace: {repr(step1)}")
++step2 = step1[:-1] if step1.endswith("&") else step1
++print(f"After removing &: {repr(step2)}")
++print(f"Lost a quote!")
++
++print("\nWhat should happen:")
++# Remove & first
++step1_correct = value_with_amp[:-1] if value_with_amp.endswith("&") else value_with_amp
++print(f"After removing &: {repr(step1_correct)}")
++step2_correct = step1_correct.replace("''", "'")
++print(f"After replace: {repr(step2_correct)}")
++print(f"Quotes preserved correctly!")

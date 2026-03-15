@@ -1,0 +1,578 @@
+diff --git a/django/db/models/functions/datetime.py b/django/db/models/functions/datetime.py
+index b6594b043b..6828980733 100644
+--- a/django/db/models/functions/datetime.py
++++ b/django/db/models/functions/datetime.py
+@@ -292,7 +292,7 @@ class TruncDate(TruncBase):
+     def as_sql(self, compiler, connection):
+         # Cast to date rather than truncate to date.
+         lhs, lhs_params = compiler.compile(self.lhs)
+-        tzname = timezone.get_current_timezone_name() if settings.USE_TZ else None
++        tzname = self.get_tzname()
+         sql = connection.ops.datetime_cast_date_sql(lhs, tzname)
+         return sql, lhs_params
+ 
+@@ -305,7 +305,7 @@ class TruncTime(TruncBase):
+     def as_sql(self, compiler, connection):
+         # Cast to time rather than truncate to time.
+         lhs, lhs_params = compiler.compile(self.lhs)
+-        tzname = timezone.get_current_timezone_name() if settings.USE_TZ else None
++        tzname = self.get_tzname()
+         sql = connection.ops.datetime_cast_time_sql(lhs, tzname)
+         return sql, lhs_params
+ 
+diff --git a/test_trunc_dst.py b/test_trunc_dst.py
+new file mode 100644
+index 0000000000..8516c94004
+--- /dev/null
++++ b/test_trunc_dst.py
+@@ -0,0 +1,89 @@
++"""Test TruncDate/TruncTime with DST transitions"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    TIME_ZONE='UTC',
++)
++
++django.setup()
++
++from datetime import datetime
++import pytz
++from django.db import models, connection
++from django.db.models.functions import TruncDate, TruncTime
++
++# Create a test model
++class Event(models.Model):
++    timestamp = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Event)
++
++# Test with DST transition dates
++# Spring forward: March 12, 2023 at 2:00 AM EST -> 3:00 AM EDT
++# Fall back: November 5, 2023 at 2:00 AM EDT -> 1:00 AM EST
++
++ny_tz = pytz.timezone("America/New_York")
++
++# Create events around DST transitions
++test_cases = [
++    # Just before spring forward
++    pytz.utc.localize(datetime(2023, 3, 12, 6, 30, 0)),  # 1:30 AM EST
++    # Just after spring forward  
++    pytz.utc.localize(datetime(2023, 3, 12, 7, 30, 0)),  # 3:30 AM EDT
++    # Just before fall back
++    pytz.utc.localize(datetime(2023, 11, 5, 5, 30, 0)),  # 1:30 AM EDT
++    # Just after fall back
++    pytz.utc.localize(datetime(2023, 11, 5, 6, 30, 0)),  # 1:30 AM EST
++]
++
++for dt in test_cases:
++    Event.objects.create(timestamp=dt)
++
++print("=== DST Test Data ===")
++for event in Event.objects.all().order_by('timestamp'):
++    ny_time = event.timestamp.astimezone(ny_tz)
++    print(f"UTC: {event.timestamp}")
++    print(f"  NY: {ny_time} (DST: {ny_time.dst()})")
++
++print("\n=== TruncDate with DST ===")
++results = Event.objects.annotate(
++    date_utc=TruncDate('timestamp'),
++    date_ny=TruncDate('timestamp', tzinfo=ny_tz)
++).order_by('timestamp')
++
++for result in results:
++    print(f"UTC: {result.timestamp}")
++    print(f"  Date UTC: {result.date_utc}")
++    print(f"  Date NY:  {result.date_ny}")
++
++print("\n=== TruncTime with DST ===")
++results = Event.objects.annotate(
++    time_utc=TruncTime('timestamp'),
++    time_ny=TruncTime('timestamp', tzinfo=ny_tz)
++).order_by('timestamp')
++
++for result in results:
++    print(f"UTC: {result.timestamp}")
++    print(f"  Time UTC: {result.time_utc}")
++    print(f"  Time NY:  {result.time_ny}")
+diff --git a/test_trunc_no_tz.py b/test_trunc_no_tz.py
+new file mode 100644
+index 0000000000..8d181f658c
+--- /dev/null
++++ b/test_trunc_no_tz.py
+@@ -0,0 +1,88 @@
++"""Test TruncDate/TruncTime when USE_TZ=False"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django with USE_TZ=False
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,  # Timezone support disabled
++    TIME_ZONE='UTC',
++)
++
++django.setup()
++
++from datetime import datetime
++import pytz
++from django.db import models, connection
++from django.db.models.functions import TruncDate, TruncTime
++
++# Create a test model
++class Event(models.Model):
++    timestamp = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Event)
++
++# Create test data (naive datetimes since USE_TZ=False)
++test_cases = [
++    datetime(2023, 1, 1, 2, 0, 0),
++    datetime(2023, 1, 1, 15, 0, 0),
++]
++
++for dt in test_cases:
++    Event.objects.create(timestamp=dt)
++
++print("=== Test with USE_TZ=False ===")
++print("Test data:")
++for event in Event.objects.all():
++    print(f"  {event.timestamp}")
++
++# Test TruncDate without tzinfo
++print("\nTruncDate without tzinfo:")
++results = Event.objects.annotate(
++    date=TruncDate('timestamp')
++).values('timestamp', 'date')
++for r in results:
++    print(f"  {r['timestamp']} -> {r['date']}")
++
++# Test TruncDate with tzinfo (should be ignored when USE_TZ=False)
++print("\nTruncDate with tzinfo (should be ignored):")
++ny_tz = pytz.timezone("America/New_York")
++results = Event.objects.annotate(
++    date=TruncDate('timestamp', tzinfo=ny_tz)
++).values('timestamp', 'date')
++for r in results:
++    print(f"  {r['timestamp']} -> {r['date']}")
++
++# Test TruncTime
++print("\nTruncTime without tzinfo:")
++results = Event.objects.annotate(
++    time=TruncTime('timestamp')
++).values('timestamp', 'time')
++for r in results:
++    print(f"  {r['timestamp']} -> {r['time']}")
++
++print("\nTruncTime with tzinfo (should be ignored):")
++results = Event.objects.annotate(
++    time=TruncTime('timestamp', tzinfo=ny_tz)
++).values('timestamp', 'time')
++for r in results:
++    print(f"  {r['timestamp']} -> {r['time']}")
++
++print("\nConclusion: When USE_TZ=False, tzinfo parameter should be ignored (no timezone conversions)")
+diff --git a/test_trunc_tzinfo.py b/test_trunc_tzinfo.py
+new file mode 100644
+index 0000000000..928654d387
+--- /dev/null
++++ b/test_trunc_tzinfo.py
+@@ -0,0 +1,105 @@
++"""Test script to reproduce the TruncDate/TruncTime tzinfo issue"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    TIME_ZONE='UTC',
++)
++
++django.setup()
++
++from datetime import datetime
++import pytz
++from django.db import models, connection
++from django.db.models import Count
++from django.db.models.functions import TruncDate, TruncTime
++from django.utils import timezone
++
++# Create a test model
++class TimeSlots(models.Model):
++    start_at = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TimeSlots)
++
++# Create test data
++# Let's create a datetime that is on different dates in UTC vs New York
++# 2023-01-01 02:00:00 UTC = 2022-12-31 21:00:00 EST
++utc_dt = pytz.utc.localize(datetime(2023, 1, 1, 2, 0, 0))
++TimeSlots.objects.create(start_at=utc_dt)
++
++# Also create one that's clearly on the same date in both timezones
++utc_dt2 = pytz.utc.localize(datetime(2023, 1, 1, 15, 0, 0))
++TimeSlots.objects.create(start_at=utc_dt2)
++
++print("Test data created:")
++for ts in TimeSlots.objects.all():
++    print(f"  UTC: {ts.start_at}")
++    print(f"  NY:  {ts.start_at.astimezone(pytz.timezone('America/New_York'))}")
++
++# Test TruncDate with tzinfo parameter
++tz = pytz.timezone("America/New_York")
++
++print("\n--- Testing TruncDate ---")
++print("Without tzinfo (should use UTC):")
++report = (
++    TimeSlots.objects.annotate(start_date=TruncDate("start_at"))
++    .values("start_date")
++    .annotate(timeslot_count=Count("id"))
++    .order_by("start_date")
++)
++for item in report:
++    print(f"  Date: {item['start_date']}, Count: {item['timeslot_count']}")
++
++print("\nWith tzinfo=America/New_York:")
++report = (
++    TimeSlots.objects.annotate(start_date=TruncDate("start_at", tzinfo=tz))
++    .values("start_date")
++    .annotate(timeslot_count=Count("id"))
++    .order_by("start_date")
++)
++for item in report:
++    print(f"  Date: {item['start_date']}, Count: {item['timeslot_count']}")
++
++print("\n--- Testing TruncTime ---")
++print("Without tzinfo (should use UTC):")
++report = (
++    TimeSlots.objects.annotate(start_time=TruncTime("start_at"))
++    .values("start_time")
++    .order_by("start_time")
++)
++for item in report:
++    print(f"  Time: {item['start_time']}")
++
++print("\nWith tzinfo=America/New_York:")
++report = (
++    TimeSlots.objects.annotate(start_time=TruncTime("start_at", tzinfo=tz))
++    .values("start_time")
++    .order_by("start_time")
++)
++for item in report:
++    print(f"  Time: {item['start_time']}")
++
++print("\nExpected behavior:")
++print("- Without tzinfo, the first datetime should be on 2023-01-01")
++print("- With NY timezone, the first datetime should be on 2022-12-31")
++print("- The times should also be different between UTC and NY timezone")
+diff --git a/test_trunc_tzinfo_comprehensive.py b/test_trunc_tzinfo_comprehensive.py
+new file mode 100644
+index 0000000000..642ab39e82
+--- /dev/null
++++ b/test_trunc_tzinfo_comprehensive.py
+@@ -0,0 +1,123 @@
++"""Comprehensive test for TruncDate/TruncTime tzinfo parameter"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    TIME_ZONE='UTC',
++)
++
++django.setup()
++
++from datetime import datetime, timezone as datetime_timezone
++import pytz
++from django.db import models, connection
++from django.db.models import Count
++from django.db.models.functions import TruncDate, TruncTime
++from django.utils import timezone
++
++# Create a test model
++class Event(models.Model):
++    timestamp = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Event)
++
++# Test data: Create events at different times that will be on different dates/times in different timezones
++test_cases = [
++    # UTC datetime that is on a different date in NY (UTC: Jan 1, NY: Dec 31)
++    pytz.utc.localize(datetime(2023, 1, 1, 2, 0, 0)),
++    # UTC datetime that is on the same date in NY
++    pytz.utc.localize(datetime(2023, 1, 1, 15, 0, 0)),
++    # UTC datetime near midnight
++    pytz.utc.localize(datetime(2023, 1, 1, 0, 30, 0)),
++    # UTC datetime in the evening
++    pytz.utc.localize(datetime(2023, 1, 1, 23, 30, 0)),
++]
++
++for dt in test_cases:
++    Event.objects.create(timestamp=dt)
++
++# Test different timezones
++timezones = [
++    None,  # Should use default (UTC)
++    pytz.timezone("America/New_York"),  # UTC-5
++    pytz.timezone("Asia/Tokyo"),  # UTC+9
++    pytz.timezone("Europe/London"),  # UTC+0/+1
++    datetime_timezone.utc,  # Explicit UTC
++]
++
++print("=== Test Data ===")
++for i, event in enumerate(Event.objects.all().order_by('timestamp')):
++    print(f"Event {i+1}: {event.timestamp} UTC")
++    for tz_name, tz in [("NY", pytz.timezone("America/New_York")), ("Tokyo", pytz.timezone("Asia/Tokyo"))]:
++        print(f"  {tz_name}: {event.timestamp.astimezone(tz)}")
++
++print("\n=== Testing TruncDate ===")
++for tz in timezones:
++    tz_name = str(tz) if tz else "Default (UTC)"
++    print(f"\nTimezone: {tz_name}")
++    
++    if tz:
++        results = Event.objects.annotate(
++            date=TruncDate('timestamp', tzinfo=tz)
++        ).values('date').annotate(count=Count('id')).order_by('date')
++    else:
++        results = Event.objects.annotate(
++            date=TruncDate('timestamp')
++        ).values('date').annotate(count=Count('id')).order_by('date')
++    
++    for result in results:
++        print(f"  {result['date']}: {result['count']} events")
++
++print("\n=== Testing TruncTime ===")
++for tz in timezones:
++    tz_name = str(tz) if tz else "Default (UTC)"
++    print(f"\nTimezone: {tz_name}")
++    
++    if tz:
++        results = Event.objects.annotate(
++            time=TruncTime('timestamp', tzinfo=tz)
++        ).values('time').order_by('time')
++    else:
++        results = Event.objects.annotate(
++            time=TruncTime('timestamp')
++        ).values('time').order_by('time')
++    
++    for result in results:
++        print(f"  {result['time']}")
++
++# Verify the fix by checking specific cases
++print("\n=== Verification ===")
++ny_tz = pytz.timezone("America/New_York")
++
++# Check that 2023-01-01 02:00:00 UTC becomes 2022-12-31 in NY timezone
++event = Event.objects.filter(timestamp=test_cases[0]).annotate(
++    date_ny=TruncDate('timestamp', tzinfo=ny_tz)
++).first()
++print(f"UTC 2023-01-01 02:00:00 -> NY date: {event.date_ny} (expected: 2022-12-31)")
++
++# Check time conversion
++event = Event.objects.filter(timestamp=test_cases[0]).annotate(
++    time_utc=TruncTime('timestamp'),
++    time_ny=TruncTime('timestamp', tzinfo=ny_tz)
++).first()
++print(f"UTC time: {event.time_utc} -> NY time: {event.time_ny} (expected: 02:00:00 -> 21:00:00)")
+diff --git a/test_trunc_tzinfo_unit.py b/test_trunc_tzinfo_unit.py
+new file mode 100644
+index 0000000000..5baaf06c7b
+--- /dev/null
++++ b/test_trunc_tzinfo_unit.py
+@@ -0,0 +1,121 @@
++"""Unit test for TruncDate/TruncTime tzinfo parameter that can be added to Django's test suite"""
++from datetime import datetime
++import pytz
++from django.test import TestCase, override_settings
++from django.db.models import Count
++from django.db.models.functions import TruncDate, TruncTime
++from django.utils import timezone
++
++# This would be added to the existing test_extract_trunc.py file
++
++class TruncDateTimeTzinfoTests(TestCase):
++    """Test that TruncDate and TruncTime properly respect the tzinfo parameter."""
++    
++    @override_settings(USE_TZ=True)
++    def test_trunc_date_with_tzinfo(self):
++        """TruncDate should respect the tzinfo parameter."""
++        from tests.db_functions.models import DTModel
++        
++        # Create a datetime that is on different dates in different timezones
++        # 2023-01-01 02:00:00 UTC = 2022-12-31 21:00:00 EST
++        start_datetime = timezone.make_aware(datetime(2023, 1, 1, 2, 0, 0))
++        end_datetime = timezone.make_aware(datetime(2023, 1, 1, 15, 0, 0))
++        
++        DTModel.objects.create(
++            name='test1',
++            start_datetime=start_datetime,
++            end_datetime=end_datetime,
++        )
++        
++        ny_tz = pytz.timezone("America/New_York")
++        
++        # Test without tzinfo (should use current timezone, which is UTC in tests)
++        result = DTModel.objects.annotate(
++            date=TruncDate('start_datetime')
++        ).first()
++        self.assertEqual(result.date, datetime(2023, 1, 1).date())
++        
++        # Test with NY timezone
++        result = DTModel.objects.annotate(
++            date=TruncDate('start_datetime', tzinfo=ny_tz)
++        ).first()
++        self.assertEqual(result.date, datetime(2022, 12, 31).date())
++        
++    @override_settings(USE_TZ=True)
++    def test_trunc_time_with_tzinfo(self):
++        """TruncTime should respect the tzinfo parameter."""
++        from tests.db_functions.models import DTModel
++        
++        # Create a datetime
++        # 2023-01-01 15:00:00 UTC = 2023-01-01 10:00:00 EST
++        start_datetime = timezone.make_aware(datetime(2023, 1, 1, 15, 0, 0))
++        end_datetime = timezone.make_aware(datetime(2023, 1, 1, 20, 0, 0))
++        
++        DTModel.objects.create(
++            name='test1',
++            start_datetime=start_datetime,
++            end_datetime=end_datetime,
++        )
++        
++        ny_tz = pytz.timezone("America/New_York")
++        
++        # Test without tzinfo (should use current timezone, which is UTC in tests)
++        result = DTModel.objects.annotate(
++            time=TruncTime('start_datetime')
++        ).first()
++        self.assertEqual(result.time, datetime(2023, 1, 1, 15, 0, 0).time())
++        
++        # Test with NY timezone
++        result = DTModel.objects.annotate(
++            time=TruncTime('start_datetime', tzinfo=ny_tz)
++        ).first()
++        self.assertEqual(result.time, datetime(2023, 1, 1, 10, 0, 0).time())
++        
++    @override_settings(USE_TZ=True)
++    def test_trunc_date_aggregation_with_tzinfo(self):
++        """Test aggregation by date with different timezones."""
++        from tests.db_functions.models import DTModel
++        
++        # Create events that span midnight in NY timezone
++        # These are all on 2023-01-01 in UTC but span two days in NY
++        events = [
++            timezone.make_aware(datetime(2023, 1, 1, 2, 0, 0)),   # Dec 31 in NY
++            timezone.make_aware(datetime(2023, 1, 1, 3, 0, 0)),   # Dec 31 in NY  
++            timezone.make_aware(datetime(2023, 1, 1, 15, 0, 0)),  # Jan 1 in NY
++            timezone.make_aware(datetime(2023, 1, 1, 20, 0, 0)),  # Jan 1 in NY
++        ]
++        
++        for i, dt in enumerate(events):
++            DTModel.objects.create(
++                name=f'test{i}',
++                start_datetime=dt,
++                end_datetime=dt,
++            )
++        
++        ny_tz = pytz.timezone("America/New_York")
++        
++        # Aggregate by date in UTC
++        result = DTModel.objects.annotate(
++            date=TruncDate('start_datetime')
++        ).values('date').annotate(count=Count('id')).order_by('date')
++        
++        result_list = list(result)
++        self.assertEqual(len(result_list), 1)
++        self.assertEqual(result_list[0]['count'], 4)
++        self.assertEqual(result_list[0]['date'], datetime(2023, 1, 1).date())
++        
++        # Aggregate by date in NY timezone
++        result = DTModel.objects.annotate(
++            date=TruncDate('start_datetime', tzinfo=ny_tz)
++        ).values('date').annotate(count=Count('id')).order_by('date')
++        
++        result_list = list(result)
++        self.assertEqual(len(result_list), 2)
++        self.assertEqual(result_list[0]['date'], datetime(2022, 12, 31).date())
++        self.assertEqual(result_list[0]['count'], 2)
++        self.assertEqual(result_list[1]['date'], datetime(2023, 1, 1).date())
++        self.assertEqual(result_list[1]['count'], 2)
++
++
++# To run this test:
++# python -m django test test_trunc_tzinfo_unit.TruncDateTimeTzinfoTests

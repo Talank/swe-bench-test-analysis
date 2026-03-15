@@ -1,0 +1,157 @@
+diff --git a/sklearn/feature_extraction/tests/test_text.py b/sklearn/feature_extraction/tests/test_text.py
+index 7b7697ff4..2589fb9a5 100644
+--- a/sklearn/feature_extraction/tests/test_text.py
++++ b/sklearn/feature_extraction/tests/test_text.py
+@@ -96,6 +96,16 @@ def test_strip_accents():
+     a = "this is à test"
+     expected = 'this is a test'
+     assert strip_accents_unicode(a) == expected
++    
++    # check strings that are already in NFKD form with combining characters
++    # issue #14710
++    # This string contains one code point, "LATIN SMALL LETTER N WITH TILDE"
++    s1 = chr(241)  # ñ
++    # This string contains two code points, "LATIN SMALL LETTER N" followed by "COMBINING TILDE"
++    s2 = chr(110) + chr(771)  # ñ (in NFKD form)
++    # Both should be normalized to 'n'
++    assert strip_accents_unicode(s1) == 'n'
++    assert strip_accents_unicode(s2) == 'n'
+ 
+ 
+ def test_to_ascii():
+diff --git a/sklearn/feature_extraction/text.py b/sklearn/feature_extraction/text.py
+index bb5a9d646..11236d958 100644
+--- a/sklearn/feature_extraction/text.py
++++ b/sklearn/feature_extraction/text.py
+@@ -130,10 +130,7 @@ def strip_accents_unicode(s):
+         ASCII equivalent.
+     """
+     normalized = unicodedata.normalize('NFKD', s)
+-    if normalized == s:
+-        return s
+-    else:
+-        return ''.join([c for c in normalized if not unicodedata.combining(c)])
++    return ''.join([c for c in normalized if not unicodedata.combining(c)])
+ 
+ 
+ def strip_accents_ascii(s):
+diff --git a/test_countvectorizer_strip_accents.py b/test_countvectorizer_strip_accents.py
+new file mode 100644
+index 000000000..936c63a12
+--- /dev/null
++++ b/test_countvectorizer_strip_accents.py
+@@ -0,0 +1,31 @@
++#!/usr/bin/env python
++"""Test CountVectorizer with strip_accents on NFKD strings."""
++
++from sklearn.feature_extraction.text import CountVectorizer
++
++# Test data with both NFC and NFKD forms
++# NFC form (single code point)
++doc1 = "niño"  # n-i-ñ-o
++
++# NFKD form (n + combining tilde)
++doc2 = "nin" + chr(771) + "o"  # n-i-n-̃-o
++
++print("doc1:", repr(doc1))
++print("doc2:", repr(doc2))
++
++# Create vectorizer with strip_accents='unicode'
++vectorizer = CountVectorizer(strip_accents='unicode')
++
++# Fit and transform
++X = vectorizer.fit_transform([doc1, doc2])
++
++# Get feature names
++feature_names = vectorizer.get_feature_names()
++print("\nFeature names:", feature_names)
++
++# Convert to dense array to see the counts
++print("\nDocument-term matrix:")
++print(X.toarray())
++
++# Both documents should have the same representation
++print("\nAre the vectors equal?", (X[0].toarray() == X[1].toarray()).all())
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..69fe5b035
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++"""Test edge cases for strip_accents_unicode."""
++
++from sklearn.feature_extraction.text import strip_accents_unicode
++import unicodedata
++
++# Test various edge cases
++test_cases = [
++    # (input, expected_output, description)
++    ("", "", "Empty string"),
++    ("hello", "hello", "ASCII only string"),
++    ("café", "cafe", "NFC form with accent"),
++    ("cafe\u0301", "cafe", "NFD form with combining acute"),
++    ("ñ", "n", "NFC form n with tilde"),
++    ("n\u0303", "n", "NFD form n with combining tilde"),
++    ("Ω", "Ω", "Greek letter omega (no accent)"),
++    ("à́", "a", "Multiple combining characters"),
++    ("e\u0301\u0300", "e", "Multiple combining accents on same letter"),
++]
++
++print("Testing strip_accents_unicode edge cases:\n")
++
++for input_str, expected, description in test_cases:
++    result = strip_accents_unicode(input_str)
++    status = "✓" if result == expected else "✗"
++    print(f"{status} {description}")
++    print(f"  Input: {repr(input_str)}")
++    print(f"  Expected: {repr(expected)}")
++    print(f"  Got: {repr(result)}")
++    if result != expected:
++        print(f"  ERROR: Expected {repr(expected)} but got {repr(result)}")
++    print()
++
++# Test that the function is idempotent
++print("\nTesting idempotency:")
++test_str = "café ñoño"
++result1 = strip_accents_unicode(test_str)
++result2 = strip_accents_unicode(result1)
++print(f"Original: {repr(test_str)}")
++print(f"First pass: {repr(result1)}")
++print(f"Second pass: {repr(result2)}")
++print(f"Idempotent: {'✓' if result1 == result2 else '✗'}")
+diff --git a/test_strip_accents_bug.py b/test_strip_accents_bug.py
+new file mode 100644
+index 000000000..ce1e73de3
+--- /dev/null
++++ b/test_strip_accents_bug.py
+@@ -0,0 +1,29 @@
++#!/usr/bin/env python
++"""Test script to reproduce the strip_accents_unicode bug."""
++
++from sklearn.feature_extraction.text import strip_accents_unicode
++
++# This string contains one code point, "LATIN SMALL LETTER N WITH TILDE"
++s1 = chr(241)
++
++# This string contains two code points, "LATIN SMALL LETTER N" followed by "COMBINING TILDE"
++s2 = chr(110) + chr(771)
++
++# They are visually identical, as expected
++print("s1:", repr(s1))
++print("s2:", repr(s2))
++
++# Test strip_accents_unicode
++result1 = strip_accents_unicode(s1)
++result2 = strip_accents_unicode(s2)
++
++print("\nstrip_accents_unicode results:")
++print("s1 result:", repr(result1))
++print("s2 result:", repr(result2))
++
++print("\nChecking if results are equal to 'n':")
++print("s1 result == 'n':", result1 == 'n')
++print("s2 result == 'n':", result2 == 'n')
++
++print("\nChecking if s2 is unchanged:")
++print("s2 == result2:", s2 == result2)

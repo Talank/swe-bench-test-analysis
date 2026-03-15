@@ -1,0 +1,572 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 422bc5d178..e03a3803cd 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -1188,7 +1188,7 @@ class ModelChoiceField(ChoiceField):
+     # This class is a subclass of ChoiceField for purity, but it doesn't
+     # actually use any of ChoiceField's implementation.
+     default_error_messages = {
+-        'invalid_choice': _('Select a valid choice. That choice is not one of'
++        'invalid_choice': _('Select a valid choice. %(value)s is not one of'
+                             ' the available choices.'),
+     }
+     iterator = ModelChoiceIterator
+@@ -1284,7 +1284,11 @@ class ModelChoiceField(ChoiceField):
+                 value = getattr(value, key)
+             value = self.queryset.get(**{key: value})
+         except (ValueError, TypeError, self.queryset.model.DoesNotExist):
+-            raise ValidationError(self.error_messages['invalid_choice'], code='invalid_choice')
++            raise ValidationError(
++                self.error_messages['invalid_choice'],
++                code='invalid_choice',
++                params={'value': value},
++            )
+         return value
+ 
+     def validate(self, value):
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..ea95d30d0a
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,125 @@
++"""Test edge cases for ModelChoiceField error messages."""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Create test models
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return f"TestModel: {self.name}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class OtherModel(models.Model):
++    title = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return f"OtherModel: {self.title}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++    schema_editor.create_model(OtherModel)
++
++# Create test data
++test_obj = TestModel.objects.create(name="Test Object")
++other_obj = OtherModel.objects.create(title="Other Object")
++
++
++def test_edge_cases():
++    print("Testing edge cases for ModelChoiceField error messages...\n")
++    
++    # Test 1: Passing an instance of wrong model
++    field = forms.ModelChoiceField(queryset=TestModel.objects.all())
++    try:
++        field.clean(other_obj)
++    except ValidationError as e:
++        print(f"Wrong model instance: {e.messages[0]}")
++    
++    # Test 2: Passing None to required field
++    try:
++        field.clean(None)
++    except ValidationError as e:
++        print(f"None value: {e.messages[0]}")
++    
++    # Test 3: Passing empty string to required field
++    try:
++        field.clean('')
++    except ValidationError as e:
++        print(f"Empty string: {e.messages[0]}")
++    
++    # Test 4: Using to_field_name
++    field_with_to_field = forms.ModelChoiceField(
++        queryset=TestModel.objects.all(),
++        to_field_name='name'
++    )
++    try:
++        field_with_to_field.clean('NonexistentName')
++    except ValidationError as e:
++        print(f"Invalid to_field_name value: {e.messages[0]}")
++    
++    # Test 5: Special characters in invalid value
++    try:
++        field.clean("'; DROP TABLE--")
++    except ValidationError as e:
++        print(f"Special characters: {e.messages[0]}")
++    
++    # Test 6: Very long invalid value
++    long_value = "x" * 100
++    try:
++        field.clean(long_value)
++    except ValidationError as e:
++        print(f"Long value: {e.messages[0][:80]}...")
++    
++    # Test 7: Unicode characters
++    try:
++        field.clean("测试")
++    except ValidationError as e:
++        print(f"Unicode: {e.messages[0]}")
++    
++    # Test 8: List/dict as invalid value (should handle TypeError)
++    try:
++        field.clean(['invalid'])
++    except ValidationError as e:
++        print(f"List value: {e.messages[0]}")
++    
++    try:
++        field.clean({'invalid': 'dict'})
++    except ValidationError as e:
++        print(f"Dict value: {e.messages[0]}")
++    
++    print("\nAll edge cases handled correctly!")
++
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/test_modelchoicefield_error.py b/test_modelchoicefield_error.py
+new file mode 100644
+index 0000000000..bd6d2121b5
+--- /dev/null
++++ b/test_modelchoicefield_error.py
+@@ -0,0 +1,70 @@
++"""Test script to reproduce the ModelChoiceField error message issue."""
++import django
++from django.conf import settings
++
++# Configure Django settings first
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.test import TestCase
++from django.core.exceptions import ValidationError
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Test the error messages
++def test_modelchoicefield_error():
++    # Create a ModelChoiceField
++    field = forms.ModelChoiceField(queryset=TestModel.objects.none())
++    
++    # Try to validate an invalid choice
++    try:
++        field.clean('999')  # Invalid ID
++    except ValidationError as e:
++        print("ModelChoiceField error message:", e.message)
++        print("Error params:", e.params if hasattr(e, 'params') else "No params")
++    
++    # Compare with regular ChoiceField
++    choice_field = forms.ChoiceField(choices=[('1', 'One'), ('2', 'Two')])
++    try:
++        choice_field.clean('3')  # Invalid choice
++    except ValidationError as e:
++        print("\nChoiceField error message:", e.message)
++        print("Error params:", e.params if hasattr(e, 'params') else "No params")
++    
++    # Test ModelMultipleChoiceField
++    multi_field = forms.ModelMultipleChoiceField(queryset=TestModel.objects.none())
++    try:
++        multi_field.clean(['999'])  # Invalid ID
++    except ValidationError as e:
++        print("\nModelMultipleChoiceField error message:", e.message)
++        print("Error params:", e.params if hasattr(e, 'params') else "No params")
++
++
++if __name__ == '__main__':
++    # Run the test
++    test_modelchoicefield_error()
+diff --git a/test_modelchoicefield_full.py b/test_modelchoicefield_full.py
+new file mode 100644
+index 0000000000..333911cb2c
+--- /dev/null
++++ b/test_modelchoicefield_full.py
+@@ -0,0 +1,103 @@
++"""Test script to verify ModelChoiceField error message formatting."""
++import django
++from django.conf import settings
++
++# Configure Django settings first
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create some test data
++obj1 = TestModel.objects.create(name="Test 1")
++obj2 = TestModel.objects.create(name="Test 2")
++
++# Test the error messages
++def test_modelchoicefield_error():
++    print("Testing ModelChoiceField error messages...\n")
++    
++    # Create a ModelChoiceField
++    field = forms.ModelChoiceField(queryset=TestModel.objects.all())
++    
++    # Test with invalid numeric ID
++    try:
++        field.clean('999')
++    except ValidationError as e:
++        print("Invalid numeric ID (999):")
++        print(f"  Error messages: {e.messages}")
++        print(f"  Error code: {e.code}")
++        print()
++    
++    # Test with invalid string
++    try:
++        field.clean('invalid')
++    except ValidationError as e:
++        print("Invalid string ('invalid'):")
++        print(f"  Error messages: {e.messages}")
++        print(f"  Error code: {e.code}")
++        print()
++    
++    # Test with valid ID
++    try:
++        result = field.clean(str(obj1.pk))
++        print(f"Valid ID ({obj1.pk}): Success - returned {result}")
++        print()
++    except ValidationError as e:
++        print(f"Unexpected error: {e.messages}")
++    
++    # Compare with regular ChoiceField
++    print("\nComparing with regular ChoiceField...\n")
++    choice_field = forms.ChoiceField(choices=[(str(obj1.pk), 'One'), (str(obj2.pk), 'Two')])
++    try:
++        choice_field.clean('3')
++    except ValidationError as e:
++        print("Invalid choice (3):")
++        print(f"  Error messages: {e.messages}")
++        print(f"  Error code: {e.code}")
++        print()
++    
++    # Test ModelMultipleChoiceField
++    print("\nTesting ModelMultipleChoiceField...\n")
++    multi_field = forms.ModelMultipleChoiceField(queryset=TestModel.objects.all())
++    try:
++        multi_field.clean(['999', 'invalid'])
++    except ValidationError as e:
++        print("Invalid choices (['999', 'invalid']):")
++        print(f"  Error messages: {e.messages}")
++        print(f"  Error code: {e.code}")
++
++
++if __name__ == '__main__':
++    test_modelchoicefield_error()
+diff --git a/test_modelchoicefield_validation_error.py b/test_modelchoicefield_validation_error.py
+new file mode 100644
+index 0000000000..88582ec7a6
+--- /dev/null
++++ b/test_modelchoicefield_validation_error.py
+@@ -0,0 +1,132 @@
++"""
++Test to verify that ModelChoiceField includes the invalid value in error messages.
++This test documents the fix for the issue where ModelChoiceField did not show
++the value of the invalid choice when raising ValidationError.
++"""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.core.exceptions import ValidationError
++from django.test import TestCase
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++obj1 = TestModel.objects.create(name="Object 1")
++obj2 = TestModel.objects.create(name="Object 2")
++
++
++class ModelChoiceFieldErrorMessageTest(TestCase):
++    """Test that ModelChoiceField shows invalid values in error messages."""
++    
++    def test_modelchoicefield_shows_invalid_value(self):
++        """ModelChoiceField should include the invalid value in error message."""
++        field = forms.ModelChoiceField(queryset=TestModel.objects.all())
++        
++        # Test with invalid numeric ID
++        with self.assertRaises(ValidationError) as cm:
++            field.clean('999')
++        self.assertEqual(
++            cm.exception.messages,
++            ['Select a valid choice. 999 is not one of the available choices.']
++        )
++        
++        # Test with invalid string
++        with self.assertRaises(ValidationError) as cm:
++            field.clean('invalid')
++        self.assertEqual(
++            cm.exception.messages,
++            ['Select a valid choice. invalid is not one of the available choices.']
++        )
++    
++    def test_modelmultiplechoicefield_shows_invalid_value(self):
++        """ModelMultipleChoiceField should include the invalid value in error message."""
++        field = forms.ModelMultipleChoiceField(queryset=TestModel.objects.all())
++        
++        # Test with single invalid value
++        with self.assertRaises(ValidationError) as cm:
++            field.clean(['999'])
++        self.assertEqual(
++            cm.exception.messages,
++            ['Select a valid choice. 999 is not one of the available choices.']
++        )
++        
++        # Test with multiple values where one is invalid
++        with self.assertRaises(ValidationError) as cm:
++            field.clean([str(obj1.pk), '999'])
++        self.assertEqual(
++            cm.exception.messages,
++            ['Select a valid choice. 999 is not one of the available choices.']
++        )
++    
++    def test_consistency_with_choicefield(self):
++        """ModelChoiceField error format should be consistent with ChoiceField."""
++        # Regular ChoiceField
++        choice_field = forms.ChoiceField(
++            choices=[(str(obj1.pk), 'Choice 1'), (str(obj2.pk), 'Choice 2')]
++        )
++        with self.assertRaises(ValidationError) as cm:
++            choice_field.clean('invalid')
++        choice_error = cm.exception.messages[0]
++        
++        # ModelChoiceField
++        model_field = forms.ModelChoiceField(queryset=TestModel.objects.all())
++        with self.assertRaises(ValidationError) as cm:
++            model_field.clean('invalid')
++        model_error = cm.exception.messages[0]
++        
++        # Both should have the same format
++        self.assertEqual(
++            choice_error,
++            'Select a valid choice. invalid is not one of the available choices.'
++        )
++        self.assertEqual(choice_error, model_error)
++
++
++if __name__ == '__main__':
++    # Run the tests
++    test = ModelChoiceFieldErrorMessageTest()
++    test.test_modelchoicefield_shows_invalid_value()
++    print("✓ ModelChoiceField shows invalid value in error message")
++    
++    test.test_modelmultiplechoicefield_shows_invalid_value()
++    print("✓ ModelMultipleChoiceField shows invalid value in error message")
++    
++    test.test_consistency_with_choicefield()
++    print("✓ Error message format is consistent between ChoiceField and ModelChoiceField")
++    
++    print("\nAll tests passed!")
+diff --git a/tests/admin_widgets/tests.py b/tests/admin_widgets/tests.py
+index 3c41d9cdfa..5e9aac54e4 100644
+--- a/tests/admin_widgets/tests.py
++++ b/tests/admin_widgets/tests.py
+@@ -243,7 +243,7 @@ class AdminForeignKeyRawIdWidget(TestDataMixin, TestCase):
+         # Try posting with a nonexistent pk in a raw id field: this
+         # should result in an error message, not a server exception.
+         response = self.client.post(reverse('admin:admin_widgets_event_add'), post_data)
+-        self.assertContains(response, 'Select a valid choice. That choice is not one of the available choices.')
++        self.assertContains(response, 'Select a valid choice.')
+ 
+     def test_invalid_target_id(self):
+ 
+@@ -251,7 +251,7 @@ class AdminForeignKeyRawIdWidget(TestDataMixin, TestCase):
+             # This should result in an error message, not a server exception.
+             response = self.client.post(reverse('admin:admin_widgets_event_add'), {"main_band": test_str})
+ 
+-            self.assertContains(response, 'Select a valid choice. That choice is not one of the available choices.')
++            self.assertContains(response, 'Select a valid choice.')
+ 
+     def test_url_params_from_lookup_dict_any_iterable(self):
+         lookup1 = widgets.url_params_from_lookup_dict({'color__in': ('red', 'blue')})
+diff --git a/tests/model_forms/test_modelchoicefield.py b/tests/model_forms/test_modelchoicefield.py
+index 8f41ce9c40..5af1686ea3 100644
+--- a/tests/model_forms/test_modelchoicefield.py
++++ b/tests/model_forms/test_modelchoicefield.py
+@@ -51,7 +51,7 @@ class ModelChoiceFieldTests(TestCase):
+         # instantiated. This proves clean() checks the database during clean()
+         # rather than caching it at instantiation time.
+         Category.objects.get(url='4th').delete()
+-        msg = "['Select a valid choice. That choice is not one of the available choices.']"
++        msg = f"['Select a valid choice. {c4.id} is not one of the available choices.']"
+         with self.assertRaisesMessage(ValidationError, msg):
+             f.clean(c4.id)
+ 
+@@ -59,9 +59,10 @@ class ModelChoiceFieldTests(TestCase):
+         f = forms.ModelChoiceField(Category.objects.all())
+         self.assertEqual(f.clean(self.c1), self.c1)
+         # An instance of incorrect model.
+-        msg = "['Select a valid choice. That choice is not one of the available choices.']"
++        book = Book.objects.create()
++        msg = f"['Select a valid choice. {book} is not one of the available choices.']"
+         with self.assertRaisesMessage(ValidationError, msg):
+-            f.clean(Book.objects.create())
++            f.clean(book)
+ 
+     def test_clean_to_field_name(self):
+         f = forms.ModelChoiceField(Category.objects.all(), to_field_name='slug')
+@@ -216,7 +217,7 @@ class ModelChoiceFieldTests(TestCase):
+         form = ModelChoiceForm({}, instance=book)
+         self.assertEqual(
+             form.errors['author'],
+-            ['Select a valid choice. That choice is not one of the available choices.']
++            ['Select a valid choice. 1 is not one of the available choices.']
+         )
+ 
+     def test_disabled_modelchoicefield_has_changed(self):
+diff --git a/tests/model_forms/tests.py b/tests/model_forms/tests.py
+index 9931fa50e3..520ef49e52 100644
+--- a/tests/model_forms/tests.py
++++ b/tests/model_forms/tests.py
+@@ -1675,7 +1675,7 @@ class ModelFormBasicTests(TestCase):
+         self.assertIs(form.is_valid(), False)
+         self.assertEqual(
+             form.errors,
+-            {'writer': ['Select a valid choice. That choice is not one of the available choices.']},
++            {'writer': [f'Select a valid choice. {w.pk} is not one of the available choices.']},
+         )
+ 
+     def test_validate_foreign_key_to_model_with_overridden_manager(self):
+diff --git a/tests/model_formsets/tests.py b/tests/model_formsets/tests.py
+index 98fd501ad6..3c7e7267b3 100644
+--- a/tests/model_formsets/tests.py
++++ b/tests/model_formsets/tests.py
+@@ -1748,7 +1748,7 @@ class ModelFormsetTest(TestCase):
+         formset = AuthorFormSet(data)
+         self.assertEqual(
+             formset.errors,
+-            [{'id': ['Select a valid choice. That choice is not one of the available choices.']}],
++            [{'id': ['Select a valid choice. abc is not one of the available choices.']}],
+         )
+ 
+     def test_validation_with_nonexistent_id(self):
+@@ -1763,7 +1763,7 @@ class ModelFormsetTest(TestCase):
+         formset = AuthorFormSet(data)
+         self.assertEqual(
+             formset.errors,
+-            [{'id': ['Select a valid choice. That choice is not one of the available choices.']}],
++            [{'id': ['Select a valid choice. 12345 is not one of the available choices.']}],
+         )
+ 
+     def test_initial_form_count_empty_data(self):

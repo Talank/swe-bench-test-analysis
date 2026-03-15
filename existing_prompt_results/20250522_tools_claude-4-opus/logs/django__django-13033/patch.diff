@@ -1,0 +1,853 @@
+diff --git a/debug_field_lookup.py b/debug_field_lookup.py
+new file mode 100644
+index 0000000000..6613307b3d
+--- /dev/null
++++ b/debug_field_lookup.py
+@@ -0,0 +1,60 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define models
++class OneModel(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    root = models.ForeignKey("OneModel", on_delete=models.CASCADE, null=True)
++    oneval = models.BigIntegerField(null=True)
++
++# Let's check what happens when we look up fields
++opts = OneModel._meta
++
++# Check field lookup
++try:
++    field = opts.get_field('root_id')
++    print(f"get_field('root_id'): {field}")
++    print(f"  field.name: {field.name}")
++    print(f"  field.attname: {field.attname}")
++    print(f"  field.is_relation: {field.is_relation}")
++except Exception as e:
++    print(f"get_field('root_id') failed: {e}")
++
++try:
++    field = opts.get_field('root')
++    print(f"\nget_field('root'): {field}")
++    print(f"  field.name: {field.name}")
++    print(f"  field.attname: {field.attname}")
++    print(f"  field.is_relation: {field.is_relation}")
++except Exception as e:
++    print(f"get_field('root') failed: {e}")
++
++# Check all fields
++print("\nAll fields:")
++for f in opts.get_fields():
++    if hasattr(f, 'attname'):
++        print(f"  {f.name} (attname: {f.attname}, is_relation: {f.is_relation})")
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index abbb1e37cb..a8f5b61fbe 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -727,7 +727,7 @@ class SQLCompiler:
+         # If we get to this point and the field is a relation to another model,
+         # append the default ordering for that model unless it is the pk
+         # shortcut or the attribute name of the field that is specified.
+-        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != name and name != 'pk':
++        if field.is_relation and opts.ordering and getattr(field, 'attname', None) != pieces[-1] and name != 'pk':
+             # Firstly, avoid infinite loops.
+             already_seen = already_seen or set()
+             join_tuple = tuple(getattr(self.query.alias_map[j], 'join_cols', None) for j in joins)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..395434fec8
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,90 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define models
++class OneModel(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    root = models.ForeignKey("OneModel", on_delete=models.CASCADE, null=True)
++    oneval = models.BigIntegerField(null=True)
++
++class TwoModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    record = models.ForeignKey(OneModel, on_delete=models.CASCADE)
++    twoval = models.BigIntegerField(null=True)
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(OneModel)
++    schema_editor.create_model(TwoModel)
++
++# Create test data
++root1 = OneModel.objects.create(oneval=1)
++root2 = OneModel.objects.create(oneval=2)
++child1 = OneModel.objects.create(root=root1, oneval=3)
++child2 = OneModel.objects.create(root=root2, oneval=4)
++
++TwoModel.objects.create(record=child1, twoval=10)
++TwoModel.objects.create(record=child2, twoval=20)
++
++print("Testing different order_by scenarios:\n")
++
++# Test 1: order_by("record__root_id") - This shows the issue
++print("1. order_by('record__root_id'):")
++qs = TwoModel.objects.filter(record__oneval__in=[1,2,3,4])
++qs = qs.order_by("record__root_id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'record__root_id'))}")
++print()
++
++# Test 2: order_by("record__root__id") - This works correctly
++print("2. order_by('record__root__id'):")
++qs = TwoModel.objects.filter(record__oneval__in=[1,2,3,4])
++qs = qs.order_by("record__root__id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'record__root__id'))}")
++print()
++
++# Test 3: order_by("-record__root_id") - Inverted sort
++print("3. order_by('-record__root_id'):")
++qs = TwoModel.objects.filter(record__oneval__in=[1,2,3,4])
++qs = qs.order_by("-record__root_id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'record__root_id'))}")
++print()
++
++# Test 4: Using annotate workaround
++print("4. Using annotate workaround:")
++from django.db.models import F
++qs = TwoModel.objects.filter(record__oneval__in=[1,2,3,4])
++qs = qs.annotate(root_id=F("record__root_id"))
++qs = qs.order_by("root_id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'root_id'))}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..f0a212120d
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,96 @@
++"""
++Comprehensive test for the self-referencing foreign key ordering fix.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define test models
++class Category(models.Model):
++    class Meta:
++        ordering = ("-name",)
++        app_label = 'test_app'
++    
++    name = models.CharField(max_length=100)
++    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True)
++
++class Product(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    
++    name = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Product)
++
++# Create test data
++root_cat1 = Category.objects.create(id=1, name="Electronics")
++root_cat2 = Category.objects.create(id=2, name="Books")
++sub_cat1 = Category.objects.create(id=3, name="Phones", parent=root_cat1)
++sub_cat2 = Category.objects.create(id=4, name="Fiction", parent=root_cat2)
++
++prod1 = Product.objects.create(id=1, name="iPhone", category=sub_cat1)
++prod2 = Product.objects.create(id=2, name="Novel", category=sub_cat2)
++
++print("Comprehensive test results:\n")
++
++# Test 1: Ordering by category__parent_id (the fix)
++print("1. Product.objects.order_by('category__parent_id'):")
++qs = Product.objects.order_by('category__parent_id')
++print(f"   SQL: {qs.query}")
++print(f"   Results: {list(qs.values_list('name', 'category__parent_id'))}")
++print(f"   Has unnecessary JOIN: {'LEFT OUTER JOIN' in str(qs.query)}")
++print(f"   Order direction: {'ASC' if 'ASC' in str(qs.query) else 'DESC'}")
++
++# Test 2: Ordering by -category__parent_id
++print("\n2. Product.objects.order_by('-category__parent_id'):")
++qs = Product.objects.order_by('-category__parent_id')
++print(f"   SQL: {qs.query}")
++print(f"   Results: {list(qs.values_list('name', 'category__parent_id'))}")
++print(f"   Order direction: {'DESC' if 'DESC' in str(qs.query) else 'ASC'}")
++
++# Test 3: Ordering by category__parent (should apply Category's ordering)
++print("\n3. Product.objects.order_by('category__parent'):")
++qs = Product.objects.order_by('category__parent')
++print(f"   SQL: {qs.query}")
++print(f"   Has LEFT OUTER JOIN: {'LEFT OUTER JOIN' in str(qs.query)}")
++print(f"   Orders by name DESC: {'name' in str(qs.query) and 'DESC' in str(qs.query)}")
++
++# Test 4: Complex case - ordering by multiple fields
++print("\n4. Product.objects.order_by('category__parent_id', 'name'):")
++qs = Product.objects.order_by('category__parent_id', 'name')
++print(f"   SQL: {qs.query}")
++results = list(qs.values_list('name', 'category__parent_id'))
++print(f"   Results: {results}")
++
++# Test 5: Verify the fix doesn't affect non-FK _id lookups
++print("\n5. Category.objects.order_by('id'):")
++qs = Category.objects.order_by('id')
++print(f"   SQL: {qs.query}")
++print(f"   Results: {list(qs.values_list('name', 'id'))}")
++
++print("\nAll tests completed successfully!")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..7160801538
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,93 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Test case 1: Field with custom attname
++class CustomAttname(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True, db_column='custom_parent_id')
++    value = models.IntegerField(null=True)
++
++class RelatedToCustom(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    
++    record = models.ForeignKey(CustomAttname, on_delete=models.CASCADE)
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(CustomAttname)
++    schema_editor.create_model(RelatedToCustom)
++
++# Test
++print("Testing edge cases:\n")
++
++print("1. Field with custom db_column:")
++print(f"   parent field attname: {CustomAttname._meta.get_field('parent').attname}")
++print(f"   parent field column: {CustomAttname._meta.get_field('parent').column}")
++
++# Create test data
++parent = CustomAttname.objects.create(id=1, value=1)
++child = CustomAttname.objects.create(id=2, parent=parent, value=2)
++related = RelatedToCustom.objects.create(id=1, record=child)
++
++# Test ordering by the custom column
++qs = RelatedToCustom.objects.order_by("record__parent_id")
++print(f"\n2. order_by('record__parent_id') with custom db_column:")
++print(f"   Query: {qs.query}")
++print(f"   Results: {list(qs.values_list('id', 'record__parent_id'))}")
++
++# Test case 2: Multiple levels of self-reference
++class DeepSelfRef(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app2'
++    
++    parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True)
++
++class RelatedToDeep(models.Model):
++    class Meta:
++        app_label = 'test_app2'
++    
++    record = models.ForeignKey(DeepSelfRef, on_delete=models.CASCADE)
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(DeepSelfRef)
++    schema_editor.create_model(RelatedToDeep)
++
++# Create deep hierarchy
++grandparent = DeepSelfRef.objects.create(id=1)
++parent = DeepSelfRef.objects.create(id=2, parent=grandparent)
++child = DeepSelfRef.objects.create(id=3, parent=parent)
++related = RelatedToDeep.objects.create(id=1, record=child)
++
++# Test deep ordering
++qs = RelatedToDeep.objects.order_by("record__parent__parent_id")
++print(f"\n3. Deep self-reference order_by('record__parent__parent_id'):")
++print(f"   Query: {qs.query}")
++print(f"   Results: {list(qs.values_list('id', 'record__parent__parent_id'))}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..99288eb578
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,32 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models.constants import LOOKUP_SEP
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Test the logic
++name = "record__root_id"
++pieces = name.split(LOOKUP_SEP)
++print(f"name: {name}")
++print(f"pieces: {pieces}")
++print(f"last piece: {pieces[-1]}")
++
++# The fix should check if pieces[-1] == field.attname
+diff --git a/test_non_self_ref.py b/test_non_self_ref.py
+new file mode 100644
+index 0000000000..eac18b1217
+--- /dev/null
++++ b/test_non_self_ref.py
+@@ -0,0 +1,74 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define models - non-self-referencing
++class Author(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    name = models.CharField(max_length=100)
++
++class Book(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    title = models.CharField(max_length=100)
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create test data
++author1 = Author.objects.create(id=1, name="Author 1")
++author2 = Author.objects.create(id=2, name="Author 2")
++
++book1 = Book.objects.create(id=1, author=author1, title="Book 1")
++book2 = Book.objects.create(id=2, author=author2, title="Book 2")
++
++print("Testing non-self-referencing foreign key ordering:\n")
++
++# Test 1: order_by("author_id") - should work normally
++print("1. order_by('author_id'):")
++qs = Book.objects.order_by("author_id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'author_id'))}")
++print()
++
++# Test 2: order_by("author") - should apply Author's ordering
++print("2. order_by('author'):")
++qs = Book.objects.order_by("author")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'author_id'))}")
++print()
++
++# Test 3: order_by("author__id") - should order by author's id
++print("3. order_by('author__id'):")
++qs = Book.objects.order_by("author__id")
++print(f"Query: {qs.query}")
++print(f"Results: {list(qs.values_list('id', 'author_id'))}")
+diff --git a/test_ordering_fix.py b/test_ordering_fix.py
+new file mode 100644
+index 0000000000..0bdb4faa6e
+--- /dev/null
++++ b/test_ordering_fix.py
+@@ -0,0 +1,90 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=False,
++    )
++    django.setup()
++
++# Define models
++class OneModel(models.Model):
++    class Meta:
++        ordering = ("-id",)
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    root = models.ForeignKey("OneModel", on_delete=models.CASCADE, null=True)
++    oneval = models.BigIntegerField(null=True)
++
++class TwoModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++    
++    id = models.BigAutoField(primary_key=True)
++    record = models.ForeignKey(OneModel, on_delete=models.CASCADE)
++    twoval = models.BigIntegerField(null=True)
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(OneModel)
++    schema_editor.create_model(TwoModel)
++
++# Test function
++def test_ordering():
++    # Create test data
++    root1 = OneModel.objects.create(id=1, oneval=1)
++    root2 = OneModel.objects.create(id=2, oneval=2)
++    child1 = OneModel.objects.create(id=3, root=root1, oneval=3)
++    child2 = OneModel.objects.create(id=4, root=root2, oneval=4)
++
++    two1 = TwoModel.objects.create(id=1, record=child1, twoval=10)
++    two2 = TwoModel.objects.create(id=2, record=child2, twoval=20)
++    
++    print("Testing ordering scenarios:")
++    
++    # Test 1: order_by("record__root_id") - should be ASC
++    qs1 = TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("record__root_id")
++    results1 = list(qs1.values_list('id', 'record__root_id'))
++    print(f"\n1. order_by('record__root_id'):")
++    print(f"   Query: {qs1.query}")
++    print(f"   Results: {results1}")
++    print(f"   Expected: [(1, 1), (2, 2)] (ASC order)")
++    print(f"   Correct: {results1 == [(1, 1), (2, 2)]}")
++    
++    # Test 2: order_by("-record__root_id") - should be DESC  
++    qs2 = TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("-record__root_id")
++    results2 = list(qs2.values_list('id', 'record__root_id'))
++    print(f"\n2. order_by('-record__root_id'):")
++    print(f"   Query: {qs2.query}")
++    print(f"   Results: {results2}")
++    print(f"   Expected: [(2, 2), (1, 1)] (DESC order)")
++    print(f"   Correct: {results2 == [(2, 2), (1, 1)]}")
++    
++    # Test 3: order_by("record__root__id") - for comparison
++    qs3 = TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("record__root__id")
++    results3 = list(qs3.values_list('id', 'record__root__id'))
++    print(f"\n3. order_by('record__root__id'):")
++    print(f"   Query: {qs3.query}")
++    print(f"   Results: {results3}")
++    print(f"   Expected: [(1, 1), (2, 2)] (ASC order)")
++    print(f"   Correct: {results3 == [(1, 1), (2, 2)]}")
++
++if __name__ == "__main__":
++    test_ordering()
+diff --git a/test_self_referencing_ordering.py b/test_self_referencing_ordering.py
+new file mode 100644
+index 0000000000..0c25d5900c
+--- /dev/null
++++ b/test_self_referencing_ordering.py
+@@ -0,0 +1,73 @@
++"""
++Test for self-referencing foreign key ordering by _id field.
++"""
++from django.test import TestCase
++from django.db import models
++
++
++class SelfReferenceOrderingTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        # Create the models dynamically for the test
++        class OneModel(models.Model):
++            class Meta:
++                ordering = ("-id",)
++                app_label = 'test_app'
++            
++            id = models.BigAutoField(primary_key=True)
++            root = models.ForeignKey("self", on_delete=models.CASCADE, null=True)
++            oneval = models.BigIntegerField(null=True)
++
++        class TwoModel(models.Model):
++            class Meta:
++                app_label = 'test_app'
++            
++            id = models.BigAutoField(primary_key=True)
++            record = models.ForeignKey(OneModel, on_delete=models.CASCADE)
++            twoval = models.BigIntegerField(null=True)
++        
++        cls.OneModel = OneModel
++        cls.TwoModel = TwoModel
++        
++        # Create test data
++        cls.root1 = OneModel.objects.create(id=1, oneval=1)
++        cls.root2 = OneModel.objects.create(id=2, oneval=2)
++        cls.child1 = OneModel.objects.create(id=3, root=cls.root1, oneval=3)
++        cls.child2 = OneModel.objects.create(id=4, root=cls.root2, oneval=4)
++        
++        cls.two1 = TwoModel.objects.create(id=1, record=cls.child1, twoval=10)
++        cls.two2 = TwoModel.objects.create(id=2, record=cls.child2, twoval=20)
++
++    def test_order_by_foreign_key_id_field(self):
++        """Test that ordering by a self-referencing foreign key's _id field works correctly."""
++        # Test ascending order
++        qs = self.TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("record__root_id")
++        results = list(qs.values_list('id', 'record__root_id'))
++        self.assertEqual(results, [(1, 1), (2, 2)])
++        
++        # Check that the query doesn't have unnecessary joins
++        sql = str(qs.query)
++        self.assertNotIn('LEFT OUTER JOIN', sql)
++        self.assertIn('ORDER BY', sql)
++        self.assertIn('ASC', sql)
++        
++    def test_order_by_foreign_key_id_field_desc(self):
++        """Test that descending order works correctly."""
++        qs = self.TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("-record__root_id")
++        results = list(qs.values_list('id', 'record__root_id'))
++        self.assertEqual(results, [(2, 2), (1, 1)])
++        
++        # Check that the query has DESC order
++        sql = str(qs.query)
++        self.assertIn('ORDER BY', sql)
++        self.assertIn('DESC', sql)
++        
++    def test_order_by_foreign_key_relation(self):
++        """Test that ordering by the relation itself still works."""
++        # When ordering by record__root, it should apply the related model's ordering
++        qs = self.TwoModel.objects.filter(record__oneval__in=[1,2,3,4]).order_by("record__root")
++        sql = str(qs.query)
++        # Should have a LEFT OUTER JOIN for the related model
++        self.assertIn('LEFT OUTER JOIN', sql)
++        # Should order by the related model's ordering (DESC due to OneModel.Meta.ordering)
++        self.assertIn('DESC', sql)
+diff --git a/tests/ordering/test_self_referencing_fk.py b/tests/ordering/test_self_referencing_fk.py
+new file mode 100644
+index 0000000000..0d2d920e35
+--- /dev/null
++++ b/tests/ordering/test_self_referencing_fk.py
+@@ -0,0 +1,85 @@
++"""
++Regression test for self-referencing foreign key ordering by _id field.
++"""
++from django.db import models
++from django.test import TestCase
++
++
++class SelfReferenceOrderingTests(TestCase):
++    """
++    Test ordering by self-referencing foreign key's _id field.
++    
++    Regression test for issue where ordering by a self-referencing foreign key's
++    _id field (e.g., 'record__root_id') would incorrectly apply the related
++    model's default ordering and create unnecessary joins.
++    """
++    
++    @classmethod
++    def setUpTestData(cls):
++        # Create models for testing
++        class SelfRefModel(models.Model):
++            class Meta:
++                ordering = ("-id",)
++                app_label = 'ordering'
++            
++            parent = models.ForeignKey("self", on_delete=models.CASCADE, null=True)
++            value = models.IntegerField(null=True)
++        
++        class RelatedModel(models.Model):
++            class Meta:
++                app_label = 'ordering'
++            
++            record = models.ForeignKey(SelfRefModel, on_delete=models.CASCADE)
++            
++        cls.SelfRefModel = SelfRefModel
++        cls.RelatedModel = RelatedModel
++        
++        # Create test data
++        cls.parent1 = SelfRefModel.objects.create(id=1, value=1)
++        cls.parent2 = SelfRefModel.objects.create(id=2, value=2)
++        cls.child1 = SelfRefModel.objects.create(id=3, parent=cls.parent1, value=3)
++        cls.child2 = SelfRefModel.objects.create(id=4, parent=cls.parent2, value=4)
++        
++        cls.related1 = RelatedModel.objects.create(id=1, record=cls.child1)
++        cls.related2 = RelatedModel.objects.create(id=2, record=cls.child2)
++
++    def test_order_by_self_ref_fk_id_field(self):
++        """
++        Ordering by a self-referencing foreign key's _id field should not
++        apply the related model's ordering and should not create unnecessary joins.
++        """
++        # Test ascending order
++        qs = self.RelatedModel.objects.order_by("record__parent_id")
++        results = list(qs.values_list('id', 'record__parent_id'))
++        self.assertEqual(results, [(1, 1), (2, 2)])
++        
++        # Check that the query doesn't have unnecessary joins
++        sql = str(qs.query)
++        self.assertNotIn('LEFT OUTER JOIN', sql)
++        # Should order by the _id field directly, not by the related model
++        self.assertIn('parent_id', sql.lower())
++        self.assertIn('ASC', sql)
++        
++    def test_order_by_self_ref_fk_id_field_desc(self):
++        """Test that descending order works correctly."""
++        qs = self.RelatedModel.objects.order_by("-record__parent_id")
++        results = list(qs.values_list('id', 'record__parent_id'))
++        self.assertEqual(results, [(2, 2), (1, 1)])
++        
++        # Check that the query has DESC order
++        sql = str(qs.query)
++        self.assertIn('DESC', sql)
++        
++    def test_order_by_self_ref_fk_relation(self):
++        """
++        Ordering by the relation itself (not the _id field) should still
++        apply the related model's ordering.
++        """
++        # When ordering by record__parent (not parent_id), it should apply 
++        # the related model's ordering
++        qs = self.RelatedModel.objects.order_by("record__parent")
++        sql = str(qs.query)
++        # Should have a LEFT OUTER JOIN for the related model
++        self.assertIn('LEFT OUTER JOIN', sql)
++        # Should order by the related model's ordering (DESC due to SelfRefModel.Meta.ordering)
++        self.assertIn('DESC', sql)
+diff --git a/tests/queries/test_self_ref_fk_ordering.py b/tests/queries/test_self_ref_fk_ordering.py
+new file mode 100644
+index 0000000000..9758f2c4bc
+--- /dev/null
++++ b/tests/queries/test_self_ref_fk_ordering.py
+@@ -0,0 +1,87 @@
++"""
++Regression tests for ordering by self-referencing foreign key's _id field.
++
++Tests for the bug where ordering by a self-referencing foreign key's _id field
++(e.g., 'record__parent_id') would incorrectly apply the related model's default
++ordering and create unnecessary joins.
++"""
++from django.db import models
++from django.test import TestCase
++
++
++class SelfRefFKOrderingTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        # Create test models
++        class TreeNode(models.Model):
++            class Meta:
++                ordering = ("-id",)
++                app_label = 'queries'
++            
++            parent = models.ForeignKey("self", models.CASCADE, null=True)
++            name = models.CharField(max_length=10)
++        
++        class TreeRef(models.Model):
++            class Meta:
++                app_label = 'queries'
++            
++            node = models.ForeignKey(TreeNode, models.CASCADE)
++            
++        cls.TreeNode = TreeNode
++        cls.TreeRef = TreeRef
++        
++        # Create test data
++        cls.root1 = TreeNode.objects.create(id=1, name="root1")
++        cls.root2 = TreeNode.objects.create(id=2, name="root2")
++        cls.child1 = TreeNode.objects.create(id=3, parent=cls.root1, name="child1")
++        cls.child2 = TreeNode.objects.create(id=4, parent=cls.root2, name="child2")
++        
++        cls.ref1 = TreeRef.objects.create(id=1, node=cls.child1)
++        cls.ref2 = TreeRef.objects.create(id=2, node=cls.child2)
++
++    def test_order_by_self_ref_fk_id_asc(self):
++        """
++        Ordering by a self-referencing FK's _id field should use ASC order,
++        not the related model's default ordering.
++        """
++        qs = self.TreeRef.objects.order_by("node__parent_id")
++        
++        # Should be ordered by parent_id ASC (1, 2), not DESC
++        self.assertQuerysetEqual(
++            qs.values_list('id', 'node__parent_id'),
++            [(1, 1), (2, 2)]
++        )
++        
++        # Should not have unnecessary LEFT OUTER JOIN
++        sql = str(qs.query)
++        self.assertNotIn('LEFT OUTER JOIN', sql)
++        self.assertIn('ORDER BY', sql)
++        self.assertIn('ASC', sql)
++        
++    def test_order_by_self_ref_fk_id_desc(self):
++        """
++        Ordering by -field__fk_id should use DESC order.
++        """
++        qs = self.TreeRef.objects.order_by("-node__parent_id")
++        
++        # Should be ordered by parent_id DESC (2, 1)
++        self.assertQuerysetEqual(
++            qs.values_list('id', 'node__parent_id'),
++            [(2, 2), (1, 1)]
++        )
++        
++        sql = str(qs.query)
++        self.assertIn('DESC', sql)
++        
++    def test_order_by_self_ref_fk_relation(self):
++        """
++        Ordering by the FK relation (not _id) should still apply
++        the related model's default ordering.
++        """
++        qs = self.TreeRef.objects.order_by("node__parent")
++        
++        # Should have LEFT OUTER JOIN and use TreeNode's default ordering
++        sql = str(qs.query)
++        self.assertIn('LEFT OUTER JOIN', sql)
++        # TreeNode has ordering = ("-id",) so should be DESC
++        self.assertIn('DESC', sql)

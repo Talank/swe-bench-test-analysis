@@ -1,0 +1,674 @@
+diff --git a/sphinx/util/docfields.py b/sphinx/util/docfields.py
+index 3a3367ebe..78da4dce9 100644
+--- a/sphinx/util/docfields.py
++++ b/sphinx/util/docfields.py
+@@ -22,6 +22,37 @@ if TYPE_CHECKING:
+     from sphinx.directive import ObjectDescription
+ 
+ 
++def _split_type_argname(text: str) -> Tuple[str, str]:
++    """Split a field argument into type and argument name.
++    
++    This function handles cases where the type contains parentheses,
++    such as 'dict(str, str) argname'.
++    
++    :param text: The text to split
++    :return: A tuple of (type, argname) or raises ValueError if split fails
++    """
++    # Count parentheses to find where the type ends
++    paren_depth = 0
++    last_space_outside_parens = -1
++    
++    for i, char in enumerate(text):
++        if char == '(':
++            paren_depth += 1
++        elif char == ')':
++            paren_depth -= 1
++        elif char == ' ' and paren_depth == 0:
++            last_space_outside_parens = i
++    
++    if last_space_outside_parens == -1:
++        raise ValueError("No space found outside parentheses")
++    
++    # Split and strip the type part to remove trailing spaces
++    type_part = text[:last_space_outside_parens].rstrip()
++    argname_part = text[last_space_outside_parens + 1:]
++    
++    return type_part, argname_part
++
++
+ def _is_single_paragraph(node: nodes.field_body) -> bool:
+     """True if the node only contains one paragraph (and system messages)."""
+     if len(node) == 0:
+@@ -298,7 +329,7 @@ class DocFieldTransformer:
+             # also support syntax like ``:param type name:``
+             if typedesc.is_typed:
+                 try:
+-                    argtype, argname = fieldarg.split(None, 1)
++                    argtype, argname = _split_type_argname(fieldarg)
+                 except ValueError:
+                     pass
+                 else:
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 000000000..0b32309d4
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,129 @@
++"""Test backward compatibility with standard param syntax."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_backward_compatibility():
++    """Test that standard :param type name: syntax still works."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / 'source'
++        outdir = Path(tmpdir) / 'build'
++        srcdir.mkdir()
++        
++        # Create conf.py
++        conf_content = '''
++project = 'Test'
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++'''
++        (srcdir / 'conf.py').write_text(conf_content)
++        
++        # Create a test module with standard param syntax
++        test_module = '''
++"""Test module for backward compatibility."""
++
++def test_function(name, count, items, mapping):
++    """Test function with standard parameter syntax.
++    
++    :param str name: The name parameter
++    :param int count: The count parameter
++    :param list items: List of items
++    :param dict mapping: A dictionary
++    :type mapping: dict
++    :return: str
++    :rtype: str
++    """
++    pass
++
++def test_mixed(param1, param2, param3):
++    """Test function with mixed parameter styles.
++    
++    :param str param1: Simple string parameter
++    :param dict(str, int) param2: Dict parameter with parentheses
++    :param param3: Parameter with separate type
++    :type param3: list
++    """
++    pass
++'''
++        (srcdir / 'test_module.py').write_text(test_module)
++        
++        # Create index.rst
++        index_content = '''
++Test Documentation
++==================
++
++.. automodule:: test_module
++   :members:
++'''
++        (srcdir / 'index.rst').write_text(index_content)
++        
++        # Add source directory to Python path
++        sys.path.insert(0, str(srcdir))
++        
++        try:
++            # Build the documentation
++            with docutils_namespace():
++                app = Sphinx(
++                    srcdir=str(srcdir),
++                    confdir=str(srcdir),
++                    outdir=str(outdir),
++                    doctreedir=str(outdir / '.doctrees'),
++                    buildername='html',
++                    confoverrides={},
++                    status=None,
++                    warning=None,
++                    freshenv=True,
++                    warningiserror=False,
++                    tags=[],
++                    verbosity=0,
++                    parallel=1
++                )
++                app.build(force_all=True)
++            
++            # Check the output
++            output_file = outdir / 'index.html'
++            content = output_file.read_text()
++            
++            # Check that all parameters are present
++            params = ['name', 'count', 'items', 'mapping', 'param1', 'param2', 'param3']
++            for param in params:
++                assert param in content, f"Parameter {param} not found in output"
++            
++            # Check that types are rendered correctly
++            assert 'str' in content, "str type not found"
++            assert 'int' in content, "int type not found"
++            assert 'list' in content, "list type not found"
++            assert 'dict' in content, "dict type not found"
++            
++            # Check that descriptions are present
++            assert 'The name parameter' in content
++            assert 'The count parameter' in content
++            assert 'List of items' in content
++            assert 'A dictionary' in content
++            assert 'Simple string parameter' in content
++            assert 'Dict parameter with parentheses' in content
++            assert 'Parameter with separate type' in content
++            
++            print("Backward compatibility test passed!")
++            print("Standard :param type name: syntax works correctly.")
++            print("Mixed parameter styles also work correctly.")
++            
++        finally:
++            # Clean up sys.path
++            sys.path.pop(0)
++
++
++if __name__ == '__main__':
++    test_backward_compatibility()
+diff --git a/test_complex_types.py b/test_complex_types.py
+new file mode 100644
+index 000000000..81b6b3965
+--- /dev/null
++++ b/test_complex_types.py
+@@ -0,0 +1,129 @@
++"""Test complex parameter types with nested parentheses."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_complex_types():
++    """Test various complex parameter types."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / 'source'
++        outdir = Path(tmpdir) / 'build'
++        srcdir.mkdir()
++        
++        # Create conf.py
++        conf_content = '''
++project = 'Test'
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++'''
++        (srcdir / 'conf.py').write_text(conf_content)
++        
++        # Create a test module with various complex types
++        test_module = '''
++"""Test module for complex parameter types."""
++
++def test_function(param1, param2, param3, param4, param5):
++    """Test function with various complex parameter types.
++    
++    :param dict(str, str) param1: Simple dict parameter
++    :param dict(str, list(int)) param2: Dict with list values
++    :param dict(str, dict(int, str)) param3: Nested dict parameter
++    :param Optional[dict(str, str)] param4: Optional dict parameter
++    :param Callable[[int, str], dict(str, str)] param5: Callable returning dict
++    """
++    pass
++
++class TestClass:
++    def method(self, data):
++        """Method with complex type.
++        
++        :param dict(str, tuple(int, str)) data: Dict with tuple values
++        :type data: dict(str, tuple(int, str))
++        :return: dict(int, list(str))
++        """
++        pass
++'''
++        (srcdir / 'test_module.py').write_text(test_module)
++        
++        # Create index.rst
++        index_content = '''
++Test Documentation
++==================
++
++.. automodule:: test_module
++   :members:
++'''
++        (srcdir / 'index.rst').write_text(index_content)
++        
++        # Add source directory to Python path
++        sys.path.insert(0, str(srcdir))
++        
++        try:
++            # Build the documentation
++            with docutils_namespace():
++                app = Sphinx(
++                    srcdir=str(srcdir),
++                    confdir=str(srcdir),
++                    outdir=str(outdir),
++                    doctreedir=str(outdir / '.doctrees'),
++                    buildername='html',
++                    confoverrides={},
++                    status=None,
++                    warning=None,
++                    freshenv=True,
++                    warningiserror=False,
++                    tags=[],
++                    verbosity=0,
++                    parallel=1
++                )
++                app.build(force_all=True)
++            
++            # Check the output
++            output_file = outdir / 'index.html'
++            content = output_file.read_text()
++            
++            # Check that none of the types are incorrectly split
++            incorrect_patterns = [
++                'str) param',  # Would indicate incorrect split
++                'int) param',
++                'str)) param',
++                'dict(str,)',  # Incomplete dict type
++                'list(int)',   # Should be list(int))
++                'tuple(int,)', # Incomplete tuple type
++            ]
++            
++            for pattern in incorrect_patterns:
++                assert pattern not in content, f"Found incorrect pattern: {pattern}"
++            
++            # Check that parameters are present
++            for i in range(1, 6):
++                assert f'param{i}' in content, f"param{i} not found in output"
++            
++            print("All complex types are rendered correctly!")
++            
++            # Print some of the parameter renderings for verification
++            print("\nParameter renderings found:")
++            lines = content.split('\n')
++            for i, line in enumerate(lines):
++                if 'param' in line and ('dict' in line or 'list' in line or 'tuple' in line):
++                    print(f"Line {i}: {line.strip()[:100]}...")
++            
++        finally:
++            # Clean up sys.path
++            sys.path.pop(0)
++
++
++if __name__ == '__main__':
++    test_complex_types()
+diff --git a/test_dict_param_fix.py b/test_dict_param_fix.py
+new file mode 100644
+index 000000000..66535e5be
+--- /dev/null
++++ b/test_dict_param_fix.py
+@@ -0,0 +1,120 @@
++"""Test the fix for dict(str,str) parameter rendering."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_dict_param_rendering():
++    """Test that dict(str,str) parameters are rendered correctly."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / 'source'
++        outdir = Path(tmpdir) / 'build'
++        srcdir.mkdir()
++        
++        # Create conf.py
++        conf_content = '''
++project = 'Test'
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++'''
++        (srcdir / 'conf.py').write_text(conf_content)
++        
++        # Create a test module
++        test_module = '''
++"""Test module for dict parameter rendering."""
++
++def test_function(opc_meta, data, config):
++    """Test function with various dict parameters.
++    
++    :param dict(str, str) opc_meta: (optional) A dictionary mapping strings to strings
++    :param dict(int, str) data: A dictionary mapping ints to strings  
++    :param dict(str, list) config: Configuration dictionary
++    :return: None
++    """
++    pass
++
++class TestClass:
++    def test_method(self, params):
++        """Test method with dict parameter.
++        
++        :param dict(str, str) params: Parameters dictionary
++        :type params: dict(str, str)
++        :return: dict(str, int)
++        """
++        pass
++'''
++        (srcdir / 'test_module.py').write_text(test_module)
++        
++        # Create index.rst
++        index_content = '''
++Test Documentation
++==================
++
++.. automodule:: test_module
++   :members:
++'''
++        (srcdir / 'index.rst').write_text(index_content)
++        
++        # Add source directory to Python path
++        sys.path.insert(0, str(srcdir))
++        
++        try:
++            # Build the documentation
++            with docutils_namespace():
++                app = Sphinx(
++                    srcdir=str(srcdir),
++                    confdir=str(srcdir),
++                    outdir=str(outdir),
++                    doctreedir=str(outdir / '.doctrees'),
++                    buildername='html',
++                    confoverrides={},
++                    status=None,
++                    warning=None,
++                    freshenv=True,
++                    warningiserror=False,
++                    tags=[],
++                    verbosity=0,
++                    parallel=1
++                )
++                app.build(force_all=True)
++            
++            # Check the output
++            output_file = outdir / 'index.html'
++            content = output_file.read_text()
++            
++            # Print relevant parts of the output for debugging
++            print("Generated HTML content (relevant parts):")
++            lines = content.split('\n')
++            for i, line in enumerate(lines):
++                if 'opc_meta' in line or 'dict(' in line:
++                    print(f"Line {i}: {line.strip()}")
++            
++            # Check that the parameters are rendered correctly
++            # The output should contain properly formatted parameter descriptions
++            assert 'dict(str,' not in content or 'str)' not in content, \
++                "Found incorrectly split dict parameter"
++            
++            # Look for correct rendering patterns
++            # Note: The exact HTML structure may vary, but we should see the complete type
++            assert 'dict' in content, "dict type not found in output"
++            
++            print("\nTest passed! Dict parameters are rendered correctly.")
++            
++        finally:
++            # Clean up sys.path
++            sys.path.pop(0)
++
++
++if __name__ == '__main__':
++    test_dict_param_rendering()
+diff --git a/test_docfield_split.py b/test_docfield_split.py
+new file mode 100644
+index 000000000..b3c08410c
+--- /dev/null
++++ b/test_docfield_split.py
+@@ -0,0 +1,71 @@
++"""Test the _split_type_argname function."""
++
++import sys
++sys.path.insert(0, '/testbed')
++
++from sphinx.util.docfields import _split_type_argname
++
++
++def test_split_type_argname():
++    """Test various cases of splitting type and argument name."""
++    
++    # Test cases: (input, expected_type, expected_argname)
++    test_cases = [
++        # Basic dict cases
++        ("dict(str, str) opc_meta", "dict(str, str)", "opc_meta"),
++        ("dict(int, str) data", "dict(int, str)", "data"),
++        ("dict(str, list) config", "dict(str, list)", "config"),
++        
++        # Nested parentheses
++        ("dict(str, list(int)) nested", "dict(str, list(int))", "nested"),
++        ("dict(str, dict(int, str)) double_dict", "dict(str, dict(int, str))", "double_dict"),
++        
++        # Multiple spaces
++        ("dict(str, str)  opc_meta", "dict(str, str)", "opc_meta"),
++        
++        # Simple types
++        ("str name", "str", "name"),
++        ("int count", "int", "count"),
++        ("list items", "list", "items"),
++        
++        # Complex generic types
++        ("List[str] names", "List[str]", "names"),
++        ("Dict[str, int] mapping", "Dict[str, int]", "mapping"),
++        ("Optional[dict(str, str)] maybe_dict", "Optional[dict(str, str)]", "maybe_dict"),
++        
++        # Edge case with no spaces inside parentheses
++        ("dict(str,str) compact", "dict(str,str)", "compact"),
++    ]
++    
++    for input_str, expected_type, expected_argname in test_cases:
++        try:
++            result_type, result_argname = _split_type_argname(input_str)
++            assert result_type == expected_type, \
++                f"For '{input_str}': expected type '{expected_type}', got '{result_type}'"
++            assert result_argname == expected_argname, \
++                f"For '{input_str}': expected argname '{expected_argname}', got '{result_argname}'"
++            print(f"✓ '{input_str}' -> type='{result_type}', argname='{result_argname}'")
++        except ValueError as e:
++            print(f"✗ '{input_str}' raised ValueError: {e}")
++            raise
++    
++    # Test error cases
++    error_cases = [
++        "no_space_at_all",
++        "(only parens)",
++        "dict(str, str)",  # No argument name
++    ]
++    
++    for input_str in error_cases:
++        try:
++            _split_type_argname(input_str)
++            print(f"✗ '{input_str}' should have raised ValueError but didn't")
++            assert False, f"Expected ValueError for '{input_str}'"
++        except ValueError:
++            print(f"✓ '{input_str}' correctly raised ValueError")
++    
++    print("\nAll tests passed!")
++
++
++if __name__ == '__main__':
++    test_split_type_argname()
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 000000000..987536bfb
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,119 @@
++"""Test that reproduces the exact issue from the problem statement."""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_issue_reproduction():
++    """Test the exact issue from the problem statement."""
++    
++    # Create a temporary directory for the test
++    with tempfile.TemporaryDirectory() as tmpdir:
++        srcdir = Path(tmpdir) / 'source'
++        outdir = Path(tmpdir) / 'build'
++        srcdir.mkdir()
++        
++        # Create conf.py
++        conf_content = '''
++project = 'Test'
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++'''
++        (srcdir / 'conf.py').write_text(conf_content)
++        
++        # Create a test module with the exact docstring from the issue
++        test_module = '''
++"""Test module for dict parameter rendering issue."""
++
++def test_method(opc_meta):
++    """Test method with dict parameter.
++    
++    :param dict(str, str) opc_meta: (optional)
++    """
++    pass
++'''
++        (srcdir / 'test_module.py').write_text(test_module)
++        
++        # Create index.rst
++        index_content = '''
++Test Documentation
++==================
++
++.. automodule:: test_module
++   :members:
++'''
++        (srcdir / 'index.rst').write_text(index_content)
++        
++        # Add source directory to Python path
++        sys.path.insert(0, str(srcdir))
++        
++        try:
++            # Build the documentation
++            with docutils_namespace():
++                app = Sphinx(
++                    srcdir=str(srcdir),
++                    confdir=str(srcdir),
++                    outdir=str(outdir),
++                    doctreedir=str(outdir / '.doctrees'),
++                    buildername='html',
++                    confoverrides={},
++                    status=None,
++                    warning=None,
++                    freshenv=True,
++                    warningiserror=False,
++                    tags=[],
++                    verbosity=0,
++                    parallel=1
++                )
++                app.build(force_all=True)
++            
++            # Check the output
++            output_file = outdir / 'index.html'
++            content = output_file.read_text()
++            
++            # Print relevant parts of the output for debugging
++            print("Generated HTML content (searching for opc_meta):")
++            lines = content.split('\n')
++            for i, line in enumerate(lines):
++                if 'opc_meta' in line:
++                    print(f"Line {i}: {line.strip()}")
++            
++            # Check that the incorrect rendering is NOT present
++            # The bug would render as: str) opc_meta (dict(str,) –(optional)
++            assert 'str) opc_meta' not in content, \
++                "Found incorrectly rendered parameter (str) opc_meta)"
++            assert 'dict(str,)' not in content, \
++                "Found incorrectly split dict type"
++            
++            # Check for correct rendering
++            # Should be: opc_meta (dict(str,str)) – (optional)
++            # Note: HTML may have extra tags, so we check for the key parts
++            assert 'opc_meta' in content, "Parameter name not found"
++            assert '(optional)' in content, "Description not found"
++            
++            # Check that dict(str, str) appears correctly (may have HTML tags between)
++            import re
++            # Look for dict followed by parentheses containing str, str
++            dict_pattern = r'dict.*?\(.*?str.*?,.*?str.*?\)'
++            assert re.search(dict_pattern, content), \
++                "Correct dict(str, str) pattern not found in output"
++            
++            print("\nTest passed! The issue has been fixed.")
++            print("The parameter is now rendered correctly.")
++            
++        finally:
++            # Clean up sys.path
++            sys.path.pop(0)
++
++
++if __name__ == '__main__':
++    test_issue_reproduction()
+diff --git a/test_param_dict_issue.py b/test_param_dict_issue.py
+new file mode 100644
+index 000000000..92a680bd9
+--- /dev/null
++++ b/test_param_dict_issue.py
+@@ -0,0 +1,19 @@
++"""Test file to reproduce the dict(str,str) parameter rendering issue."""
++
++class TestClass:
++    def test_method(self, opc_meta):
++        """Test method with dict parameter.
++        
++        :param dict(str, str) opc_meta: (optional) A dictionary mapping strings to strings
++        :return: None
++        """
++        pass
++    
++    def test_method2(self, data):
++        """Another test method.
++        
++        :param dict(int, str) data: A dictionary mapping ints to strings
++        :param str name: A simple string parameter
++        :return: dict(str, int): A dictionary result
++        """
++        pass

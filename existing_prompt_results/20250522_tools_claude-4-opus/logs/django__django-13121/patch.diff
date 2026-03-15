@@ -1,0 +1,520 @@
+diff --git a/django/db/backends/base/operations.py b/django/db/backends/base/operations.py
+index 2e283a3193..837f94e9de 100644
+--- a/django/db/backends/base/operations.py
++++ b/django/db/backends/base/operations.py
+@@ -580,6 +580,9 @@ class BaseDatabaseOperations:
+ 
+     def convert_durationfield_value(self, value, expression, connection):
+         if value is not None:
++            # Handle string values (e.g., from MySQL duration arithmetic)
++            if isinstance(value, str):
++                value = int(value)
+             return datetime.timedelta(0, 0, value)
+ 
+     def check_expression_support(self, expression):
+diff --git a/django/db/backends/sqlite3/base.py b/django/db/backends/sqlite3/base.py
+index 31e8a55a43..68d8aac1b2 100644
+--- a/django/db/backends/sqlite3/base.py
++++ b/django/db/backends/sqlite3/base.py
+@@ -561,6 +561,9 @@ def _sqlite_format_dtdelta(conn, lhs, rhs):
+         return None
+     # typecast_timestamp returns a date or a datetime without timezone.
+     # It will be formatted as "%Y-%m-%d" or "%Y-%m-%d %H:%M:%S[.%f]"
++    # For timedelta operations, return microseconds as integer
++    if isinstance(out, datetime.timedelta):
++        return (24 * 60 * 60 * out.days + out.seconds) * 1000000 + out.microseconds
+     return str(out)
+ 
+ 
+diff --git a/test_comprehensive_duration.py b/test_comprehensive_duration.py
+new file mode 100644
+index 0000000000..e7752df6a8
+--- /dev/null
++++ b/test_comprehensive_duration.py
+@@ -0,0 +1,108 @@
++"""
++Comprehensive test for duration field expressions on SQLite and MySQL
++"""
++import os
++import sys
++import django
++from django.conf import settings
++import datetime
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import F, Value, DurationField
++from django.db.backends.base.operations import BaseDatabaseOperations
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Test 1: Basic duration arithmetic
++print("Test 1: Basic duration arithmetic")
++exp = Experiment.objects.create(estimated_time=datetime.timedelta(hours=2))
++result = list(Experiment.objects.annotate(
++    plus_one_day=F('estimated_time') + datetime.timedelta(days=1)
++))
++print(f"  Original: {exp.estimated_time}")
++print(f"  Plus one day: {result[0].plus_one_day}")
++assert result[0].plus_one_day == datetime.timedelta(days=1, hours=2)
++
++# Test 2: Multiple duration operations
++print("\nTest 2: Multiple duration operations")
++result = list(Experiment.objects.annotate(
++    complex=F('estimated_time') + datetime.timedelta(hours=3) - datetime.timedelta(minutes=30)
++))
++print(f"  Complex operation result: {result[0].complex}")
++assert result[0].complex == datetime.timedelta(hours=4, minutes=30)
++
++# Test 3: Test the converter directly with various inputs
++print("\nTest 3: Testing converter with various inputs")
++ops = BaseDatabaseOperations(connection)
++
++# Integer (normal case)
++val = ops.convert_durationfield_value(7200000000, None, None)
++print(f"  Integer 7200000000 -> {val}")
++assert val == datetime.timedelta(hours=2)
++
++# String integer (MySQL case)
++val = ops.convert_durationfield_value("7200000000", None, None)
++print(f"  String '7200000000' -> {val}")
++assert val == datetime.timedelta(hours=2)
++
++# None value
++val = ops.convert_durationfield_value(None, None, None)
++print(f"  None -> {val}")
++assert val is None
++
++# Test 4: Filtering with duration expressions
++print("\nTest 4: Filtering with duration expressions")
++Experiment.objects.all().delete()
++exp1 = Experiment.objects.create(estimated_time=datetime.timedelta(hours=1))
++exp2 = Experiment.objects.create(estimated_time=datetime.timedelta(hours=3))
++exp3 = Experiment.objects.create(estimated_time=datetime.timedelta(minutes=30))
++
++# Filter experiments longer than 2 hours when adding 30 minutes
++long_exps = list(Experiment.objects.filter(
++    estimated_time__gt=datetime.timedelta(hours=2) - datetime.timedelta(minutes=30)
++).order_by('id'))
++print(f"  Experiments > 1.5 hours: {len(long_exps)}")
++assert len(long_exps) == 1
++assert long_exps[0].id == exp2.id
++
++# Test 5: Aggregation with duration (if supported)
++print("\nTest 5: Duration in complex expressions")
++from django.db.models import ExpressionWrapper, DateTimeField
++base_time = datetime.datetime(2023, 1, 1, 12, 0, 0)
++result = list(Experiment.objects.annotate(
++    end_time=ExpressionWrapper(
++        Value(base_time, output_field=DateTimeField()) + F('estimated_time'),
++        output_field=DateTimeField()
++    )
++).order_by('id'))
++
++for i, exp in enumerate(result):
++    print(f"  Experiment {i+1} end time: {exp.end_time}")
++
++print("\nAll tests passed!")
+diff --git a/test_duration_issue.py b/test_duration_issue.py
+new file mode 100644
+index 0000000000..cbc522d2b7
+--- /dev/null
++++ b/test_duration_issue.py
+@@ -0,0 +1,74 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create test model
++from django.db import models
++from django.db.models import F
++import datetime
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create test data
++exp = Experiment.objects.create(estimated_time=datetime.timedelta(hours=1))
++
++# Try the problematic query
++print("Testing duration expression...")
++from django.db import connection
++
++# Enable SQL logging
++import logging
++logging.basicConfig()
++logger = logging.getLogger('django.db.backends')
++logger.setLevel(logging.DEBUG)
++logger.addHandler(logging.StreamHandler())
++
++try:
++    qs = Experiment.objects.annotate(duration=F('estimated_time') + datetime.timedelta(days=1))
++    print(f"Query: {qs.query}")
++    result = list(qs)
++    print(f"Success! Result: {result}")
++    print(f"Duration value: {result[0].duration}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++    
++# Check what the raw value looks like
++with connection.cursor() as cursor:
++    cursor.execute("SELECT estimated_time, estimated_time + 86400000000 FROM test_experiment")
++    row = cursor.fetchone()
++    print(f"\nRaw values from DB: {row}")
++    
++    # Check what django_format_dtdelta returns
++    cursor.execute("SELECT django_format_dtdelta('+', estimated_time, 86400000000) FROM test_experiment")
++    row = cursor.fetchone()
++    print(f"django_format_dtdelta result: {row}")
+diff --git a/test_duration_issue_exact.py b/test_duration_issue_exact.py
+new file mode 100644
+index 0000000000..12038400b5
+--- /dev/null
++++ b/test_duration_issue_exact.py
+@@ -0,0 +1,80 @@
++"""
++Test the exact issue from the problem statement
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create test model
++from django.db import models
++from django.db.models import F
++import datetime
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create test data
++exp = Experiment.objects.create(estimated_time=datetime.timedelta(hours=1))
++
++# Try the exact query from the problem statement
++print("Testing exact query from problem statement...")
++try:
++    result = list(Experiment.objects.annotate(duration=F('estimated_time') + datetime.timedelta(1)))
++    print(f"Success! Result: {result}")
++    print(f"Duration value: {result[0].duration}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Now test with MySQL settings (but still using SQLite since we don't have MySQL)
++print("\n\nTesting with MySQL-like behavior...")
++# Let's see what happens if we simulate MySQL's behavior
++
++# First, let's understand what value MySQL would return
++# MySQL uses INTERVAL arithmetic which returns a string representation
++# Let's manually test the converter
++
++from django.db.backends.base.operations import BaseDatabaseOperations
++ops = BaseDatabaseOperations(connection)
++
++# Test the base converter with different values
++print("\nTesting base convert_durationfield_value:")
++try:
++    # Integer microseconds (expected)
++    result = ops.convert_durationfield_value(3600000000, None, None)
++    print(f"Integer input (3600000000): {result}")
++    
++    # String that looks like a number
++    result = ops.convert_durationfield_value("3600000000", None, None)
++    print(f"String number input ('3600000000'): {result}")
++except Exception as e:
++    print(f"Error: {e}")
++    traceback.print_exc()
+diff --git a/test_duration_mysql.py b/test_duration_mysql.py
+new file mode 100644
+index 0000000000..a8bc835608
+--- /dev/null
++++ b/test_duration_mysql.py
+@@ -0,0 +1,84 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings for MySQL
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.mysql',
++            'NAME': 'test_db',
++            'USER': 'root',
++            'PASSWORD': '',
++            'HOST': 'localhost',
++            'PORT': '',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create test model
++from django.db import models
++from django.db.models import F
++import datetime
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Try to connect
++from django.db import connection
++try:
++    with connection.cursor() as cursor:
++        cursor.execute("SELECT 1")
++except Exception as e:
++    print(f"Cannot connect to MySQL: {e}")
++    print("Skipping MySQL test")
++    sys.exit(0)
++
++# Create database if needed
++try:
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE DATABASE IF NOT EXISTS test_db")
++        cursor.execute("USE test_db")
++except:
++    pass
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.delete_model(Experiment)
++    except:
++        pass
++    schema_editor.create_model(Experiment)
++
++# Create test data
++Experiment.objects.all().delete()
++exp = Experiment.objects.create(estimated_time=datetime.timedelta(hours=1))
++
++# Try the problematic query
++print("Testing duration expression on MySQL...")
++try:
++    result = list(Experiment.objects.annotate(duration=F('estimated_time') + datetime.timedelta(days=1)))
++    print(f"Success! Result: {result}")
++    print(f"Duration value: {result[0].duration}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++    
++# Check what the raw value looks like
++with connection.cursor() as cursor:
++    cursor.execute("SELECT estimated_time, estimated_time + 86400000000 FROM test_experiment")
++    row = cursor.fetchone()
++    print(f"\nRaw values from DB: {row}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0be2de556e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,61 @@
++"""
++Test edge cases for the duration field converter fix
++"""
++from django.db.backends.base.operations import BaseDatabaseOperations
++from django.db import connection
++import datetime
++
++ops = BaseDatabaseOperations(connection)
++
++print("Testing edge cases for convert_durationfield_value:")
++
++# Test 1: Very large values
++print("\n1. Very large values:")
++try:
++    val = ops.convert_durationfield_value("999999999999999", None, None)
++    print(f"   Large string value: {val}")
++    assert isinstance(val, datetime.timedelta)
++except Exception as e:
++    print(f"   Error with large value: {e}")
++
++# Test 2: Invalid string
++print("\n2. Invalid string values:")
++try:
++    val = ops.convert_durationfield_value("not a number", None, None)
++    print(f"   Invalid string: {val}")
++except ValueError as e:
++    print(f"   Expected ValueError: {e}")
++
++# Test 3: Float string
++print("\n3. Float string:")
++try:
++    val = ops.convert_durationfield_value("3600.5", None, None)
++    print(f"   Float string: {val}")
++except ValueError as e:
++    print(f"   Expected ValueError: {e}")
++
++# Test 4: Negative values
++print("\n4. Negative values:")
++try:
++    val = ops.convert_durationfield_value("-3600000000", None, None)
++    print(f"   Negative string: {val}")
++    assert val == datetime.timedelta(hours=-1)
++except Exception as e:
++    print(f"   Error: {e}")
++
++# Test 5: Empty string
++print("\n5. Empty string:")
++try:
++    val = ops.convert_durationfield_value("", None, None)
++    print(f"   Empty string: {val}")
++except ValueError as e:
++    print(f"   Expected ValueError: {e}")
++
++# Test 6: Zero
++print("\n6. Zero values:")
++val = ops.convert_durationfield_value(0, None, None)
++print(f"   Integer 0: {val}")
++val = ops.convert_durationfield_value("0", None, None)
++print(f"   String '0': {val}")
++
++print("\nEdge case testing complete!")
+diff --git a/test_mysql_duration_sql.py b/test_mysql_duration_sql.py
+new file mode 100644
+index 0000000000..8658100d05
+--- /dev/null
++++ b/test_mysql_duration_sql.py
+@@ -0,0 +1,49 @@
++"""
++Test to understand what SQL MySQL generates for duration expressions
++"""
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F
++import datetime
++
++# Configure Django settings for MySQL
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.mysql',
++            'NAME': 'test',
++            'USER': 'root',
++            'PASSWORD': '',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes'],
++    USE_TZ=False,
++)
++
++django.setup()
++
++class Experiment(models.Model):
++    estimated_time = models.DurationField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Just print the SQL without executing
++from django.db import connection
++
++qs = Experiment.objects.annotate(duration=F('estimated_time') + datetime.timedelta(days=1))
++print("MySQL Query:")
++print(qs.query)
++
++# Check how combine_expression works
++from django.db.models.expressions import DurationValue, F
++from django.db.models.sql.compiler import SQLCompiler
++
++# Create a simple duration expression
++f = F('estimated_time')
++dv = DurationValue(datetime.timedelta(days=1), output_field=models.DurationField())
++
++print("\nChecking format_for_duration_arithmetic:")
++print(f"Duration value SQL: {connection.ops.format_for_duration_arithmetic('86400000000')}")

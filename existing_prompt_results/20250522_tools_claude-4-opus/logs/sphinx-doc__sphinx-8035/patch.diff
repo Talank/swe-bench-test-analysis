@@ -1,0 +1,1239 @@
+diff --git a/CHANGES_SUMMARY.md b/CHANGES_SUMMARY.md
+new file mode 100644
+index 000000000..efe67a1d9
+--- /dev/null
++++ b/CHANGES_SUMMARY.md
+@@ -0,0 +1,55 @@
++# Summary of Changes for Private Members Enhancement
++
++## Problem Statement
++The `:private-members:` option in autodoc previously only supported boolean behavior (show all private members or none). Users requested the ability to specify which private members to document, similar to how `:members:` works.
++
++## Solution Implemented
++
++### 1. Changed Option Parser (sphinx/ext/autodoc/__init__.py)
++- Changed `private-members` from using `bool_option` to `members_option` in both `ModuleDocumenter` and `ClassDocumenter`
++- This allows the option to accept:
++  - No value (`:private-members:`) → shows ALL private members (backward compatible)
++  - Empty string → shows NO private members  
++  - Comma-separated list (`:private-members: _helper, _internal`) → shows only specified private members
++
++### 2. Added Merge Function (sphinx/ext/autodoc/__init__.py)
++- Added `merge_private_members_option()` function similar to `merge_special_members_option()`
++- This ensures specified private members are added to the members list for processing
++- Called in both `ModuleDocumenter.__init__()` and `ClassDocumenter.__init__()`
++
++### 3. Updated Filter Logic (sphinx/ext/autodoc/__init__.py)
++- Modified `filter_members()` method to handle the new behavior:
++  - When `private_members is ALL`: include all private members (backward compatible)
++  - When `private_members` is a list: only include private members that are in the list
++  - When `private_members` is False/empty: exclude all private members
++
++### 4. Added Tests (tests/test_ext_autodoc_private_members.py)
++- Added `test_private_members_specific()`: tests specifying individual private members
++- Added `test_private_members_empty()`: tests empty list behavior
++- Added `test_private_members_class_specific()`: tests the feature for classes
++- Added `test_private_members_module_specific()`: tests the feature for modules
++
++## Usage Examples
++
++```rst
++# Document all private members (existing behavior)
++.. automodule:: mymodule
++   :members:
++   :private-members:
++
++# Document specific private members only (new feature)
++.. automodule:: mymodule
++   :members:
++   :private-members: _internal_helper, _cache_data
++
++# Document specific private members in a class
++.. autoclass:: mymodule.MyClass
++   :members:
++   :private-members: _init_internal, _validate_input
++```
++
++## Backward Compatibility
++The changes are fully backward compatible:
++- `:private-members:` without arguments continues to show all private members
++- Existing documentation will work exactly as before
++- The new functionality is opt-in by providing specific member names
+diff --git a/example_usage.py b/example_usage.py
+new file mode 100644
+index 000000000..8585209d8
+--- /dev/null
++++ b/example_usage.py
+@@ -0,0 +1,58 @@
++"""
++Example demonstrating the enhanced :private-members: option
++
++This shows how to use the new feature in your Sphinx documentation.
++"""
++
++# Example 1: Document all private members (existing behavior)
++"""
++.. automodule:: mymodule
++   :members:
++   :private-members:
++"""
++
++# Example 2: Document specific private members only
++"""
++.. automodule:: mymodule
++   :members:
++   :private-members: _internal_helper, _cache_data
++"""
++
++# Example 3: Document no private members (empty list)
++"""
++.. automodule:: mymodule
++   :members:
++   :private-members:
++"""
++
++# Example 4: For classes
++"""
++.. autoclass:: mymodule.MyClass
++   :members:
++   :private-members: _init_internal, _validate_input
++"""
++
++# Example module that would be documented
++class ExampleClass:
++    """Example class with various member types"""
++    
++    def __init__(self):
++        self._internal_state = {}
++        self._cache_data = None
++        self.public_data = []
++    
++    def public_method(self):
++        """This is always documented with :members:"""
++        pass
++    
++    def _internal_helper(self):
++        """This is only documented if explicitly listed in :private-members:"""
++        pass
++    
++    def _validate_input(self, data):
++        """Another private method"""
++        pass
++    
++    def _other_private(self):
++        """This won't be documented unless in the :private-members: list"""
++        pass
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 000000000..a89db4dc8
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,17 @@
++"""Simple test for private members"""
++import sys
++sys.path.insert(0, '/testbed')
++
++from sphinx.ext.autodoc import bool_option, members_option
++
++# Test current behavior
++print("Testing bool_option (current):")
++print(f"bool_option(None) = {bool_option(None)}")
++print(f"bool_option(True) = {bool_option(True)}")
++print(f"bool_option('') = {bool_option('')}")
++
++print("\nTesting members_option:")
++print(f"members_option(None) = {members_option(None)}")
++print(f"members_option(True) = {members_option(True)}")
++print(f"members_option('') = {members_option('')}")
++print(f"members_option('foo,bar') = {members_option('foo,bar')}")
+diff --git a/sphinx/ext/autodoc/__init__.py b/sphinx/ext/autodoc/__init__.py
+index 8c3509c3b..1272994cb 100644
+--- a/sphinx/ext/autodoc/__init__.py
++++ b/sphinx/ext/autodoc/__init__.py
+@@ -136,6 +136,19 @@ def merge_special_members_option(options: Dict) -> None:
+             options['members'] = options['special-members']
+ 
+ 
++def merge_private_members_option(options: Dict) -> None:
++    """Merge :private-members: option to :members: option."""
++    if 'private-members' in options and options['private-members'] is not ALL:
++        if options.get('members') is ALL:
++            pass
++        elif options.get('members'):
++            for member in options['private-members']:
++                if member not in options['members']:
++                    options['members'].append(member)
++        else:
++            options['members'] = options['private-members']
++
++
+ # Some useful event listener factories for autodoc-process-docstring.
+ 
+ def cut_lines(pre: int, post: int = 0, what: str = None) -> Callable:
+@@ -649,15 +662,25 @@ class Documenter:
+             elif (namespace, membername) in attr_docs:
+                 if want_all and isprivate:
+                     # ignore members whose name starts with _ by default
+-                    keep = self.options.private_members
++                    if self.options.private_members is ALL:
++                        keep = True
++                    elif self.options.private_members:
++                        keep = membername in self.options.private_members
++                    else:
++                        keep = False
+                 else:
+                     # keep documented attributes
+                     keep = True
+                 isattr = True
+             elif want_all and isprivate:
+                 # ignore members whose name starts with _ by default
+-                keep = self.options.private_members and \
+-                    (has_doc or self.options.undoc_members)
++                if self.options.private_members is ALL:
++                    keep = has_doc or self.options.undoc_members
++                elif self.options.private_members:
++                    keep = membername in self.options.private_members and \
++                        (has_doc or self.options.undoc_members)
++                else:
++                    keep = False
+             else:
+                 if self.options.members is ALL and is_filtered_inherited_member(membername):
+                     keep = False
+@@ -859,13 +882,14 @@ class ModuleDocumenter(Documenter):
+         'show-inheritance': bool_option, 'synopsis': identity,
+         'platform': identity, 'deprecated': bool_option,
+         'member-order': member_order_option, 'exclude-members': members_set_option,
+-        'private-members': bool_option, 'special-members': members_option,
++        'private-members': members_option, 'special-members': members_option,
+         'imported-members': bool_option, 'ignore-module-all': bool_option
+     }  # type: Dict[str, Callable]
+ 
+     def __init__(self, *args: Any) -> None:
+         super().__init__(*args)
+         merge_special_members_option(self.options)
++        merge_private_members_option(self.options)
+         self.__all__ = None
+ 
+     @classmethod
+@@ -1279,7 +1303,7 @@ class ClassDocumenter(DocstringSignatureMixin, ModuleLevelDocumenter):  # type:
+         'noindex': bool_option, 'inherited-members': inherited_members_option,
+         'show-inheritance': bool_option, 'member-order': member_order_option,
+         'exclude-members': members_set_option,
+-        'private-members': bool_option, 'special-members': members_option,
++        'private-members': members_option, 'special-members': members_option,
+     }  # type: Dict[str, Callable]
+ 
+     _signature_class = None  # type: Any
+@@ -1288,6 +1312,7 @@ class ClassDocumenter(DocstringSignatureMixin, ModuleLevelDocumenter):  # type:
+     def __init__(self, *args: Any) -> None:
+         super().__init__(*args)
+         merge_special_members_option(self.options)
++        merge_private_members_option(self.options)
+ 
+     @classmethod
+     def can_document_member(cls, member: Any, membername: str, isattr: bool, parent: Any
+diff --git a/test_direct_api.py b/test_direct_api.py
+new file mode 100644
+index 000000000..f5ac4b2c0
+--- /dev/null
++++ b/test_direct_api.py
+@@ -0,0 +1,95 @@
++"""Direct API test for private members feature"""
++
++import sys
++import os
++import tempfile
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++# Create a temporary directory for our test module
++test_dir = Path(tempfile.mkdtemp())
++sys.path.insert(0, str(test_dir))
++
++# Create test module
++test_module = test_dir / "testmod.py"
++test_module.write_text('''
++"""Test module"""
++
++class TestClass:
++    """Test class"""
++    
++    def public_method(self):
++        """Public method"""
++        pass
++    
++    def _private1(self):
++        """Private method 1"""
++        pass
++    
++    def _private2(self):
++        """Private method 2"""
++        pass
++
++def _private_func1():
++    """Private function 1"""
++    pass
++
++def _private_func2():
++    """Private function 2"""
++    pass
++''')
++
++# Now test using the autodoc API
++from test_ext_autodoc import do_autodoc
++
++class MockApp:
++    class MockConfig:
++        autodoc_inherit_docstrings = True
++        autoclass_content = 'class'
++    
++    def __init__(self):
++        self.config = self.MockConfig()
++
++app = MockApp()
++
++print("Test 1: All private members")
++print("=" * 50)
++options = {"members": None, "private-members": None}
++result = do_autodoc(app, 'class', 'testmod.TestClass', options)
++output = '\n'.join(result)
++print(output)
++print()
++
++print("Test 2: Specific private members")
++print("=" * 50)
++options = {"members": None, "private-members": "_private1"}
++result = do_autodoc(app, 'class', 'testmod.TestClass', options)
++output = '\n'.join(result)
++print(output)
++
++# Check results
++assert "_private1" in output, "_private1 should be in output"
++assert "_private2" not in output, "_private2 should NOT be in output"
++assert "public_method" in output, "public_method should be in output"
++print("\nClass test passed!")
++
++print("\nTest 3: Module with specific private members")
++print("=" * 50)
++options = {"members": None, "private-members": "_private_func1"}
++result = do_autodoc(app, 'module', 'testmod', options)
++output = '\n'.join(result)
++print(output)
++
++# Check results
++assert "_private_func1" in output, "_private_func1 should be in output"
++assert "_private_func2" not in output, "_private_func2 should NOT be in output"
++print("\nModule test passed!")
++
++# Clean up
++import shutil
++shutil.rmtree(test_dir)
++
++print("\nAll tests passed! The feature works correctly.")
+diff --git a/test_directive_parsing.py b/test_directive_parsing.py
+new file mode 100644
+index 000000000..43be2c16e
+--- /dev/null
++++ b/test_directive_parsing.py
+@@ -0,0 +1,19 @@
++"""Test how directives parse options"""
++
++from docutils.parsers.rst import directives
++from sphinx.ext.autodoc import members_option
++
++# Test different directive option scenarios
++test_cases = [
++    # (description, input_value, expected_behavior)
++    ("Option not present", None, "Should return ALL (show all)"),
++    ("Option present without value", "", "Should return empty list (show none)"),
++    ("Option with specific values", "foo,bar", "Should return ['foo', 'bar']"),
++]
++
++for desc, value, expected in test_cases:
++    print(f"\n{desc}:")
++    print(f"  Input: {repr(value)}")
++    result = members_option(value)
++    print(f"  Result: {result}")
++    print(f"  Expected: {expected}")
+diff --git a/test_integration.py b/test_integration.py
+new file mode 100644
+index 000000000..3681355ab
+--- /dev/null
++++ b/test_integration.py
+@@ -0,0 +1,144 @@
++"""Integration test for the enhanced private-members feature"""
++
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a test directory
++test_dir = Path(tempfile.mkdtemp())
++
++# Create test module
++test_module = test_dir / "example.py"
++test_module.write_text('''
++"""Example module for testing private members"""
++
++class Calculator:
++    """A calculator class with private helper methods"""
++    
++    def __init__(self):
++        self._cache = {}
++        self._history = []
++        self.result = 0
++    
++    def add(self, a, b):
++        """Add two numbers (public method)"""
++        result = self._compute(a, b, '+')
++        return result
++    
++    def _compute(self, a, b, op):
++        """Private computation method - only documented if specified"""
++        if op == '+':
++            return a + b
++        elif op == '-':
++            return a - b
++    
++    def _log_operation(self, op, result):
++        """Private logging method - only documented if specified"""
++        self._history.append((op, result))
++    
++    def _validate_input(self, value):
++        """Private validation method - only documented if specified"""
++        return isinstance(value, (int, float))
++    
++    def get_history(self):
++        """Get operation history (public method)"""
++        return self._history
++
++def public_function():
++    """A public function"""
++    return "public"
++
++def _private_function():
++    """A private function - only documented if specified"""
++    return "private"
++
++def _another_private():
++    """Another private function - only documented if specified"""
++    return "another"
++''')
++
++# Create conf.py
++conf_py = test_dir / "conf.py"
++conf_py.write_text('''
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++''')
++
++# Test 1: Specific private members
++index1 = test_dir / "index.rst"
++index1.write_text('''
++Example Documentation
++=====================
++
++Specific Private Members
++------------------------
++
++This example shows documenting only specific private members:
++
++.. autoclass:: example.Calculator
++   :members:
++   :private-members: _compute, _validate_input
++   
++Only _compute and _validate_input should be documented, not _log_operation.
++
++Module Functions
++----------------
++
++.. automodule:: example
++   :members:
++   :private-members: _private_function
++   
++Only _private_function should be documented, not _another_private.
++''')
++
++print("Created test files in:", test_dir)
++print("\nTest module content:")
++print(test_module.read_text())
++print("\nTest index.rst content:")
++print(index1.read_text())
++
++# Build the documentation
++import subprocess
++import sys
++
++print("\nBuilding documentation...")
++result = subprocess.run(
++    [sys.executable, "-m", "sphinx", "-b", "html", str(test_dir), str(test_dir / "_build")],
++    capture_output=True,
++    text=True
++)
++
++if result.returncode == 0:
++    print("\nBuild successful!")
++    output_file = test_dir / "_build" / "index.html"
++    if output_file.exists():
++        print("\nGenerated documentation:")
++        print("=" * 60)
++        print(output_file.read_text())
++        print("=" * 60)
++        
++        # Verify the output
++        content = output_file.read_text()
++        
++        # Check that specified private members are included
++        assert "_compute" in content, "_compute should be documented"
++        assert "_validate_input" in content, "_validate_input should be documented"
++        assert "_private_function" in content, "_private_function should be documented"
++        
++        # Check that non-specified private members are NOT included
++        assert "_log_operation" not in content, "_log_operation should NOT be documented"
++        assert "_another_private" not in content, "_another_private should NOT be documented"
++        
++        # Check that public members are included
++        assert "add" in content, "add (public method) should be documented"
++        assert "get_history" in content, "get_history (public method) should be documented"
++        assert "public_function" in content, "public_function should be documented"
++        
++        print("\nAll assertions passed! The feature works correctly.")
++else:
++    print("\nBuild failed!")
++    print("STDOUT:", result.stdout)
++    print("STDERR:", result.stderr)
++
++# Clean up
++shutil.rmtree(test_dir)
+diff --git a/test_option_behavior.py b/test_option_behavior.py
+new file mode 100644
+index 000000000..44b9f6de1
+--- /dev/null
++++ b/test_option_behavior.py
+@@ -0,0 +1,38 @@
++"""Test option behavior"""
++import sys
++sys.path.insert(0, '/testbed')
++
++from sphinx.ext.autodoc import members_option, bool_option, ALL
++
++print("Testing members_option behavior:")
++print(f"members_option(None) = {members_option(None)}")
++print(f"members_option(True) = {members_option(True)}")
++print(f"members_option('') = {members_option('')}")
++print(f"members_option('foo,bar') = {members_option('foo,bar')}")
++
++print(f"\nALL object = {ALL}")
++print(f"members_option(None) is ALL = {members_option(None) is ALL}")
++print(f"members_option(True) is ALL = {members_option(True) is ALL}")
++
++print("\nTesting bool_option behavior:")
++print(f"bool_option(None) = {bool_option(None)}")
++print(f"bool_option(True) = {bool_option(True)}")
++print(f"bool_option('') = {bool_option('')}")
++
++# Test how the options are parsed in directive
++from docutils.parsers.rst import directives
++
++print("\nTesting directive parsing:")
++# Simulate how Sphinx parses directive options
++test_cases = [
++    "",  # :private-members: with no value
++    "foo,bar",  # :private-members: foo,bar
++]
++
++for test in test_cases:
++    print(f"\nInput: ':private-members: {test}'")
++    # In directives, empty string means the option was present but had no value
++    # This is what happens with :private-members: without arguments
++    result = members_option(test if test else None)
++    print(f"Result: {result}")
++    print(f"Is ALL: {result is ALL}")
+diff --git a/test_private_members.py b/test_private_members.py
+new file mode 100644
+index 000000000..4db6dcdc6
+--- /dev/null
++++ b/test_private_members.py
+@@ -0,0 +1,132 @@
++"""Test script for private-members option enhancement"""
++
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add testbed to path
++sys.path.insert(0, '/testbed')
++
++from sphinx.testing.path import path
++from sphinx.testing.util import SphinxTestApp
++
++# Create a test module with private members
++test_module_content = '''
++"""Test module for private members"""
++
++class TestClass:
++    """A test class with various members"""
++    
++    def __init__(self):
++        self.public_attr = "public"
++        self._private_attr1 = "private1"
++        self._private_attr2 = "private2"
++        self._private_attr3 = "private3"
++    
++    def public_method(self):
++        """A public method"""
++        pass
++    
++    def _private_method1(self):
++        """First private method"""
++        pass
++    
++    def _private_method2(self):
++        """Second private method"""
++        pass
++    
++    def _private_method3(self):
++        """Third private method"""
++        pass
++
++def public_function():
++    """A public function"""
++    pass
++
++def _private_function1():
++    """First private function"""
++    pass
++
++def _private_function2():
++    """Second private function"""
++    pass
++'''
++
++# Create test directory structure
++test_dir = Path(tempfile.mkdtemp())
++src_dir = test_dir / 'src'
++src_dir.mkdir()
++
++# Write test module
++(src_dir / 'test_module.py').write_text(test_module_content)
++(src_dir / '__init__.py').write_text('')
++
++# Create conf.py
++conf_content = '''
++import sys
++import os
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++'''
++(test_dir / 'conf.py').write_text(conf_content)
++
++# Test 1: Current behavior - all private members
++index_content1 = '''
++Test Private Members - All
++==========================
++
++.. automodule:: src.test_module
++   :members:
++   :private-members:
++'''
++(test_dir / 'index.rst').write_text(index_content1)
++
++print("Test 1: Current behavior (all private members)")
++print("=" * 50)
++
++app = SphinxTestApp(srcdir=path(str(test_dir)), freshenv=True)
++app.build()
++
++# Read output
++output_file = test_dir / '_build' / 'text' / 'index.txt'
++if output_file.exists():
++    print(output_file.read_text())
++else:
++    print("No output generated")
++
++# Clean up
++shutil.rmtree(test_dir / '_build')
++
++# Test 2: Desired behavior - specific private members
++index_content2 = '''
++Test Private Members - Specific
++===============================
++
++.. automodule:: src.test_module
++   :members:
++   :private-members: _private_function1, _private_method1
++'''
++(test_dir / 'index.rst').write_text(index_content2)
++
++print("\n\nTest 2: Desired behavior (specific private members)")
++print("=" * 50)
++
++try:
++    app = SphinxTestApp(srcdir=path(str(test_dir)), freshenv=True)
++    app.build()
++    
++    # Read output
++    output_file = test_dir / '_build' / 'text' / 'index.txt'
++    if output_file.exists():
++        print(output_file.read_text())
++    else:
++        print("No output generated")
++except Exception as e:
++    print(f"Error: {e}")
++
++# Clean up
++shutil.rmtree(test_dir)
+diff --git a/test_private_members_feature.py b/test_private_members_feature.py
+new file mode 100644
+index 000000000..beaa12545
+--- /dev/null
++++ b/test_private_members_feature.py
+@@ -0,0 +1,62 @@
++"""Test the enhanced private-members option"""
++
++import pytest
++import sys
++sys.path.insert(0, '/testbed')
++
++from test_ext_autodoc import do_autodoc
++
++# Mock the Sphinx app
++class MockApp:
++    def __init__(self):
++        self.config = MockConfig()
++
++class MockConfig:
++    def __init__(self):
++        self.autoclass_content = 'class'
++        self.autodoc_inherit_docstrings = True
++
++def test_private_members_all():
++    """Test that private-members with no arguments shows all private members"""
++    app = MockApp()
++    options = {"members": None, "private-members": None}
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    
++    # Should include both _public_function and private_function
++    output = '\n'.join(actual)
++    assert '_public_function' in output
++    assert 'private_function' in output
++    print("Test 1 (all private members) passed!")
++    print("Output:", output)
++
++def test_private_members_specific():
++    """Test that private-members with specific members only shows those"""
++    app = MockApp()
++    options = {"members": None, "private-members": "private_function"}
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    
++    # Should include private_function but not _public_function
++    output = '\n'.join(actual)
++    assert '_public_function' not in output  # This has :meta public: so should be included anyway
++    assert 'private_function' in output
++    print("\nTest 2 (specific private member) passed!")
++    print("Output:", output)
++
++def test_private_members_empty_list():
++    """Test that private-members with empty string shows no private members"""
++    app = MockApp()
++    options = {"members": None, "private-members": ""}
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    
++    # Should not include private_function
++    output = '\n'.join(actual)
++    assert 'private_function' not in output
++    # _public_function has :meta public: so it should still be included
++    assert '_public_function' in output
++    print("\nTest 3 (empty private members list) passed!")
++    print("Output:", output)
++
++if __name__ == "__main__":
++    test_private_members_all()
++    test_private_members_specific()
++    test_private_members_empty_list()
+diff --git a/test_private_members_new.py b/test_private_members_new.py
+new file mode 100644
+index 000000000..44d5b3476
+--- /dev/null
++++ b/test_private_members_new.py
+@@ -0,0 +1,130 @@
++"""Test the new private-members feature with specific members"""
++
++import pytest
++
++pytest_plugins = 'sphinx.testing.fixtures'
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_private_members_specific_members(app):
++    """Test private-members option with specific member names"""
++    app.config.autoclass_content = 'class'
++    
++    # Create a test module with multiple private members
++    test_py = (app.srcdir / 'target' / 'private_test.py')
++    test_py.write_text('''
++"""Test module for specific private members"""
++
++class TestClass:
++    """Test class with private members"""
++    
++    def _private_method1(self):
++        """First private method - should be included"""
++        pass
++    
++    def _private_method2(self):
++        """Second private method - should NOT be included"""
++        pass
++    
++    def _private_method3(self):
++        """Third private method - should be included"""
++        pass
++    
++    def public_method(self):
++        """Public method - always included"""
++        pass
++
++def _private_func1():
++    """Private function 1 - should be included"""
++    pass
++
++def _private_func2():
++    """Private function 2 - should NOT be included"""
++    pass
++
++def public_func():
++    """Public function - always included"""
++    pass
++''')
++    
++    # Test with specific private members
++    options = {
++        "members": None,
++        "private-members": "_private_method1,_private_method3,_private_func1"
++    }
++    
++    # Import the test utilities
++    from test_ext_autodoc import do_autodoc
++    
++    actual = do_autodoc(app, 'module', 'target.private_test', options)
++    output = '\n'.join(actual)
++    
++    # Check that specified private members are included
++    assert '_private_method1' in output
++    assert '_private_method3' in output
++    assert '_private_func1' in output
++    
++    # Check that non-specified private members are NOT included
++    assert '_private_method2' not in output
++    assert '_private_func2' not in output
++    
++    # Check that public members are still included
++    assert 'public_method' in output
++    assert 'public_func' in output
++    
++    print("Test passed! Output:")
++    print(output)
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_private_members_all_behavior(app):
++    """Test that private-members without arguments still shows all private members"""
++    app.config.autoclass_content = 'class'
++    
++    # Use the existing private module
++    options = {
++        "members": None,
++        "private-members": None  # This should show ALL private members
++    }
++    
++    from test_ext_autodoc import do_autodoc
++    
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    output = '\n'.join(actual)
++    
++    # Both functions should be included
++    assert '_public_function' in output
++    assert 'private_function' in output
++    
++    print("Test for 'all' behavior passed!")
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')  
++def test_private_members_empty_list(app):
++    """Test that private-members with empty string shows no private members"""
++    app.config.autoclass_content = 'class'
++    
++    options = {
++        "members": None,
++        "private-members": ""  # Empty string should show NO private members
++    }
++    
++    from test_ext_autodoc import do_autodoc
++    
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    output = '\n'.join(actual)
++    
++    # private_function should NOT be included (it has :meta private:)
++    assert 'private_function' not in output
++    # _public_function should still be included (it has :meta public:)
++    assert '_public_function' in output
++    
++    print("Test for empty list behavior passed!")
++
++
++if __name__ == "__main__":
++    # Run with pytest
++    import subprocess
++    subprocess.run([
++        "python", "-m", "pytest", __file__, "-xvs"
++    ])
+diff --git a/tests/roots/test-ext-autodoc/target/private_members.py b/tests/roots/test-ext-autodoc/target/private_members.py
+new file mode 100644
+index 000000000..0957f124e
+--- /dev/null
++++ b/tests/roots/test-ext-autodoc/target/private_members.py
+@@ -0,0 +1,40 @@
++"""Module to test specific private members selection"""
++
++
++class TestClass:
++    """Test class with multiple private members"""
++    
++    def __init__(self):
++        self.public_attr = "public"
++        self._private_attr = "private"
++    
++    def public_method(self):
++        """Public method"""
++        pass
++    
++    def _private_method1(self):
++        """Private method 1"""
++        pass
++    
++    def _private_method2(self):
++        """Private method 2"""
++        pass
++    
++    def __special__(self):
++        """Special method"""
++        pass
++
++
++def public_function():
++    """Public function"""
++    pass
++
++
++def _private_function1():
++    """Private function 1"""
++    pass
++
++
++def _private_function2():
++    """Private function 2"""
++    pass
+diff --git a/tests/test_ext_autodoc_private_members.py b/tests/test_ext_autodoc_private_members.py
+index f4cadd3a5..132ede55c 100644
+--- a/tests/test_ext_autodoc_private_members.py
++++ b/tests/test_ext_autodoc_private_members.py
+@@ -60,3 +60,100 @@ def test_private_field_and_private_members(app):
+         '   :meta private:',
+         '',
+     ]
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_private_members_specific(app):
++    app.config.autoclass_content = 'class'
++    # Only include private_function, not _public_function
++    options = {"members": None,
++               "private-members": "private_function"}
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    assert list(actual) == [
++        '',
++        '.. py:module:: target.private',
++        '',
++        '',
++        '.. py:function:: _public_function(name)',
++        '   :module: target.private',
++        '',
++        '   public_function is a docstring().',
++        '',
++        '   :meta public:',
++        '',
++        '',
++        '.. py:function:: private_function(name)',
++        '   :module: target.private',
++        '',
++        '   private_function is a docstring().',
++        '',
++        '   :meta private:',
++        '',
++    ]
++
++
++@pytest.mark.sphinx('html', testroot='ext-autodoc')
++def test_private_members_empty(app):
++    app.config.autoclass_content = 'class'
++    # Empty string means no private members
++    options = {"members": None,
++               "private-members": ""}
++    actual = do_autodoc(app, 'module', 'target.private', options)
++    assert list(actual) == [
++        '',
++        '.. py:module:: target.private',
++        '',
++        '',
++        '.. py:function:: _public_function(name)',
++        '   :module: target.private',
++        '',
++        '   public_function is a docstring().',
++        '',
++        '   :meta public:',
++        '',
++    ]
++
++
++
++@pytest.mark.sphinx("html", testroot="ext-autodoc")
++def test_private_members_class_specific(app):
++    """Test specific private members for a class"""
++    app.config.autoclass_content = "class"
++    options = {"members": None,
++               "private-members": "_private_method1"}
++    actual = do_autodoc(app, "class", "target.private_members.TestClass", options)
++    
++    output = "\n".join(actual)
++    
++    # Should include the specified private member
++    assert "_private_method1" in output
++    
++    # Should NOT include the non-specified private member
++    assert "_private_method2" not in output
++    
++    # Should include public members
++    assert "public_method" in output
++    
++    # Should NOT include special methods unless explicitly requested
++    assert "__special__" not in output
++
++
++@pytest.mark.sphinx("html", testroot="ext-autodoc")
++def test_private_members_module_specific(app):
++    """Test specific private members for a module"""
++    app.config.autoclass_content = "class"
++    options = {"members": None,
++               "private-members": "_private_function1,TestClass._private_method2"}
++    actual = do_autodoc(app, "module", "target.private_members", options)
++    
++    output = "\n".join(actual)
++    
++    # Should include the specified private function
++    assert "_private_function1" in output
++    
++    # Should NOT include the non-specified private function
++    assert "_private_function2" not in output
++    
++    # Should include public function
++    assert "public_function" in output
++
+diff --git a/verify_feature.py b/verify_feature.py
+new file mode 100644
+index 000000000..645205d53
+--- /dev/null
++++ b/verify_feature.py
+@@ -0,0 +1,186 @@
++#!/usr/bin/env python
++"""Verify the private-members feature works correctly"""
++
++import tempfile
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++# Create a temporary directory
++tmpdir = Path(tempfile.mkdtemp())
++
++# Create a simple Python module
++(tmpdir / "mymodule.py").write_text('''
++"""Test module with private members"""
++
++class MyClass:
++    """A class with various members"""
++    
++    def __init__(self):
++        self._private_attr = "private"
++        self.public_attr = "public"
++    
++    def public_method(self):
++        """A public method"""
++        pass
++    
++    def _private_method1(self):
++        """Private method 1 - should be included"""
++        pass
++    
++    def _private_method2(self):
++        """Private method 2 - should NOT be included"""
++        pass
++    
++    def __special__(self):
++        """Special method"""
++        pass
++
++def public_func():
++    """Public function"""
++    pass
++
++def _private_func1():
++    """Private function 1 - should be included"""
++    pass
++
++def _private_func2():
++    """Private function 2 - should NOT be included"""
++    pass
++''')
++
++# Create conf.py
++(tmpdir / "conf.py").write_text('''
++import sys
++import os
++sys.path.insert(0, os.path.abspath('.'))
++
++extensions = ['sphinx.ext.autodoc']
++master_doc = 'index'
++exclude_patterns = ['_build']
++''')
++
++# Create three different index.rst files to test different scenarios
++
++# Test 1: All private members
++(tmpdir / "index1.rst").write_text('''
++Test 1: All Private Members
++===========================
++
++.. automodule:: mymodule
++   :members:
++   :private-members:
++''')
++
++# Test 2: Specific private members
++(tmpdir / "index2.rst").write_text('''
++Test 2: Specific Private Members
++================================
++
++.. automodule:: mymodule
++   :members:
++   :private-members: _private_func1, _private_method1
++''')
++
++# Test 3: No private members (omit the option)
++(tmpdir / "index3.rst").write_text('''
++Test 3: No Private Members
++==========================
++
++.. automodule:: mymodule
++   :members:
++''')
++
++def build_and_check(index_file, test_name, expected_includes, expected_excludes):
++    """Build documentation and check the output"""
++    print(f"\n{'='*60}")
++    print(f"Running {test_name}")
++    print(f"{'='*60}")
++    
++    # Copy the index file
++    shutil.copy(tmpdir / index_file, tmpdir / "index.rst")
++    
++    # Build
++    result = subprocess.run(
++        [sys.executable, "-m", "sphinx", "-b", "text", "-q", str(tmpdir), str(tmpdir / "_build")],
++        capture_output=True,
++        text=True
++    )
++    
++    if result.returncode != 0:
++        print(f"Build failed!")
++        print(f"STDOUT: {result.stdout}")
++        print(f"STDERR: {result.stderr}")
++        return False
++    
++    # Check output
++    output_file = tmpdir / "_build" / "index.txt"
++    if not output_file.exists():
++        print("No output file generated!")
++        return False
++    
++    content = output_file.read_text()
++    print("Generated documentation:")
++    print("-" * 60)
++    print(content)
++    print("-" * 60)
++    
++    # Verify expected content
++    success = True
++    for item in expected_includes:
++        if item not in content:
++            print(f"❌ ERROR: Expected '{item}' not found in output!")
++            success = False
++        else:
++            print(f"✓ Found expected: '{item}'")
++    
++    for item in expected_excludes:
++        if item in content:
++            print(f"❌ ERROR: Unexpected '{item}' found in output!")
++            success = False
++        else:
++            print(f"✓ Correctly excluded: '{item}'")
++    
++    # Clean build directory for next test
++    shutil.rmtree(tmpdir / "_build")
++    
++    return success
++
++# Run tests
++all_passed = True
++
++# Test 1: All private members (backward compatibility)
++all_passed &= build_and_check(
++    "index1.rst",
++    "Test 1: All private members",
++    expected_includes=["public_func", "_private_func1", "_private_func2", 
++                      "public_method", "_private_method1", "_private_method2"],
++    expected_excludes=[]
++)
++
++# Test 2: Specific private members (new feature)
++all_passed &= build_and_check(
++    "index2.rst", 
++    "Test 2: Specific private members",
++    expected_includes=["public_func", "_private_func1", "public_method", "_private_method1"],
++    expected_excludes=["_private_func2", "_private_method2"]
++)
++
++# Test 3: No private members (empty list)
++all_passed &= build_and_check(
++    "index3.rst",
++    "Test 3: No private members", 
++    expected_includes=["public_func", "public_method"],
++    expected_excludes=["_private_func1", "_private_func2", "_private_method1", "_private_method2"]
++)
++
++# Cleanup
++shutil.rmtree(tmpdir)
++
++if all_passed:
++    print("\n✅ All tests passed! The feature is working correctly.")
++    sys.exit(0)
++else:
++    print("\n❌ Some tests failed!")
++    sys.exit(1)

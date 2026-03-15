@@ -1,0 +1,517 @@
+diff --git a/debug_image.py b/debug_image.py
+new file mode 100644
+index 0000000000..0a31c21b3d
+--- /dev/null
++++ b/debug_image.py
+@@ -0,0 +1,62 @@
++import numpy as np
++
++# Simulate what happens in the image processing
++vmin, vmax = 100.0, 1e20
++a_min, a_max = -1.0, 1e20
++
++# Use float32 as scaled_dtype (common case)
++scaled_dtype = np.float32
++vrange = np.array([vmin, vmax], dtype=scaled_dtype)
++print(f"Original vrange: {vrange}")
++
++# The rescaling process
++offset = .1
++frac = .8
++
++# Step 1: subtract a_min
++vrange -= a_min
++print(f"After subtracting a_min ({a_min}): {vrange}")
++
++# Step 2: divide by range
++if a_min != a_max:
++    vrange /= ((a_max - a_min) / frac)
++    print(f"After dividing by range/frac: {vrange}")
++
++# Step 3: add offset
++vrange += offset
++print(f"After adding offset: {vrange}")
++
++# Step 4: undo offset
++vrange -= offset
++print(f"After removing offset: {vrange}")
++
++# Step 5: multiply back
++if a_min != a_max:
++    vrange *= ((a_max - a_min) / frac)
++    print(f"After multiplying back: {vrange}")
++
++# Step 6: add a_min back
++vrange += a_min
++print(f"Final vrange: {vrange}")
++
++# Check if we have issues with LogNorm
++s_vmin, s_vmax = vrange
++print(f"\nFinal s_vmin: {s_vmin}, s_vmax: {s_vmax}")
++
++# Check what happens with log transform
++print(f"\nChecking log transform:")
++print(f"log(s_vmin): {np.log(s_vmin) if s_vmin > 0 else 'negative!'}")
++print(f"log(s_vmax): {np.log(s_vmax) if s_vmax > 0 else 'negative!'}")
++print(f"Is s_vmax finite after log: {np.isfinite(np.log(s_vmax)) if s_vmax > 0 else False}")
++
++# Check with float64
++print("\n\nUsing float64:")
++vrange64 = np.array([vmin, vmax], dtype=np.float64)
++print(f"Original vrange: {vrange64}")
++vrange64 -= a_min
++vrange64 /= ((a_max - a_min) / frac)
++vrange64 += offset
++vrange64 -= offset
++vrange64 *= ((a_max - a_min) / frac)
++vrange64 += a_min
++print(f"Final vrange: {vrange64}")
+diff --git a/debug_numpy.py b/debug_numpy.py
+new file mode 100644
+index 0000000000..704ba0c5e1
+--- /dev/null
++++ b/debug_numpy.py
+@@ -0,0 +1,25 @@
++import numpy as np
++from matplotlib.scale import LogScale
++
++# Check numpy version
++print(f"NumPy version: {np.__version__}")
++
++# Test the transform with negative vmin
++scale = LogScale(axis=None, nonpositive="mask")
++trf = scale.get_transform()
++
++# Test with negative vmin
++vmin, vmax = -1.0, 1e20
++try:
++    t_vmin, t_vmax = trf.transform([vmin, vmax])
++    print(f"Transform of [{vmin}, {vmax}]: [{t_vmin}, {t_vmax}]")
++    print(f"Is finite check: {np.isfinite([t_vmin, t_vmax])}")
++    print(f"All finite: {np.isfinite([t_vmin, t_vmax]).all()}")
++except Exception as e:
++    print(f"Transform failed: {e}")
++
++# Test with very small positive vmin
++vmin2 = np.finfo(np.float32).eps
++t_vmin2, t_vmax2 = trf.transform([vmin2, vmax])
++print(f"\nTransform of [{vmin2}, {vmax}]: [{t_vmin2}, {t_vmax2}]")
++print(f"Is finite check: {np.isfinite([t_vmin2, t_vmax2])}")
+diff --git a/debug_test.py b/debug_test.py
+new file mode 100644
+index 0000000000..fb8aa72b02
+--- /dev/null
++++ b/debug_test.py
+@@ -0,0 +1,27 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++
++# Reproduce the test data
++data = np.full((5, 5), -1, dtype=np.float64)
++data[0:2, :] = 1E20
++
++print(f"data max: {data.max()}")
++print(f"data min: {data.min()}")
++
++# Create LogNorm
++norm = colors.LogNorm(vmin=100, vmax=data.max())
++print(f"vmin: {norm.vmin}, vmax: {norm.vmax}")
++
++# Check what happens when we transform vmin and vmax
++from matplotlib.scale import LogScale
++scale = LogScale(axis=None, nonpositive="mask")
++trf = scale.get_transform()
++
++t_vmin, t_vmax = trf.transform([norm.vmin, norm.vmax])
++print(f"Transformed vmin: {t_vmin}, vmax: {t_vmax}")
++print(f"Is vmin finite: {np.isfinite(t_vmin)}, Is vmax finite: {np.isfinite(t_vmax)}")
++
++# Check if log of 1E20 is causing issues
++print(f"log10(1E20): {np.log10(1E20)}")
++print(f"log(1E20): {np.log(1E20)}")
+diff --git a/debug_test2.py b/debug_test2.py
+new file mode 100644
+index 0000000000..5121563307
+--- /dev/null
++++ b/debug_test2.py
+@@ -0,0 +1,42 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++
++# Reproduce the test data
++data = np.full((5, 5), -1, dtype=np.float64)
++data[0:2, :] = 1E20
++
++print(f"Original data shape: {data.shape}")
++print(f"Original data:\n{data}")
++
++# Create a masked array like the error shows
++masked_data = np.ma.masked_less_equal(data, 0, copy=False)
++print(f"\nMasked data:\n{masked_data}")
++print(f"Mask:\n{masked_data.mask}")
++
++# Create LogNorm and try to call it
++norm = colors.LogNorm(vmin=100, vmax=data.max())
++
++# Let's trace through what happens step by step
++print(f"\nBefore autoscale_None - vmin: {norm.vmin}, vmax: {norm.vmax}")
++
++# Call autoscale_None manually
++norm.autoscale_None(masked_data)
++print(f"After autoscale_None - vmin: {norm.vmin}, vmax: {norm.vmax}")
++
++# Check the transform
++from matplotlib.scale import LogScale
++scale = LogScale(axis=None, nonpositive="mask")
++trf = scale.get_transform()
++
++# Transform the masked data
++try:
++    t_value = trf.transform(masked_data)
++    print(f"\nTransformed masked data:\n{t_value}")
++except Exception as e:
++    print(f"\nError transforming masked data: {e}")
++
++# Transform vmin and vmax
++t_vmin, t_vmax = trf.transform([norm.vmin, norm.vmax])
++print(f"\nTransformed vmin: {t_vmin}, vmax: {t_vmax}")
++print(f"Is finite check: {np.isfinite([t_vmin, t_vmax]).all()}")
+diff --git a/debug_test3.py b/debug_test3.py
+new file mode 100644
+index 0000000000..958c05cec8
+--- /dev/null
++++ b/debug_test3.py
+@@ -0,0 +1,44 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++import matplotlib.image as mimage
++
++# Create figure and test data
++fig = plt.figure()
++ax = fig.add_subplot(111)
++
++data = np.full((5, 5), -1, dtype=np.float64)
++data[0:2, :] = 1E20
++
++# Create the image with LogNorm
++norm = colors.LogNorm(vmin=100, vmax=data.max())
++im = ax.imshow(data, norm=norm, interpolation='nearest', cmap='viridis')
++
++# Try to render it
++try:
++    fig.canvas.draw()
++    print("Drawing succeeded!")
++except Exception as e:
++    print(f"Drawing failed with error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Let's check what happens in the norm directly
++print(f"\nChecking norm directly:")
++print(f"norm.vmin: {norm.vmin}, norm.vmax: {norm.vmax}")
++
++# Create a masked array like the image processing would
++masked_data = np.ma.masked_less_equal(data, 0, copy=False)
++print(f"Masked data min (non-masked): {masked_data.min()}, max: {masked_data.max()}")
++
++# Try calling the norm
++try:
++    result = norm(masked_data)
++    print(f"Norm call succeeded, result shape: {result.shape}")
++except Exception as e:
++    print(f"Norm call failed: {e}")
++    
++    # Let's check the transform values
++    t_vmin, t_vmax = norm._trf.transform([norm.vmin, norm.vmax])
++    print(f"Transformed vmin: {t_vmin}, vmax: {t_vmax}")
++    print(f"Are they finite? {np.isfinite([t_vmin, t_vmax])}")
+diff --git a/debug_vmax.py b/debug_vmax.py
+new file mode 100644
+index 0000000000..16da30d7d2
+--- /dev/null
++++ b/debug_vmax.py
+@@ -0,0 +1,19 @@
++import numpy as np
++from matplotlib.scale import LogScale
++
++# Check what happens with very large vmax values
++scale = LogScale(axis=None, nonpositive="mask")
++trf = scale.get_transform()
++
++# Test with increasingly large vmax values
++for exp in [20, 100, 200, 300, 308, 309, 310]:
++    vmax = 10.0**exp
++    try:
++        t_vmax = trf.transform([vmax])[0]
++        print(f"10^{exp}: vmax={vmax}, log(vmax)={t_vmax}, finite={np.isfinite(t_vmax)}")
++    except Exception as e:
++        print(f"10^{exp}: Failed - {e}")
++
++# Check the limits
++print(f"\nFloat64 max: {np.finfo(np.float64).max}")
++print(f"Log of float64 max: {np.log10(np.finfo(np.float64).max)}")
+diff --git a/lib/matplotlib/image.py b/lib/matplotlib/image.py
+index 95bb42d75c..8722a442ea 100644
+--- a/lib/matplotlib/image.py
++++ b/lib/matplotlib/image.py
+@@ -533,8 +533,8 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):
+                 # that may have moved input values in/out of range
+                 s_vmin, s_vmax = vrange
+                 if isinstance(self.norm, mcolors.LogNorm):
+-                    if s_vmin < 0:
+-                        s_vmin = max(s_vmin, np.finfo(scaled_dtype).eps)
++                    if s_vmin <= 0:
++                        s_vmin = np.finfo(scaled_dtype).eps
+                 with cbook._setattr_cm(self.norm,
+                                        vmin=s_vmin,
+                                        vmax=s_vmax,
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0cde98e7ba
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,43 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++
++def test_lognorm_edge_case(vmin_input, data_value, title):
++    """Test LogNorm with various edge cases"""
++    fig, ax = plt.subplots(figsize=(4, 3))
++    data = np.full((5, 5), -1, dtype=np.float64)
++    data[0:2, :] = data_value
++    
++    norm = colors.LogNorm(vmin=vmin_input, vmax=data.max())
++    im = ax.imshow(data, norm=norm, interpolation='nearest', cmap='viridis')
++    ax.set_title(title)
++    
++    try:
++        fig.savefig(f'/tmp/test_{title.replace(" ", "_")}.png', dpi=50)
++        print(f"✓ {title}: Success")
++        plt.close(fig)
++        return True
++    except Exception as e:
++        print(f"✗ {title}: Failed - {e}")
++        plt.close(fig)
++        return False
++
++# Test various edge cases
++test_cases = [
++    (100, 1e20, "Original test case"),
++    (1, 1e20, "Small positive vmin"),
++    (0.1, 1e20, "Fractional vmin"),
++    (1e-10, 1e20, "Very small vmin"),
++    (100, 1e30, "Even larger vmax"),
++    (100, 1e10, "Smaller vmax"),
++]
++
++print("Testing LogNorm edge cases:")
++print("-" * 40)
++all_passed = True
++for vmin, vmax_data, title in test_cases:
++    passed = test_lognorm_edge_case(vmin, vmax_data, title)
++    all_passed = all_passed and passed
++
++print("-" * 40)
++print(f"Overall: {'All tests passed!' if all_passed else 'Some tests failed!'}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..6cd0dafb88
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,48 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++
++# Test the actual fix
++fig, ax = plt.subplots()
++data = np.full((5, 5), -1, dtype=np.float64)
++data[0:2, :] = 1E20
++
++# Add some debug prints to understand what's happening
++import matplotlib.image as mimage
++
++# Monkey patch to add debug prints
++original_make_image = mimage._ImageBase._make_image
++
++def debug_make_image(self, A, bbox, transformed_bbox, clip, unsampled=False):
++    print(f"DEBUG: In _make_image, norm type: {type(self.norm)}")
++    if hasattr(self, 'norm') and hasattr(self.norm, 'vmin'):
++        print(f"DEBUG: norm.vmin={self.norm.vmin}, norm.vmax={self.norm.vmax}")
++    
++    # Call original but catch the error
++    try:
++        return original_make_image(self, A, bbox, transformed_bbox, clip, unsampled)
++    except ValueError as e:
++        print(f"DEBUG: Caught error: {e}")
++        # Check the vrange values
++        if hasattr(self, '_last_vrange'):
++            print(f"DEBUG: Last vrange: {self._last_vrange}")
++        raise
++
++mimage._ImageBase._make_image = debug_make_image
++
++# Also patch the rescaling part
++original_make_image_inner = mimage._ImageBase._make_image
++def debug_make_image_inner(self, A, bbox, transformed_bbox, clip, unsampled=False):
++    # ... existing code would go here but we'll just trace key parts
++    result = original_make_image_inner(self, A, bbox, transformed_bbox, clip, unsampled)
++    return result
++
++# Create the plot
++norm = colors.LogNorm(vmin=100, vmax=data.max())
++im = ax.imshow(data, norm=norm, interpolation='nearest', cmap='viridis')
++
++try:
++    fig.savefig('/tmp/test.png')
++    print("Success!")
++except Exception as e:
++    print(f"Failed: {e}")
+diff --git a/test_fix2.py b/test_fix2.py
+new file mode 100644
+index 0000000000..d32f22b8f4
+--- /dev/null
++++ b/test_fix2.py
+@@ -0,0 +1,35 @@
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++import matplotlib.image as mimage
++import matplotlib.cbook as cbook
++
++# Create test data
++fig, ax = plt.subplots()
++data = np.full((5, 5), -1, dtype=np.float64)
++data[0:2, :] = 1E20
++
++# Let's trace what happens by adding a print in the context manager
++original_setattr_cm = cbook._setattr_cm
++
++def debug_setattr_cm(obj, **kwargs):
++    if isinstance(obj, colors.LogNorm):
++        print(f"DEBUG: Setting attributes on LogNorm: {kwargs}")
++        # Check if we're setting negative vmin
++        if 'vmin' in kwargs and kwargs['vmin'] < 0:
++            print(f"WARNING: Setting negative vmin={kwargs['vmin']} on LogNorm!")
++    return original_setattr_cm(obj, **kwargs)
++
++cbook._setattr_cm = debug_setattr_cm
++
++# Create the plot
++norm = colors.LogNorm(vmin=100, vmax=data.max())
++im = ax.imshow(data, norm=norm, interpolation='nearest', cmap='viridis')
++
++try:
++    fig.savefig('/tmp/test.png', dpi=10)  # Low DPI to speed up
++    print("Success!")
++except Exception as e:
++    print(f"Failed: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..78907abc64
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,70 @@
++"""
++Test to verify the fix for test_huge_range_log failure.
++
++The issue was that due to floating point precision errors during image rescaling,
++the vmin value could become 0 or negative, which is invalid for LogNorm and would
++cause a "Invalid vmin or vmax" error when the log transform produced -inf or nan.
++
++The fix ensures that for LogNorm, if s_vmin <= 0, it's set to a small positive value.
++"""
++import numpy as np
++import matplotlib.pyplot as plt
++from matplotlib import colors
++
++def test_huge_range_log_fix():
++    """Test that reproduces the original issue and verifies the fix"""
++    # Create the exact test case from test_huge_range_log
++    fig, ax = plt.subplots()
++    data = np.full((5, 5), -1, dtype=np.float64)
++    data[0:2, :] = 1E20
++    
++    # This was failing before the fix
++    norm = colors.LogNorm(vmin=100, vmax=data.max())
++    im = ax.imshow(data, norm=norm, interpolation='nearest', cmap='viridis')
++    
++    # Try to render - this would raise "Invalid vmin or vmax" before the fix
++    try:
++        fig.savefig('/tmp/test_huge_range_log_fixed.png', dpi=50)
++        print("✓ test_huge_range_log case works correctly")
++        success = True
++    except ValueError as e:
++        print(f"✗ test_huge_range_log case failed: {e}")
++        success = False
++    finally:
++        plt.close(fig)
++    
++    return success
++
++def test_zero_vmin_case():
++    """Test the specific case where vmin becomes exactly 0"""
++    fig, ax = plt.subplots()
++    data = np.array([[1e10, 1e10], [0.1, 0.1]])
++    
++    # Create a norm that might result in vmin=0 after rescaling
++    norm = colors.LogNorm(vmin=1e-10, vmax=1e10)
++    im = ax.imshow(data, norm=norm, interpolation='bilinear', cmap='viridis')
++    
++    try:
++        fig.savefig('/tmp/test_zero_vmin.png', dpi=50)
++        print("✓ Zero vmin case works correctly")
++        success = True
++    except ValueError as e:
++        print(f"✗ Zero vmin case failed: {e}")
++        success = False
++    finally:
++        plt.close(fig)
++    
++    return success
++
++if __name__ == "__main__":
++    print("Testing the fix for LogNorm with huge ranges...")
++    print("=" * 50)
++    
++    test1 = test_huge_range_log_fix()
++    test2 = test_zero_vmin_case()
++    
++    print("=" * 50)
++    if test1 and test2:
++        print("All tests passed! The fix is working correctly.")
++    else:
++        print("Some tests failed!")
+diff --git a/verify_issue.py b/verify_issue.py
+new file mode 100644
+index 0000000000..730093e4e7
+--- /dev/null
++++ b/verify_issue.py
+@@ -0,0 +1,21 @@
++import numpy as np
++from matplotlib.scale import LogScale
++
++# Test log transform with 0
++scale = LogScale(axis=None, nonpositive="mask")
++trf = scale.get_transform()
++
++# Test with 0
++vmin, vmax = 0.0, 1e20
++t_vmin, t_vmax = trf.transform([vmin, vmax])
++print(f"Transform of [0.0, 1e20]: [{t_vmin}, {t_vmax}]")
++print(f"Is finite: {np.isfinite([t_vmin, t_vmax])}")
++print(f"All finite: {np.isfinite([t_vmin, t_vmax]).all()}")
++
++# The fix should use a small positive value
++eps = np.finfo(np.float32).eps
++vmin2, vmax2 = eps, 1e20
++t_vmin2, t_vmax2 = trf.transform([vmin2, vmax2])
++print(f"\nTransform of [{eps}, 1e20]: [{t_vmin2}, {t_vmax2}]")
++print(f"Is finite: {np.isfinite([t_vmin2, t_vmax2])}")
++print(f"All finite: {np.isfinite([t_vmin2, t_vmax2]).all()}")

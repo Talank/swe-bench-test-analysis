@@ -1,0 +1,289 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..07ed43c2c5
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,28 @@
++import inspect
++from sympy import *
++from sympy.utilities.lambdify import lambdify
++from sympy.functions.combinatorial.factorials import RisingFactorial as rf
++
++# Test case from the problem statement
++x = symbols('x')
++eqn = Eq(rf(18, x), 77 + S(1)/3)
++
++# Create lambdified function with mpmath
++f = lambdify(x, eqn.lhs - eqn.rhs, 'mpmath')
++
++print("Generated function source:")
++print(inspect.getsource(f))
++
++# Test the precision issue
++print("\nTesting precision issue:")
++x0 = nsolve(eqn, Float('1.5', 64), prec=64)
++print(f"x0 = {x0}")
++print(f"rf(18, x0).evalf(64) = {rf(18, x0).evalf(64)}")
++print(f"Expected: 77.33333333333333333333333333333333333333333333333333333333333333")
++
++# Additional test with simple rational
++print("\nTesting simple rational:")
++expr = S(1)/3
++f_simple = lambdify(x, expr, 'mpmath')
++print("Simple rational function source:")
++print(inspect.getsource(f_simple))
+diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py
+index d06901425d..6df6322973 100644
+--- a/sympy/printing/pycode.py
++++ b/sympy/printing/pycode.py
+@@ -331,6 +331,14 @@ def _print_Float(self, e):
+         args = str(tuple(map(int, e._mpf_)))
+         return '{func}({args})'.format(func=self._module_format('mpmath.mpf'), args=args)
+ 
++    def _print_Rational(self, expr):
++        # Create mpmath rational with full precision
++        return "{func}({p})/{func}({q})".format(
++            func=self._module_format('mpmath.mpf'),
++            p=expr.p,
++            q=expr.q
++        )
++
+ 
+     def _print_uppergamma(self, e):
+         return "{0}({1}, {2}, {3})".format(
+diff --git a/sympy/printing/tests/test_pycode.py b/sympy/printing/tests/test_pycode.py
+index 68994056ea..547afdf56c 100644
+--- a/sympy/printing/tests/test_pycode.py
++++ b/sympy/printing/tests/test_pycode.py
+@@ -2,7 +2,7 @@
+ from __future__ import (absolute_import, division, print_function)
+ 
+ from sympy.codegen import Assignment
+-from sympy.core import Expr, Mod, symbols, Eq, Le, Gt, zoo, oo
++from sympy.core import Expr, Mod, symbols, Eq, Le, Gt, zoo, oo, Rational
+ from sympy.core.numbers import pi
+ from sympy.codegen.ast import none
+ from sympy.external import import_module
+@@ -40,6 +40,10 @@ def test_PythonCodePrinter():
+ def test_MpmathPrinter():
+     p = MpmathPrinter()
+     assert p.doprint(sign(x)) == 'mpmath.sign(x)'
++    # Test rational printing
++    assert p.doprint(Rational(1, 3)) == 'mpmath.mpf(1)/mpmath.mpf(3)'
++    assert p.doprint(Rational(-232, 3)) == 'mpmath.mpf(-232)/mpmath.mpf(3)'
++    assert p.doprint(Rational(5, 1)) == '5'  # Rational with denominator 1
+ 
+ 
+ def test_NumPyPrinter():
+diff --git a/sympy/utilities/tests/test_lambdify.py b/sympy/utilities/tests/test_lambdify.py
+index 149a7e3136..708eb21498 100644
+--- a/sympy/utilities/tests/test_lambdify.py
++++ b/sympy/utilities/tests/test_lambdify.py
+@@ -157,6 +157,37 @@ def test_mpmath_precision():
+     mpmath.mp.dps = 100
+     assert str(lambdify((), pi.evalf(100), 'mpmath')()) == str(pi.evalf(100))
+ 
++@conserve_mpmath_dps
++def test_mpmath_rational():
++    """Test that lambdify with mpmath properly handles Rational numbers"""
++    mpmath.mp.dps = 50
++    x = symbols('x')
++    
++    # Test simple rational
++    expr = Rational(1, 3)
++    f = lambdify(x, expr, "mpmath")
++    result = f(0)
++    # Check that result is an mpmath type
++    assert isinstance(result, mpmath.mpf)
++    # Check precision - should match 1/3 to high precision
++    expected = mpmath.mpf(1)/mpmath.mpf(3)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++    
++    # Test negative rational
++    expr = Rational(-232, 3)
++    f = lambdify(x, expr, "mpmath")
++    result = f(0)
++    assert isinstance(result, mpmath.mpf)
++    expected = mpmath.mpf(-232)/mpmath.mpf(3)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++    
++    # Test expression with multiple rationals
++    expr = Rational(1, 3) + Rational(2, 7) + x
++    f = lambdify(x, expr, "mpmath")
++    result = f(mpmath.mpf(0))
++    expected = mpmath.mpf(1)/mpmath.mpf(3) + mpmath.mpf(2)/mpmath.mpf(7)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++
+ #================== Test Translations ==============================
+ # We can only check if all translated functions are valid. It has to be checked
+ # by hand if they are complete.
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..9f440b94de
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,50 @@
++"""Test edge cases for mpmath rational handling"""
++from sympy import S, symbols, lambdify, Rational, Integer
++import mpmath
++import inspect
++
++x = symbols('x')
++
++print("Test 1: Rational with q=1 (should be integer)")
++expr = S(5)/1
++f = lambdify(x, expr, "mpmath")
++print(f"Expression: {expr}")
++print(f"Source: {inspect.getsource(f).strip()}")
++print()
++
++print("Test 2: Integer (not Rational)")
++expr = Integer(5)
++f = lambdify(x, expr, "mpmath")
++print(f"Expression: {expr}")
++print(f"Source: {inspect.getsource(f).strip()}")
++print()
++
++print("Test 3: Very large rational")
++expr = S(123456789012345678901234567890)/S(987654321098765432109876543210)
++f = lambdify(x, expr, "mpmath")
++print(f"Expression: {expr}")
++print(f"Source (first 200 chars): {inspect.getsource(f).strip()[:200]}...")
++result = f(0)
++print(f"Result type: {type(result)}")
++print(f"Result: {mpmath.nstr(result, 50)}")
++print()
++
++print("Test 4: Rational(0)")
++expr = S(0)/S(1)
++f = lambdify(x, expr, "mpmath")
++print(f"Expression: {expr}")
++print(f"Source: {inspect.getsource(f).strip()}")
++result = f(0)
++print(f"Result: {result}")
++print()
++
++print("Test 5: Mixed operations")
++expr = (S(1)/3) * x + S(2)/5
++f = lambdify(x, expr, "mpmath")
++print(f"Expression: {expr}")
++print(f"Source: {inspect.getsource(f).strip()}")
++result = f(mpmath.mpf(15))
++print(f"Result: {result}")
++expected = mpmath.mpf(1)/mpmath.mpf(3) * mpmath.mpf(15) + mpmath.mpf(2)/mpmath.mpf(5)
++print(f"Expected: {expected}")
++print(f"Match: {abs(result - expected) < 1e-15}")
+diff --git a/test_mpmath_rational.py b/test_mpmath_rational.py
+new file mode 100644
+index 0000000000..df998d89cf
+--- /dev/null
++++ b/test_mpmath_rational.py
+@@ -0,0 +1,62 @@
++import inspect
++from sympy import *
++from sympy.utilities.lambdify import lambdify
++from sympy.functions.combinatorial.factorials import RisingFactorial as rf
++import mpmath
++
++# Test various rational expressions
++x = symbols('x')
++
++print("Test 1: Simple rational")
++expr1 = S(1)/3
++f1 = lambdify(x, expr1, 'mpmath')
++print(f"Expression: {expr1}")
++print(f"Source: {inspect.getsource(f1).strip()}")
++result1 = f1(0)
++print(f"Result type: {type(result1)}")
++print(f"Result: {result1}")
++print(f"High precision: {mpmath.nstr(result1, 50)}")
++print()
++
++print("Test 2: Complex expression with rational")
++expr2 = x + S(77)/3 + S(1)/3
++f2 = lambdify(x, expr2, 'mpmath')
++print(f"Expression: {expr2}")
++print(f"Source: {inspect.getsource(f2).strip()}")
++result2 = f2(mpmath.mpf(0))
++print(f"Result: {result2}")
++print(f"High precision: {mpmath.nstr(result2, 50)}")
++print()
++
++print("Test 3: Mixed Float and Rational")
++expr3 = Float('1.5', 64) + S(1)/3
++f3 = lambdify(x, expr3, 'mpmath')
++print(f"Expression: {expr3}")
++print(f"Source: {inspect.getsource(f3).strip()}")
++result3 = f3(0)
++print(f"Result: {result3}")
++print(f"High precision: {mpmath.nstr(result3, 50)}")
++print()
++
++print("Test 4: Negative rational")
++expr4 = -S(232)/3
++f4 = lambdify(x, expr4, 'mpmath')
++print(f"Expression: {expr4}")
++print(f"Source: {inspect.getsource(f4).strip()}")
++result4 = f4(0)
++print(f"Result: {result4}")
++print(f"High precision: {mpmath.nstr(result4, 50)}")
++print()
++
++print("Test 5: Original problem - nsolve precision")
++eqn = Eq(rf(18, x), 77 + S(1)/3)
++# Set high precision for mpmath
++mpmath.mp.dps = 64
++x0 = nsolve(eqn, Float('1.5', 64), prec=64)
++print(f"x0 = {x0}")
++print(f"rf(18, x0).evalf(64) = {rf(18, x0).evalf(64)}")
++print(f"Expected: 77.{'3'*63}")
++# Check if we get the expected value with proper precision
++diff = abs(rf(18, x0).evalf(64) - (77 + S(1)/3).evalf(64))
++print(f"Difference from expected: {diff}")
++print(f"Precision achieved: {diff < 1e-60}")
+diff --git a/test_rational_mpmath.py b/test_rational_mpmath.py
+new file mode 100644
+index 0000000000..1e3551db8c
+--- /dev/null
++++ b/test_rational_mpmath.py
+@@ -0,0 +1,40 @@
++"""Test for mpmath rational handling in lambdify"""
++from sympy import S, symbols, lambdify, Rational
++from sympy.utilities.decorator import conserve_mpmath_dps
++import mpmath
++
++@conserve_mpmath_dps
++def test_mpmath_rational():
++    """Test that lambdify with mpmath properly handles Rational numbers"""
++    mpmath.mp.dps = 50
++    x = symbols('x')
++    
++    # Test simple rational
++    expr = S(1)/3
++    f = lambdify(x, expr, "mpmath")
++    result = f(0)
++    # Check that result is an mpmath type
++    assert isinstance(result, mpmath.mpf)
++    # Check precision - should match 1/3 to high precision
++    expected = mpmath.mpf(1)/mpmath.mpf(3)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++    
++    # Test negative rational
++    expr = -S(232)/3
++    f = lambdify(x, expr, "mpmath")
++    result = f(0)
++    assert isinstance(result, mpmath.mpf)
++    expected = mpmath.mpf(-232)/mpmath.mpf(3)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++    
++    # Test expression with multiple rationals
++    expr = S(1)/3 + S(2)/7 + x
++    f = lambdify(x, expr, "mpmath")
++    result = f(mpmath.mpf(0))
++    expected = mpmath.mpf(1)/mpmath.mpf(3) + mpmath.mpf(2)/mpmath.mpf(7)
++    assert abs(result - expected) < mpmath.mpf(10)**(-45)
++    
++    print("test_mpmath_rational passed!")
++
++if __name__ == "__main__":
++    test_mpmath_rational()

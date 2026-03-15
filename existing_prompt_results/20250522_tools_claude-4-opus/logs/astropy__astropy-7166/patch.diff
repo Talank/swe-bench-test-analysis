@@ -1,0 +1,465 @@
+diff --git a/astropy/utils/misc.py b/astropy/utils/misc.py
+index de3fb01d18..eec4f739cf 100644
+--- a/astropy/utils/misc.py
++++ b/astropy/utils/misc.py
+@@ -528,7 +528,8 @@ class InheritDocstrings(type):
+                 not key.startswith('_'))
+ 
+         for key, val in dct.items():
+-            if (inspect.isfunction(val) and
++            # Check if it's a function or property that needs docstring inheritance
++            if ((inspect.isfunction(val) or isinstance(val, property)) and
+                 is_public_member(key) and
+                 val.__doc__ is None):
+                 for base in cls.__mro__[1:]:
+diff --git a/astropy/utils/tests/test_misc.py b/astropy/utils/tests/test_misc.py
+index 4f632e8d15..8b11655e22 100644
+--- a/astropy/utils/tests/test_misc.py
++++ b/astropy/utils/tests/test_misc.py
+@@ -89,6 +89,34 @@ def test_inherit_docstrings():
+         assert Subclass.__call__.__doc__ == "FOO"
+ 
+ 
++def test_inherit_docstrings_property():
++    class Base(metaclass=misc.InheritDocstrings):
++        @property
++        def my_property(self):
++            """Property docstring"""
++            return 1
++        
++        def my_method(self):
++            """Method docstring"""
++            return 2
++
++    class Subclass(Base):
++        @property
++        def my_property(self):
++            # Should inherit docstring from Base
++            return 3
++        
++        def my_method(self):
++            # Should inherit docstring from Base
++            return 4
++
++    # Test that method docstrings are inherited
++    assert Subclass.my_method.__doc__ == "Method docstring"
++    
++    # Test that property docstrings are inherited
++    assert Subclass.my_property.__doc__ == "Property docstring"
++
++
+ def test_set_locale():
+     # First, test if the required locales are available
+     current = locale.setlocale(locale.LC_ALL)
+diff --git a/test_complex_inheritance.py b/test_complex_inheritance.py
+new file mode 100644
+index 0000000000..b07260f9b7
+--- /dev/null
++++ b/test_complex_inheritance.py
+@@ -0,0 +1,84 @@
++"""Test complex inheritance scenarios with properties"""
++
++from astropy.utils.misc import InheritDocstrings
++
++
++# Test deep inheritance chain
++class A(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Docstring from A"""
++        return "A"
++
++class B(A):
++    @property
++    def prop(self):
++        # Should inherit from A
++        return "B"
++
++class C(B):
++    @property
++    def prop(self):
++        # Should inherit from B, which inherited from A
++        return "C"
++
++print("Test 1 - Deep inheritance chain:")
++print(f"A.prop.__doc__ = {A.prop.__doc__!r}")
++print(f"B.prop.__doc__ = {B.prop.__doc__!r}")
++print(f"C.prop.__doc__ = {C.prop.__doc__!r}")
++print()
++
++
++# Test diamond inheritance
++class X(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Docstring from X"""
++        return "X"
++
++class Y(X):
++    pass  # No override
++
++class Z(X):
++    @property
++    def prop(self):
++        # Should inherit from X
++        return "Z"
++
++class Diamond(Y, Z):
++    @property
++    def prop(self):
++        # Should inherit from Y first (which gets it from X)
++        return "Diamond"
++
++print("Test 2 - Diamond inheritance:")
++print(f"X.prop.__doc__ = {X.prop.__doc__!r}")
++print(f"Y.prop.__doc__ = {Y.prop.__doc__!r}")  # Inherited from X
++print(f"Z.prop.__doc__ = {Z.prop.__doc__!r}")
++print(f"Diamond.prop.__doc__ = {Diamond.prop.__doc__!r}")
++print()
++
++
++# Test property override in middle of chain
++class Base(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Original docstring"""
++        return "Base"
++
++class Middle(Base):
++    @property
++    def prop(self):
++        """Middle's docstring"""
++        return "Middle"
++
++class End(Middle):
++    @property
++    def prop(self):
++        # Should inherit from Middle, not Base
++        return "End"
++
++print("Test 3 - Property override in middle of chain:")
++print(f"Base.prop.__doc__ = {Base.prop.__doc__!r}")
++print(f"Middle.prop.__doc__ = {Middle.prop.__doc__!r}")
++print(f"End.prop.__doc__ = {End.prop.__doc__!r}")
+diff --git a/test_descriptors.py b/test_descriptors.py
+new file mode 100644
+index 0000000000..fbb3ecb86e
+--- /dev/null
++++ b/test_descriptors.py
+@@ -0,0 +1,61 @@
++"""Test InheritDocstrings with other descriptors"""
++
++from astropy.utils.misc import InheritDocstrings
++
++
++# Test with classmethod and staticmethod
++class Base(metaclass=InheritDocstrings):
++    @classmethod
++    def class_method(cls):
++        """Class method docstring"""
++        return "base"
++    
++    @staticmethod
++    def static_method():
++        """Static method docstring"""
++        return "base"
++
++class Sub(Base):
++    @classmethod
++    def class_method(cls):
++        return "sub"
++    
++    @staticmethod
++    def static_method():
++        return "sub"
++
++print("Testing with classmethod and staticmethod:")
++print(f"Base.class_method.__doc__ = {Base.class_method.__doc__!r}")
++print(f"Sub.class_method.__doc__ = {Sub.class_method.__doc__!r}")
++print(f"Base.static_method.__doc__ = {Base.static_method.__doc__!r}")
++print(f"Sub.static_method.__doc__ = {Sub.static_method.__doc__!r}")
++print()
++
++# Test with custom descriptor
++class MyDescriptor:
++    def __init__(self, func):
++        self.func = func
++        self.__doc__ = func.__doc__
++    
++    def __get__(self, obj, objtype=None):
++        if obj is None:
++            return self
++        return self.func(obj)
++    
++    def __set_name__(self, owner, name):
++        self.name = name
++
++class BaseCustom(metaclass=InheritDocstrings):
++    @MyDescriptor
++    def custom(self):
++        """Custom descriptor docstring"""
++        return "base"
++
++class SubCustom(BaseCustom):
++    @MyDescriptor
++    def custom(self):
++        return "sub"
++
++print("Testing with custom descriptor:")
++print(f"BaseCustom.custom.__doc__ = {BaseCustom.custom.__doc__!r}")
++print(f"SubCustom.custom.__doc__ = {SubCustom.custom.__doc__!r}")
+diff --git a/test_inherit_docstrings_comprehensive.py b/test_inherit_docstrings_comprehensive.py
+new file mode 100644
+index 0000000000..984d6b325b
+--- /dev/null
++++ b/test_inherit_docstrings_comprehensive.py
+@@ -0,0 +1,129 @@
++"""Comprehensive test for InheritDocstrings with properties"""
++
++from astropy.utils.misc import InheritDocstrings
++
++
++# Test 1: Basic property inheritance
++class Base1(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Base property docstring"""
++        return 1
++
++class Sub1(Base1):
++    @property
++    def prop(self):
++        return 2
++
++print("Test 1 - Basic property inheritance:")
++print(f"  Base1.prop.__doc__ = {Base1.prop.__doc__!r}")
++print(f"  Sub1.prop.__doc__ = {Sub1.prop.__doc__!r}")
++print(f"  PASS: {Sub1.prop.__doc__ == 'Base property docstring'}")
++print()
++
++
++# Test 2: Property with setter/deleter
++class Base2(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Property with setter"""
++        return self._value
++    
++    @prop.setter
++    def prop(self, value):
++        self._value = value
++
++class Sub2(Base2):
++    @property
++    def prop(self):
++        return self._value * 2
++    
++    @prop.setter
++    def prop(self, value):
++        self._value = value * 2
++
++print("Test 2 - Property with setter:")
++print(f"  Base2.prop.__doc__ = {Base2.prop.__doc__!r}")
++print(f"  Sub2.prop.__doc__ = {Sub2.prop.__doc__!r}")
++print(f"  PASS: {Sub2.prop.__doc__ == 'Property with setter'}")
++print()
++
++
++# Test 3: Multiple inheritance
++class BaseA(metaclass=InheritDocstrings):
++    @property
++    def prop_a(self):
++        """Property from BaseA"""
++        return 'A'
++
++class BaseB(metaclass=InheritDocstrings):
++    @property
++    def prop_b(self):
++        """Property from BaseB"""
++        return 'B'
++
++class SubMulti(BaseA, BaseB):
++    @property
++    def prop_a(self):
++        return 'SubA'
++    
++    @property
++    def prop_b(self):
++        return 'SubB'
++
++print("Test 3 - Multiple inheritance:")
++print(f"  BaseA.prop_a.__doc__ = {BaseA.prop_a.__doc__!r}")
++print(f"  SubMulti.prop_a.__doc__ = {SubMulti.prop_a.__doc__!r}")
++print(f"  BaseB.prop_b.__doc__ = {BaseB.prop_b.__doc__!r}")
++print(f"  SubMulti.prop_b.__doc__ = {SubMulti.prop_b.__doc__!r}")
++print(f"  PASS A: {SubMulti.prop_a.__doc__ == 'Property from BaseA'}")
++print(f"  PASS B: {SubMulti.prop_b.__doc__ == 'Property from BaseB'}")
++print()
++
++
++# Test 4: Property that already has docstring (should not be overridden)
++class Base4(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Base docstring"""
++        return 1
++
++class Sub4(Base4):
++    @property
++    def prop(self):
++        """Sub docstring - should not be overridden"""
++        return 2
++
++print("Test 4 - Property with existing docstring:")
++print(f"  Base4.prop.__doc__ = {Base4.prop.__doc__!r}")
++print(f"  Sub4.prop.__doc__ = {Sub4.prop.__doc__!r}")
++print(f"  PASS: {Sub4.prop.__doc__ == 'Sub docstring - should not be overridden'}")
++print()
++
++
++# Test 5: Mix of properties and methods
++class Base5(metaclass=InheritDocstrings):
++    @property
++    def prop(self):
++        """Property docstring"""
++        return 1
++    
++    def method(self):
++        """Method docstring"""
++        return 2
++
++class Sub5(Base5):
++    @property
++    def prop(self):
++        return 3
++    
++    def method(self):
++        return 4
++
++print("Test 5 - Mix of properties and methods:")
++print(f"  Base5.prop.__doc__ = {Base5.prop.__doc__!r}")
++print(f"  Sub5.prop.__doc__ = {Sub5.prop.__doc__!r}")
++print(f"  Base5.method.__doc__ = {Base5.method.__doc__!r}")
++print(f"  Sub5.method.__doc__ = {Sub5.method.__doc__!r}")
++print(f"  PASS prop: {Sub5.prop.__doc__ == 'Property docstring'}")
++print(f"  PASS method: {Sub5.method.__doc__ == 'Method docstring'}")
+diff --git a/test_inherit_docstrings_property.py b/test_inherit_docstrings_property.py
+new file mode 100644
+index 0000000000..cec623f399
+--- /dev/null
++++ b/test_inherit_docstrings_property.py
+@@ -0,0 +1,36 @@
++"""Test script to reproduce the InheritDocstrings issue with properties"""
++
++from astropy.utils.misc import InheritDocstrings
++
++
++class A(metaclass=InheritDocstrings):
++    @property
++    def my_property(self):
++        """This is a property in the base class"""
++        return 42
++    
++    def my_method(self):
++        """This is a method in the base class"""
++        return 42
++
++
++class B(A):
++    @property
++    def my_property(self):
++        # This property should inherit the docstring from A
++        return 43
++    
++    def my_method(self):
++        # This method should inherit the docstring from A
++        return 43
++
++
++# Test the current behavior
++print("Testing InheritDocstrings with properties and methods:")
++print(f"A.my_property.__doc__ = {A.my_property.__doc__!r}")
++print(f"B.my_property.__doc__ = {B.my_property.__doc__!r}")
++print(f"A.my_method.__doc__ = {A.my_method.__doc__!r}")
++print(f"B.my_method.__doc__ = {B.my_method.__doc__!r}")
++
++# Expected: B.my_property.__doc__ should be 'This is a property in the base class'
++# Actual: B.my_property.__doc__ is None
+diff --git a/test_private_properties.py b/test_private_properties.py
+new file mode 100644
+index 0000000000..862e3de44a
+--- /dev/null
++++ b/test_private_properties.py
+@@ -0,0 +1,35 @@
++"""Test that private properties don't inherit docstrings"""
++
++from astropy.utils.misc import InheritDocstrings
++
++
++class Base(metaclass=InheritDocstrings):
++    @property
++    def _private_prop(self):
++        """Private property docstring"""
++        return 1
++    
++    @property
++    def public_prop(self):
++        """Public property docstring"""
++        return 2
++
++class Sub(Base):
++    @property
++    def _private_prop(self):
++        # Should NOT inherit docstring (private)
++        return 3
++    
++    @property
++    def public_prop(self):
++        # Should inherit docstring (public)
++        return 4
++
++print("Testing private vs public properties:")
++print(f"Base._private_prop.__doc__ = {Base._private_prop.__doc__!r}")
++print(f"Sub._private_prop.__doc__ = {Sub._private_prop.__doc__!r}")
++print(f"Private property docstring NOT inherited: {Sub._private_prop.__doc__ is None}")
++print()
++print(f"Base.public_prop.__doc__ = {Base.public_prop.__doc__!r}")
++print(f"Sub.public_prop.__doc__ = {Sub.public_prop.__doc__!r}")
++print(f"Public property docstring inherited: {Sub.public_prop.__doc__ == 'Public property docstring'}")
+diff --git a/test_real_usage.py b/test_real_usage.py
+new file mode 100644
+index 0000000000..02c12d719d
+--- /dev/null
++++ b/test_real_usage.py
+@@ -0,0 +1,31 @@
++"""Test InheritDocstrings with real astropy classes"""
++
++# Test with units.core which uses InheritDocstrings
++try:
++    from astropy.units.core import UnitBase, Unit
++    print("Successfully imported units.core classes that use InheritDocstrings")
++except Exception as e:
++    print(f"Error importing units.core: {e}")
++
++# Test with constants which uses InheritDocstrings
++try:
++    from astropy.constants.constant import Constant, ConstantMeta
++    print("Successfully imported constants.constant classes that use InheritDocstrings")
++except Exception as e:
++    print(f"Error importing constants.constant: {e}")
++
++# Test with coordinates which uses InheritDocstrings
++try:
++    from astropy.coordinates.representation import BaseRepresentation
++    print("Successfully imported coordinates.representation classes that use InheritDocstrings")
++except Exception as e:
++    print(f"Error importing coordinates.representation: {e}")
++
++# Test with visualization which uses InheritDocstrings
++try:
++    from astropy.visualization.stretch import BaseStretch
++    print("Successfully imported visualization.stretch classes that use InheritDocstrings")
++except Exception as e:
++    print(f"Error importing visualization.stretch: {e}")
++
++print("\nAll imports successful - InheritDocstrings is working correctly with existing code!")

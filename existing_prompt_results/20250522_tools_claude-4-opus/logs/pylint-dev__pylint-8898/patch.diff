@@ -1,0 +1,573 @@
+diff --git a/CHANGES_SUMMARY.md b/CHANGES_SUMMARY.md
+new file mode 100644
+index 000000000..3c39c00ba
+--- /dev/null
++++ b/CHANGES_SUMMARY.md
+@@ -0,0 +1,37 @@
++# Summary of Changes
++
++## Problem
++The `bad-names-rgxs` option (and other `regexp_csv` type options) in pylint would incorrectly split regular expressions containing commas, causing valid regex patterns like `(foo{1,3})` to be split into invalid parts `['(foo{1', '3})']`.
++
++## Solution
++Modified the `_regexp_csv_transfomer` and `_regexp_paths_csv_transfomer` functions in `/testbed/pylint/config/argument.py` to support escaped commas (`\,`) in regular expressions. When a comma is escaped with a backslash, it is treated as part of the regex pattern rather than a separator.
++
++## Changes Made
++
++1. **Modified `/testbed/pylint/config/argument.py`**:
++   - Updated `_regexp_csv_transfomer` to handle escaped commas
++   - Updated `_regexp_paths_csv_transfomer` to handle escaped commas
++   - Added documentation to both functions explaining the escape mechanism
++
++2. **Updated help text in multiple files**:
++   - `/testbed/pylint/checkers/base/name_checker/checker.py`: Updated help for `bad-names-rgxs` and `good-names-rgxs`
++   - `/testbed/pylint/checkers/design_analysis.py`: Updated help for `exclude-too-few-public-methods`
++   - `/testbed/pylint/lint/base_options.py`: Updated help for `ignore-patterns`
++
++3. **Added tests**:
++   - Added `test_csv_regex_with_escaped_comma` in `/testbed/tests/config/test_config.py`
++   - Added functional test `/testbed/tests/functional/b/bad_names_rgxs_with_comma.*`
++
++## Usage
++Users can now use regular expressions with commas in `regexp_csv` type options by escaping the commas:
++
++```bash
++# Before (would fail):
++pylint --bad-names-rgxs="(foo{1,3}),bar.*" file.py
++
++# After (works correctly):
++pylint --bad-names-rgxs="(foo{1\,3}),bar.*" file.py
++```
++
++## Backward Compatibility
++The change is fully backward compatible. Existing configurations without escaped commas will continue to work as before. Only users who need commas in their regex patterns need to use the escape syntax.
+diff --git a/debug_patterns.py b/debug_patterns.py
+new file mode 100644
+index 000000000..f87d5f86e
+--- /dev/null
++++ b/debug_patterns.py
+@@ -0,0 +1,22 @@
++#!/usr/bin/env python3
++"""Debug the regex patterns."""
++
++import re
++from pylint.config.argument import _regexp_csv_transfomer
++
++# Test the patterns
++patterns_str = r"(foo{1\,3}),bar.*,a{1\,2}"
++print(f"Input: {patterns_str}")
++
++patterns = _regexp_csv_transfomer(patterns_str)
++print(f"\nParsed patterns: {patterns}")
++
++for i, pattern in enumerate(patterns):
++    print(f"\nPattern {i+1}: {pattern.pattern}")
++    
++    # Test some strings
++    test_strings = ["foo", "fooo", "foooo", "fooooo", "bar", "bar_test", "baz_test", "a", "aa", "aaa", "aaaa"]
++    for s in test_strings:
++        match = pattern.match(s)
++        if match:
++            print(f"  '{s}' matches (full match: {match.group() == s})")
+diff --git a/demo_fix.py b/demo_fix.py
+new file mode 100644
+index 000000000..77045c5ed
+--- /dev/null
++++ b/demo_fix.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python3
++"""Demonstrate the fix for bad-names-rgxs with commas in regex patterns."""
++
++import subprocess
++import sys
++import tempfile
++import os
++
++print("Demonstrating the fix for bad-names-rgxs with commas in regex patterns")
++print("=" * 70)
++
++# Create test code
++test_code = '''
++# Test variables
++foo = 1      # Should match (foo{1,3})
++fooo = 2     # Should match (foo{1,3})
++foooo = 3    # Should match (foo{1,3})
++fooooo = 4   # Should NOT match (too many o's)
++
++bar_test = 5 # Should match bar.*
++baz_test = 6 # Should NOT match
++
++a = 7        # Should match a{1,2}
++aa = 8       # Should match a{1,2}
++aaa = 9      # Should NOT match (too many a's)
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    test_file = os.path.join(tmpdir, "test.py")
++    with open(test_file, "w") as f:
++        f.write(test_code)
++    
++    # Test with escaped commas (should work)
++    print("\n1. Testing with escaped commas (FIXED behavior):")
++    print("   Command: pylint --bad-names-rgxs='^(foo{1\\,3})$,^bar.*$,^a{1\\,2}$' test.py")
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", 
++         "--bad-names-rgxs", r"^(foo{1\,3})$,^bar.*$,^a{1\,2}$",
++         "--disable=all", "--enable=disallowed-name",
++         test_file],
++        capture_output=True,
++        text=True
++    )
++    
++    if result.returncode == 0:
++        print("   ✓ No errors!")
++    else:
++        # Extract disallowed-name messages
++        for line in result.stdout.split('\n'):
++            if "disallowed-name" in line or "Disallowed name" in line:
++                print(f"   {line.strip()}")
++    
++    # Test without escaped commas (should fail)
++    print("\n2. Testing without escaped commas (original bug):")
++    print("   Command: pylint --bad-names-rgxs='^(foo{1,3})$,^bar.*$,^a{1,2}$' test.py")
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", 
++         "--bad-names-rgxs", "^(foo{1,3})$,^bar.*$,^a{1,2}$",
++         "--disable=all", "--enable=disallowed-name",
++         test_file],
++        capture_output=True,
++        text=True
++    )
++    
++    if result.returncode != 0 and "Error in provided regular expression" in result.stderr:
++        print("   ✗ Error (as expected):", result.stderr.split('\n')[-2].strip())
++    else:
++        print("   Unexpected result")
++
++print("\n" + "=" * 70)
++print("Summary:")
++print("- With escaped commas (\\,): Regular expressions work correctly")
++print("- Without escaping: Regular expressions with commas are split and fail")
++print("- This fix allows users to use quantifiers like {n,m} in their patterns")
+diff --git a/pylint/checkers/base/name_checker/checker.py b/pylint/checkers/base/name_checker/checker.py
+index 42a7c6b2e..416a9fb9a 100644
+--- a/pylint/checkers/base/name_checker/checker.py
++++ b/pylint/checkers/base/name_checker/checker.py
+@@ -212,7 +212,7 @@ class NameChecker(_BasicChecker):
+                 "type": "regexp_csv",
+                 "metavar": "<names>",
+                 "help": "Good variable names regexes, separated by a comma. If names match any regex,"
+-                " they will always be accepted",
++                " they will always be accepted. To use a comma in a regex, escape it with a backslash (\\,).",
+             },
+         ),
+         (
+@@ -232,7 +232,7 @@ class NameChecker(_BasicChecker):
+                 "type": "regexp_csv",
+                 "metavar": "<names>",
+                 "help": "Bad variable names regexes, separated by a comma. If names match any regex,"
+-                " they will always be refused",
++                " they will always be refused. To use a comma in a regex, escape it with a backslash (\\,).",
+             },
+         ),
+         (
+diff --git a/pylint/checkers/design_analysis.py b/pylint/checkers/design_analysis.py
+index bea1ef53c..f8557a351 100644
+--- a/pylint/checkers/design_analysis.py
++++ b/pylint/checkers/design_analysis.py
+@@ -395,7 +395,8 @@ class MisdesignChecker(BaseChecker):
+                 "type": "regexp_csv",
+                 "metavar": "<pattern>[,<pattern>...]",
+                 "help": "List of regular expressions of class ancestor names "
+-                "to ignore when counting public methods (see R0903)",
++                "to ignore when counting public methods (see R0903). "
++                "To use a comma in a regex, escape it with a backslash (\\,).",
+             },
+         ),
+     )
+diff --git a/pylint/config/argument.py b/pylint/config/argument.py
+index 30a5fd175..02d93da25 100644
+--- a/pylint/config/argument.py
++++ b/pylint/config/argument.py
+@@ -112,17 +112,39 @@ def _regex_transformer(value: str) -> Pattern[str]:
+ 
+ 
+ def _regexp_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions."""
++    """Transforms a comma separated list of regular expressions.
++    
++    Commas inside the regex patterns can be escaped with a backslash.
++    The backslash will be removed during parsing.
++    """
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    # Split on commas, but not on escaped commas
++    # We'll use a simple approach: replace escaped commas with a placeholder,
++    # split, then restore the commas
++    placeholder = "\x00"  # Use null character as placeholder
++    escaped_value = value.replace("\\,", placeholder)
++    parts = _csv_transformer(escaped_value)
++    for part in parts:
++        # Restore the commas
++        pattern = part.replace(placeholder, ",")
+         patterns.append(_regex_transformer(pattern))
+     return patterns
+ 
+ 
+ def _regexp_paths_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions paths."""
++    """Transforms a comma separated list of regular expressions paths.
++    
++    Commas inside the regex patterns can be escaped with a backslash.
++    The backslash will be removed during parsing.
++    """
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    # Split on commas, but not on escaped commas
++    placeholder = "\x00"  # Use null character as placeholder
++    escaped_value = value.replace("\\,", placeholder)
++    parts = _csv_transformer(escaped_value)
++    for part in parts:
++        # Restore the commas
++        pattern = part.replace(placeholder, ",")
+         patterns.append(
+             re.compile(
+                 str(pathlib.PureWindowsPath(pattern)).replace("\\", "\\\\")
+diff --git a/pylint/lint/base_options.py b/pylint/lint/base_options.py
+index ee811db4e..97c272fd2 100644
+--- a/pylint/lint/base_options.py
++++ b/pylint/lint/base_options.py
+@@ -58,7 +58,7 @@ def _make_linter_options(linter: PyLinter) -> Options:
+                 "default": (re.compile(r"^\.#"),),
+                 "help": "Files or directories matching the regular expression patterns are"
+                 " skipped. The regex matches against base names, not paths. The default value "
+-                "ignores Emacs file locks",
++                "ignores Emacs file locks. To use a comma in a regex, escape it with a backslash (\\,).",
+             },
+         ),
+         (
+diff --git a/test_bad_names_rgxs.py b/test_bad_names_rgxs.py
+new file mode 100644
+index 000000000..cd71a09e2
+--- /dev/null
++++ b/test_bad_names_rgxs.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++"""Test script to reproduce the bad-names-rgxs issue with commas in regex."""
++
++import re
++import tempfile
++import os
++import subprocess
++import sys
++
++# Create a test Python file
++test_code = '''
++# This is a test file
++foo = 1
++'''
++
++# Create a pyproject.toml with the problematic configuration
++config_content = '''
++[tool.pylint.basic]
++# capture group ensures that the part after the comma is an invalid regular
++# expression, causing pylint to crash
++bad-name-rgxs = "(foo{1,3})"
++'''
++
++# Test 1: Show the current behavior (should crash)
++print("Test 1: Testing current behavior with regex containing comma")
++print("=" * 60)
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Write test file
++    test_file = os.path.join(tmpdir, "test.py")
++    with open(test_file, "w") as f:
++        f.write(test_code)
++    
++    # Write config file
++    config_file = os.path.join(tmpdir, "pyproject.toml")
++    with open(config_file, "w") as f:
++        f.write(config_content)
++    
++    # Run pylint
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", test_file],
++        cwd=tmpdir,
++        capture_output=True,
++        text=True
++    )
++    
++    print(f"Return code: {result.returncode}")
++    print(f"Stdout:\n{result.stdout}")
++    print(f"Stderr:\n{result.stderr}")
++
++# Test 2: Show what the regex transformer is doing
++print("\n\nTest 2: Analyzing the regex transformation")
++print("=" * 60)
++
++from pylint.config.argument import _csv_transformer, _regex_transformer, _regexp_csv_transfomer
++
++test_regex = "(foo{1,3})"
++print(f"Original regex: {test_regex}")
++print(f"After CSV split: {_csv_transformer(test_regex)}")
++
++try:
++    result = _regexp_csv_transfomer(test_regex)
++    print(f"Result: {result}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test 3: Show that the regex itself is valid
++print("\n\nTest 3: Validating the regex pattern")
++print("=" * 60)
++try:
++    pattern = re.compile(test_regex)
++    print(f"Regex '{test_regex}' is valid")
++    print(f"Pattern matches 'foo': {bool(pattern.match('foo'))}")
++    print(f"Pattern matches 'fooo': {bool(pattern.match('fooo'))}")
++    print(f"Pattern matches 'foooo': {bool(pattern.match('foooo'))}")
++except Exception as e:
++    print(f"Error compiling regex: {e}")
+diff --git a/test_cli.py b/test_cli.py
+new file mode 100644
+index 000000000..52ee7a3b0
+--- /dev/null
++++ b/test_cli.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python3
++"""Test the fix via command line."""
++
++import subprocess
++import sys
++import tempfile
++import os
++
++test_code = '''
++# Test file
++foo = 1
++fooo = 2
++bar = 3
++baz = 4
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    test_file = os.path.join(tmpdir, "test.py")
++    with open(test_file, "w") as f:
++        f.write(test_code)
++    
++    # Test 1: Original problematic regex (should work now with escaped comma)
++    print("Test 1: Regex with escaped comma")
++    print("=" * 60)
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", "--bad-names-rgxs", r"(foo{1\,3}),bar.*", test_file],
++        capture_output=True,
++        text=True
++    )
++    print(f"Command: pylint --bad-names-rgxs '(foo{{1\\,3}}),bar.*' {test_file}")
++    print(f"Return code: {result.returncode}")
++    if "disallowed-name" in result.stdout:
++        # Extract lines with disallowed-name
++        for line in result.stdout.split('\n'):
++            if "disallowed-name" in line or "Disallowed name" in line:
++                print(f"  {line}")
++    
++    # Test 2: Without escaping (should fail)
++    print("\n\nTest 2: Regex without escaped comma (should fail)")
++    print("=" * 60)
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", "--bad-names-rgxs", "(foo{1,3}),bar.*", test_file],
++        capture_output=True,
++        text=True
++    )
++    print(f"Command: pylint --bad-names-rgxs '(foo{{1,3}}),bar.*' {test_file}")
++    print(f"Return code: {result.returncode}")
++    if result.stderr:
++        print(f"Error: {result.stderr}")
++    
++    # Test 3: Multiple patterns
++    print("\n\nTest 3: Multiple patterns with escaped commas")
++    print("=" * 60)
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", "--bad-names-rgxs", r"fo{2\,3},ba[rz]", test_file],
++        capture_output=True,
++        text=True
++    )
++    print(f"Command: pylint --bad-names-rgxs 'fo{{2\\,3}},ba[rz]' {test_file}")
++    print(f"Return code: {result.returncode}")
++    if "disallowed-name" in result.stdout:
++        # Extract lines with disallowed-name
++        for line in result.stdout.split('\n'):
++            if "disallowed-name" in line or "Disallowed name" in line:
++                print(f"  {line}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 000000000..1020ecc5d
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,97 @@
++#!/usr/bin/env python3
++"""Test script to verify the fix for bad-names-rgxs issue with commas in regex."""
++
++import re
++import tempfile
++import os
++import subprocess
++import sys
++from pylint.config.argument import _regexp_csv_transfomer
++
++# Test the fix directly
++print("Test 1: Direct test of _regexp_csv_transfomer")
++print("=" * 60)
++
++# Test case 1: Regex with comma (escaped)
++test_regex_escaped = r"(foo{1\,3})"
++print(f"Input (escaped comma): {test_regex_escaped}")
++try:
++    result = _regexp_csv_transfomer(test_regex_escaped)
++    print(f"Result: {result}")
++    print(f"Pattern: {result[0].pattern}")
++    # Test that it matches correctly
++    pattern = result[0]
++    print(f"Pattern matches 'foo': {bool(pattern.match('foo'))}")
++    print(f"Pattern matches 'fooo': {bool(pattern.match('fooo'))}")
++    print(f"Pattern matches 'foooo': {bool(pattern.match('foooo'))}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print()
++
++# Test case 2: Multiple regexes with escaped commas
++test_multi = r"(foo{1\,3}),bar.*,baz{2\,}"
++print(f"Input (multiple patterns): {test_multi}")
++try:
++    result = _regexp_csv_transfomer(test_multi)
++    print(f"Result: {result}")
++    for i, pattern in enumerate(result):
++        print(f"  Pattern {i+1}: {pattern.pattern}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print()
++
++# Test case 3: No escaped commas (backward compatibility)
++test_simple = "foo.*,bar.*,baz.*"
++print(f"Input (no escaped commas): {test_simple}")
++try:
++    result = _regexp_csv_transfomer(test_simple)
++    print(f"Result: {result}")
++    for i, pattern in enumerate(result):
++        print(f"  Pattern {i+1}: {pattern.pattern}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test with pylint
++print("\n\nTest 2: Testing with pylint")
++print("=" * 60)
++
++test_code = '''
++# This is a test file
++foo = 1
++fooo = 2
++bar = 3
++'''
++
++# Create a pyproject.toml with escaped comma
++# In TOML, we need to escape the backslash
++config_content = '''
++[tool.pylint.basic]
++# Using escaped comma in the regex
++bad_names_rgxs = "(foo{1\\\\,3}),bar.*"
++'''
++
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Write test file
++    test_file = os.path.join(tmpdir, "test.py")
++    with open(test_file, "w") as f:
++        f.write(test_code)
++    
++    # Write config file
++    config_file = os.path.join(tmpdir, "pyproject.toml")
++    with open(config_file, "w") as f:
++        f.write(config_content)
++    
++    # Run pylint
++    result = subprocess.run(
++        [sys.executable, "-m", "pylint", test_file],
++        cwd=tmpdir,
++        capture_output=True,
++        text=True
++    )
++    
++    print(f"Return code: {result.returncode}")
++    print(f"Stdout:\n{result.stdout}")
++    if result.stderr:
++        print(f"Stderr:\n{result.stderr}")
+diff --git a/tests/config/test_config.py b/tests/config/test_config.py
+index 83c8b072e..bfc0e4597 100644
+--- a/tests/config/test_config.py
++++ b/tests/config/test_config.py
+@@ -147,6 +147,21 @@ def test_csv_regex_error(capsys: CaptureFixture) -> None:
+     )
+ 
+ 
++def test_csv_regex_with_escaped_comma(capsys: CaptureFixture) -> None:
++    """Check that escaped commas in regex patterns work correctly."""
++    # This should not raise an error
++    run = Run(
++        [str(EMPTY_MODULE), r"--bad-names-rgx=(foo{1\,3}),bar.*", "--disable=all", "--enable=disallowed-name"],
++        exit=False,
++    )
++    # The run should succeed without regex compilation errors
++    # Check that we have two compiled patterns
++    assert len(run.linter.config.bad_names_rgxs) == 2
++    # Check that the patterns are what we expect (escaped comma is converted to regular comma)
++    assert run.linter.config.bad_names_rgxs[0].pattern == "(foo{1,3})"
++    assert run.linter.config.bad_names_rgxs[1].pattern == "bar.*"
++
++
+ def test_short_verbose(capsys: CaptureFixture) -> None:
+     """Check that we correctly handle the -v flag."""
+     Run([str(EMPTY_MODULE), "-v"], exit=False)
+diff --git a/tests/functional/b/bad_names_rgxs_with_comma.py b/tests/functional/b/bad_names_rgxs_with_comma.py
+new file mode 100644
+index 000000000..91ca87b7b
+--- /dev/null
++++ b/tests/functional/b/bad_names_rgxs_with_comma.py
+@@ -0,0 +1,11 @@
++# pylint: disable=missing-docstring,invalid-name
++# Test that bad-names-rgxs works with regex patterns containing commas
++
++foo = 1  # [disallowed-name]
++fooo = 2  # [disallowed-name]
++foooo = 3  # [disallowed-name]
++
++bar_test = 5  # [disallowed-name]
++
++a = 1  # [disallowed-name]
++aa = 2  # [disallowed-name]
+diff --git a/tests/functional/b/bad_names_rgxs_with_comma.rc b/tests/functional/b/bad_names_rgxs_with_comma.rc
+new file mode 100644
+index 000000000..08e4cd67c
+--- /dev/null
++++ b/tests/functional/b/bad_names_rgxs_with_comma.rc
+@@ -0,0 +1,7 @@
++[BASIC]
++# Test escaped commas in bad-names-rgxs
++# The patterns are:
++# - ^(foo{1\,3})$ - matches 'foo', 'fooo', 'foooo' (1 to 3 'o's)
++# - ^bar.*$ - matches anything starting with 'bar'
++# - ^a{1\,2}$ - matches 'a' or 'aa' (1 to 2 'a's)
++bad-names-rgxs=^(foo{1\,3})$,^bar.*$,^a{1\,2}$
+diff --git a/tests/functional/b/bad_names_rgxs_with_comma.txt b/tests/functional/b/bad_names_rgxs_with_comma.txt
+new file mode 100644
+index 000000000..3f7f70461
+--- /dev/null
++++ b/tests/functional/b/bad_names_rgxs_with_comma.txt
+@@ -0,0 +1,6 @@
++disallowed-name:4:0:4:3::Disallowed name "foo":HIGH
++disallowed-name:5:0:5:4::Disallowed name "fooo":HIGH
++disallowed-name:6:0:6:5::Disallowed name "foooo":HIGH
++disallowed-name:8:0:8:8::Disallowed name "bar_test":HIGH
++disallowed-name:10:0:10:1::Disallowed name "a":HIGH
++disallowed-name:11:0:11:2::Disallowed name "aa":HIGH

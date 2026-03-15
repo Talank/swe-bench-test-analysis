@@ -1,0 +1,650 @@
+diff --git a/debug_empty_migrations.py b/debug_empty_migrations.py
+new file mode 100644
+index 0000000000..a12905b069
+--- /dev/null
++++ b/debug_empty_migrations.py
+@@ -0,0 +1,51 @@
++"""Debug empty migrations directory behavior"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'migrations',
++    ],
++    MIGRATION_MODULES={'migrations': 'migrations.test_migrations_empty'},
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++# Test loading
++loader = MigrationLoader(connection, ignore_no_migrations=True)
++
++print("Migrated apps:", loader.migrated_apps)
++print("Unmigrated apps:", loader.unmigrated_apps)
++
++# Check the module
++import migrations.test_migrations_empty as m
++print("\nModule info:")
++print("Has __file__:", hasattr(m, '__file__'))
++print("Has __path__:", hasattr(m, '__path__'))
++if hasattr(m, '__file__'):
++    print("__file__:", m.__file__)
++if hasattr(m, '__path__'):
++    print("__path__:", m.__path__)
++
++# Check what pkgutil finds
++import pkgutil
++print("\nChecking pkgutil.iter_modules:")
++for importer, name, ispkg in pkgutil.iter_modules(m.__path__):
++    print(f"  Found: {name} (is_pkg: {ispkg})")
+diff --git a/debug_namespace_test.py b/debug_namespace_test.py
+new file mode 100644
+index 0000000000..4009f2540e
+--- /dev/null
++++ b/debug_namespace_test.py
+@@ -0,0 +1,52 @@
++"""Debug namespace test"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'migrations',
++    ],
++    MIGRATION_MODULES={'migrations': 'migrations.faulty_migrations.namespace'},
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++# Test loading
++loader = MigrationLoader(connection)
++
++print("Migrated apps:", loader.migrated_apps)
++print("Unmigrated apps:", loader.unmigrated_apps)
++
++# Check the module
++try:
++    import migrations.faulty_migrations.namespace as m
++    print("\nModule imported successfully")
++    print("Has __file__:", hasattr(m, '__file__'))
++    print("Has __path__:", hasattr(m, '__path__'))
++    if hasattr(m, '__path__'):
++        print("__path__:", m.__path__)
++    
++    # Check what pkgutil finds
++    import pkgutil
++    print("\nChecking pkgutil.iter_modules:")
++    for importer, name, ispkg in pkgutil.iter_modules(m.__path__):
++        print(f"  Found: {name} (is_pkg: {ispkg})")
++except Exception as e:
++    print(f"\nError importing module: {e}")
+diff --git a/django/db/migrations/loader.py b/django/db/migrations/loader.py
+index 8c308621d2..6df0c05946 100644
+--- a/django/db/migrations/loader.py
++++ b/django/db/migrations/loader.py
+@@ -84,11 +84,6 @@ class MigrationLoader:
+                     continue
+                 raise
+             else:
+-                # Empty directories are namespaces.
+-                # getattr() needed on PY36 and older (replace w/attribute access).
+-                if getattr(module, '__file__', None) is None:
+-                    self.unmigrated_apps.add(app_config.label)
+-                    continue
+                 # Module is not a package (e.g. migrations.py).
+                 if not hasattr(module, '__path__'):
+                     self.unmigrated_apps.add(app_config.label)
+@@ -96,11 +91,17 @@ class MigrationLoader:
+                 # Force a reload if it's already loaded (tests need this)
+                 if was_loaded:
+                     reload(module)
+-            self.migrated_apps.add(app_config.label)
+             migration_names = {
+                 name for _, name, is_pkg in pkgutil.iter_modules(module.__path__)
+                 if not is_pkg and name[0] not in '_~'
+             }
++            # An empty namespace package (no __init__.py) with no migrations is treated as unmigrated
++            # This is different from a traditional package with __init__.py which can be empty but migrated
++            if not migration_names and getattr(module, '__file__', None) is None:
++                self.unmigrated_apps.add(app_config.label)
++                continue
++            # Mark the app as migrated
++            self.migrated_apps.add(app_config.label)
+             # Load migrations
+             for migration_name in migration_names:
+                 migration_path = '%s.%s' % (module_name, migration_name)
+diff --git a/test_comprehensive_migrations.py b/test_comprehensive_migrations.py
+new file mode 100644
+index 0000000000..05dde34b79
+--- /dev/null
++++ b/test_comprehensive_migrations.py
+@@ -0,0 +1,133 @@
++"""Comprehensive test for different migration package types"""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++
++# Create a temporary directory for our test apps
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++def create_app(app_name, with_init_in_migrations=True, with_migrations_file=False):
++    """Create a test app with different migration configurations"""
++    app_dir = Path(test_dir) / app_name
++    app_dir.mkdir()
++    
++    # Create app __init__.py
++    (app_dir / '__init__.py').write_text('')
++    
++    # Create models.py
++    (app_dir / 'models.py').write_text(f'''
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = '{app_name}'
++''')
++    
++    if with_migrations_file:
++        # Create migrations.py file instead of directory
++        (app_dir / 'migrations.py').write_text('# This is a file, not a package')
++    else:
++        # Create migrations directory
++        migrations_dir = app_dir / 'migrations'
++        migrations_dir.mkdir()
++        
++        if with_init_in_migrations:
++            # Traditional package with __init__.py
++            (migrations_dir / '__init__.py').write_text('')
++        # else: namespace package without __init__.py
++        
++        # Create a migration file
++        (migrations_dir / '0001_initial.py').write_text(f'''
++from django.db import migrations, models
++
++class Migration(migrations.Migration):
++    initial = True
++    dependencies = []
++    
++    operations = [
++        migrations.CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++''')
++
++try:
++    # Create test apps
++    create_app('traditional_app', with_init_in_migrations=True)
++    create_app('namespace_app', with_init_in_migrations=False)
++    create_app('no_migrations_app', with_init_in_migrations=True, with_migrations_file=True)
++    
++    # Configure Django
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'traditional_app',
++            'namespace_app',
++            'no_migrations_app',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++    
++    # Test loading migrations
++    print("Testing different migration package types...")
++    loader = MigrationLoader(connection)
++    
++    print("\nResults:")
++    print("-" * 50)
++    
++    # Test traditional app with __init__.py in migrations
++    if 'traditional_app' in loader.migrated_apps:
++        print("OK traditional_app: Correctly detected as migrated")
++        migrations = [k for k in loader.disk_migrations.keys() if k[0] == 'traditional_app']
++        print(f"  Found migrations: {migrations}")
++    else:
++        print("FAIL traditional_app: INCORRECTLY marked as unmigrated")
++    
++    # Test namespace app without __init__.py in migrations
++    if 'namespace_app' in loader.migrated_apps:
++        print("OK namespace_app: Correctly detected as migrated")
++        migrations = [k for k in loader.disk_migrations.keys() if k[0] == 'namespace_app']
++        print(f"  Found migrations: {migrations}")
++    else:
++        print("FAIL namespace_app: INCORRECTLY marked as unmigrated")
++    
++    # Test app with migrations.py file instead of directory
++    if 'no_migrations_app' in loader.unmigrated_apps:
++        print("OK no_migrations_app: Correctly detected as unmigrated")
++    else:
++        print("FAIL no_migrations_app: INCORRECTLY marked as migrated")
++    
++    print("\nSummary:")
++    print(f"Migrated apps: {sorted(loader.migrated_apps)}")
++    print(f"Unmigrated apps: {sorted(loader.unmigrated_apps)}")
++    
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    sys.path.remove(test_dir)
+diff --git a/test_empty_namespace.py b/test_empty_namespace.py
+new file mode 100644
+index 0000000000..33d934d7da
+--- /dev/null
++++ b/test_empty_namespace.py
+@@ -0,0 +1,77 @@
++"""Test for empty namespace package"""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++
++# Create a temporary directory for our test app
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++try:
++    # Create test app structure with empty migrations namespace package
++    app_dir = Path(test_dir) / 'test_empty_namespace_app'
++    app_dir.mkdir()
++    
++    # Create app __init__.py
++    (app_dir / '__init__.py').write_text('')
++    
++    # Create models.py
++    (app_dir / 'models.py').write_text('''
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_empty_namespace_app'
++''')
++    
++    # Create empty migrations directory WITHOUT __init__.py and WITHOUT any migration files
++    migrations_dir = app_dir / 'migrations'
++    migrations_dir.mkdir()
++    # No migration files!
++    
++    # Configure Django
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'test_empty_namespace_app',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++    
++    # Test loading migrations
++    print("Testing empty namespace package...")
++    loader = MigrationLoader(connection)
++    
++    # Check if our app is detected as unmigrated (it should be since there are no migration files)
++    if 'test_empty_namespace_app' in loader.unmigrated_apps:
++        print("SUCCESS: Empty namespace package is correctly detected as unmigrated!")
++        print(f"  Unmigrated apps: {loader.unmigrated_apps}")
++    else:
++        print("FAILURE: Empty namespace package is incorrectly marked as migrated!")
++        print(f"  Migrated apps: {loader.migrated_apps}")
++        
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    sys.path.remove(test_dir)
+diff --git a/test_final_namespace_migrations.py b/test_final_namespace_migrations.py
+new file mode 100644
+index 0000000000..b555dbd143
+--- /dev/null
++++ b/test_final_namespace_migrations.py
+@@ -0,0 +1,123 @@
++"""Final test demonstrating namespace package migrations work"""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++from django.core.management import call_command
++import io
++
++# Create a temporary directory for our test app
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++try:
++    # Create test app structure WITHOUT __init__.py in migrations (namespace package)
++    app_dir = Path(test_dir) / 'namespace_migrations_app'
++    app_dir.mkdir()
++    
++    # Create app __init__.py
++    (app_dir / '__init__.py').write_text('')
++    
++    # Create models.py
++    (app_dir / 'models.py').write_text('''
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'namespace_migrations_app'
++''')
++    
++    # Create migrations directory WITHOUT __init__.py (namespace package)
++    migrations_dir = app_dir / 'migrations'
++    migrations_dir.mkdir()
++    
++    # Create a migration file
++    (migrations_dir / '0001_initial.py').write_text('''
++from django.db import migrations, models
++
++class Migration(migrations.Migration):
++    initial = True
++    dependencies = []
++    
++    operations = [
++        migrations.CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++''')
++    
++    # Configure Django
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'namespace_migrations_app',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++    
++    print("Testing namespace package migrations functionality...")
++    print("=" * 60)
++    
++    # Test 1: Check that migrations are detected
++    loader = MigrationLoader(connection)
++    if 'namespace_migrations_app' in loader.migrated_apps:
++        print("Test 1 PASSED: Namespace package migrations are detected")
++        migrations = [(k, v) for k, v in loader.disk_migrations.items() if k[0] == 'namespace_migrations_app']
++        print(f"  Found {len(migrations)} migration(s)")
++    else:
++        print("Test 1 FAILED: Namespace package migrations not detected")
++    
++    # Test 2: Run migrate command
++    print("\nTest 2: Running migrate command...")
++    out = io.StringIO()
++    try:
++        call_command('migrate', 'namespace_migrations_app', stdout=out, verbosity=2)
++        print("  Migrate command succeeded!")
++        print("  Output:", out.getvalue()[:100] + "..." if len(out.getvalue()) > 100 else out.getvalue())
++    except Exception as e:
++        print(f"  Migrate command failed: {e}")
++    
++    # Test 3: Show migrations
++    print("\nTest 3: Running showmigrations command...")
++    out = io.StringIO()
++    try:
++        call_command('showmigrations', 'namespace_migrations_app', stdout=out)
++        output = out.getvalue()
++        print("  Showmigrations output:")
++        print("  " + output.replace('\n', '\n  '))
++    except Exception as e:
++        print(f"  Showmigrations command failed: {e}")
++    
++    print("\n" + "=" * 60)
++    print("SUCCESS: Namespace package migrations work correctly!")
++    print("The Django migrate command can now handle migration directories")
++    print("without __init__.py files (implicit namespace packages).")
++    
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    sys.path.remove(test_dir)
+diff --git a/test_namespace_migrations.py b/test_namespace_migrations.py
+new file mode 100644
+index 0000000000..701319942c
+--- /dev/null
++++ b/test_namespace_migrations.py
+@@ -0,0 +1,100 @@
++"""Test for namespace package migrations without __init__.py"""
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.loader import MigrationLoader
++from django.test.utils import setup_test_environment, teardown_test_environment
++
++# Create a temporary directory for our test app
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++try:
++    # Create test app structure WITHOUT __init__.py in migrations
++    app_dir = Path(test_dir) / 'test_namespace_app'
++    app_dir.mkdir()
++    
++    # Configure Django
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'test_namespace_app',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    
++    # Create app __init__.py
++    (app_dir / '__init__.py').write_text('')
++    
++    # Create models.py
++    (app_dir / 'models.py').write_text('''
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_namespace_app'
++''')
++    
++    # Create migrations directory WITHOUT __init__.py (namespace package)
++    migrations_dir = app_dir / 'migrations'
++    migrations_dir.mkdir()
++    
++    # Create a migration file
++    (migrations_dir / '0001_initial.py').write_text('''
++from django.db import migrations, models
++
++class Migration(migrations.Migration):
++    initial = True
++    dependencies = []
++    
++    operations = [
++        migrations.CreateModel(
++            name='TestModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('name', models.CharField(max_length=100)),
++            ],
++        ),
++    ]
++''')
++    
++    # Now setup Django after creating the app structure
++    django.setup()
++    
++    # Test loading migrations
++    print("Testing namespace package migrations...")
++    loader = MigrationLoader(connection)
++    
++    # Check if our app is detected as migrated
++    if 'test_namespace_app' in loader.migrated_apps:
++        print("SUCCESS: App with namespace package migrations is correctly detected as migrated!")
++        print(f"  Migrated apps: {loader.migrated_apps}")
++        print(f"  Found migrations: {[k for k in loader.disk_migrations.keys() if k[0] == 'test_namespace_app']}")
++    else:
++        print("FAILURE: App with namespace package migrations is incorrectly marked as unmigrated!")
++        print(f"  Migrated apps: {loader.migrated_apps}")
++        print(f"  Unmigrated apps: {loader.unmigrated_apps}")
++        
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir)
++    sys.path.remove(test_dir)
+diff --git a/test_showmigrations.py b/test_showmigrations.py
+new file mode 100644
+index 0000000000..8064dd744a
+--- /dev/null
++++ b/test_showmigrations.py
+@@ -0,0 +1,37 @@
++"""Test showmigrations with empty migrations directory"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++import django
++from django.conf import settings
++from django.core.management import call_command
++import io
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'migrations',
++    ],
++    MIGRATION_MODULES={'migrations': 'migrations.test_migrations_empty'},
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++# Test showmigrations
++out = io.StringIO()
++call_command('showmigrations', stdout=out, no_color=True)
++print("Output:")
++print(repr(out.getvalue()))
++print("Lowercase:")
++print(repr(out.getvalue().lower()))

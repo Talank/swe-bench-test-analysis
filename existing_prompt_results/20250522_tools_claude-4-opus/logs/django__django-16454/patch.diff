@@ -1,0 +1,538 @@
+diff --git a/django/core/management/base.py b/django/core/management/base.py
+index abc6f79a15..bf41c9927a 100644
+--- a/django/core/management/base.py
++++ b/django/core/management/base.py
+@@ -71,6 +71,31 @@ class CommandParser(ArgumentParser):
+         else:
+             raise CommandError("Error: %s" % message)
+ 
++    def add_subparsers(self, **kwargs):
++        """
++        Override add_subparsers to ensure that the subparsers are created
++        with the same error handling behavior as the parent parser.
++        """
++        # Get the subparsers action from the parent class
++        subparsers_action = super().add_subparsers(**kwargs)
++        
++        # Store the original add_parser method
++        original_add_parser = subparsers_action.add_parser
++        
++        # Create a wrapper that passes our custom attributes to subparsers
++        def add_parser_wrapper(name, **parser_kwargs):
++            # Add our custom attributes to the parser kwargs
++            parser_kwargs.setdefault('called_from_command_line', self.called_from_command_line)
++            parser_kwargs.setdefault('missing_args_message', self.missing_args_message)
++            
++            # Call the original add_parser method
++            return original_add_parser(name, **parser_kwargs)
++        
++        # Replace the add_parser method with our wrapper
++        subparsers_action.add_parser = add_parser_wrapper
++        
++        return subparsers_action
++
+ 
+ def handle_default_options(options):
+     """
+diff --git a/test_argparse_subparsers.py b/test_argparse_subparsers.py
+new file mode 100644
+index 0000000000..b9c97b1ac8
+--- /dev/null
++++ b/test_argparse_subparsers.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python
++import argparse
++
++# Create a parser
++parser = argparse.ArgumentParser()
++
++# Add subparsers
++subparsers_action = parser.add_subparsers()
++print(f"Type of subparsers_action: {type(subparsers_action)}")
++print(f"Subparsers_action attributes: {dir(subparsers_action)}")
++
++# Add a subparser
++subparser = subparsers_action.add_parser('create')
++print(f"\nType of subparser: {type(subparser)}")
++print(f"Subparser class: {subparser.__class__}")
++print(f"Parser class: {parser.__class__}")
++
++# Check if they have same error method
++print(f"\nParser error method: {parser.error}")
++print(f"Subparser error method: {subparser.error}")
++print(f"Are they the same class? {type(parser) == type(subparser)}")
+diff --git a/test_commandparser_subparsers.py b/test_commandparser_subparsers.py
+new file mode 100644
+index 0000000000..91d21fe7c1
+--- /dev/null
++++ b/test_commandparser_subparsers.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++from django.core.management.base import CommandParser
++
++# Create a CommandParser
++parser = CommandParser(called_from_command_line=False)
++
++# Add subparsers
++subparsers_action = parser.add_subparsers()
++print(f"Type of subparsers_action: {type(subparsers_action)}")
++print(f"_parser_class attribute: {getattr(subparsers_action, '_parser_class', 'Not found')}")
++
++# Add a subparser
++subparser = subparsers_action.add_parser('create')
++print(f"\nType of subparser: {type(subparser)}")
++print(f"Subparser class: {subparser.__class__}")
++print(f"Parser class: {parser.__class__}")
++
++# Check if they have same error method
++print(f"\nParser error method: {parser.error}")
++print(f"Subparser error method: {subparser.error}")
++print(f"Are they the same class? {type(parser) == type(subparser)}")
++
++# Check attributes
++print(f"\nParser has called_from_command_line: {hasattr(parser, 'called_from_command_line')}")
++print(f"Parser.called_from_command_line value: {getattr(parser, 'called_from_command_line', 'Not found')}")
++print(f"Subparser has called_from_command_line: {hasattr(subparser, 'called_from_command_line')}")
++print(f"Subparser.called_from_command_line value: {getattr(subparser, 'called_from_command_line', 'Not found')}")
++
++# Check missing_args_message
++print(f"\nParser has missing_args_message: {hasattr(parser, 'missing_args_message')}")
++print(f"Parser.missing_args_message value: {getattr(parser, 'missing_args_message', 'Not found')}")
++print(f"Subparser has missing_args_message: {hasattr(subparser, 'missing_args_message')}")
++print(f"Subparser.missing_args_message value: {getattr(subparser, 'missing_args_message', 'Not found')}")
+diff --git a/test_comprehensive_subparser.py b/test_comprehensive_subparser.py
+new file mode 100644
+index 0000000000..61a9c0d8fb
+--- /dev/null
++++ b/test_comprehensive_subparser.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management.base import BaseCommand, CommandError, CommandParser
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Test 1: Verify that subparsers inherit called_from_command_line
++print("Test 1: Verify subparsers inherit called_from_command_line")
++parser = CommandParser(called_from_command_line=False)
++subparsers = parser.add_subparsers()
++subparser = subparsers.add_parser('test')
++print(f"Parent parser called_from_command_line: {parser.called_from_command_line}")
++print(f"Subparser called_from_command_line: {subparser.called_from_command_line}")
++print(f"Test 1 passed: {parser.called_from_command_line == subparser.called_from_command_line}")
++
++# Test 2: Verify that subparsers inherit missing_args_message
++print("\nTest 2: Verify subparsers inherit missing_args_message")
++parser2 = CommandParser(missing_args_message="Custom message", called_from_command_line=False)
++subparsers2 = parser2.add_subparsers()
++subparser2 = subparsers2.add_parser('test')
++print(f"Parent parser missing_args_message: {parser2.missing_args_message}")
++print(f"Subparser missing_args_message: {subparser2.missing_args_message}")
++print(f"Test 2 passed: {parser2.missing_args_message == subparser2.missing_args_message}")
++
++# Test 3: Verify error handling in programmatic mode
++print("\nTest 3: Verify error handling in programmatic mode")
++parser3 = CommandParser(called_from_command_line=False)
++subparsers3 = parser3.add_subparsers()
++subparser3 = subparsers3.add_parser('create')
++subparser3.add_argument('name', help='Name argument')
++
++try:
++    # This should raise CommandError, not SystemExit
++    parser3.parse_args(['create'])  # Missing required 'name' argument
++    print("ERROR: No exception raised!")
++except CommandError as e:
++    print(f"Test 3 passed: Got CommandError as expected: {e}")
++except SystemExit as e:
++    print(f"Test 3 FAILED: Got SystemExit instead of CommandError")
++
++# Test 4: Verify error handling in command line mode
++print("\nTest 4: Verify error handling in command line mode")
++parser4 = CommandParser(called_from_command_line=True)
++subparsers4 = parser4.add_subparsers()
++subparser4 = subparsers4.add_parser('create')
++subparser4.add_argument('name', help='Name argument')
++
++try:
++    # This should raise SystemExit
++    parser4.parse_args(['create'])  # Missing required 'name' argument
++    print("ERROR: No exception raised!")
++except SystemExit as e:
++    print(f"Test 4 passed: Got SystemExit as expected with code: {e.code}")
++except CommandError as e:
++    print(f"Test 4 FAILED: Got CommandError instead of SystemExit")
++
++# Test 5: Verify nested subparsers
++print("\nTest 5: Verify nested subparsers")
++parser5 = CommandParser(called_from_command_line=False)
++subparsers5 = parser5.add_subparsers()
++subparser5 = subparsers5.add_parser('level1')
++subsubparsers5 = subparser5.add_subparsers()
++subsubparser5 = subsubparsers5.add_parser('level2')
++subsubparser5.add_argument('arg')
++
++print(f"Main parser called_from_command_line: {parser5.called_from_command_line}")
++print(f"Level 1 subparser called_from_command_line: {subparser5.called_from_command_line}")
++print(f"Level 2 subparser called_from_command_line: {subsubparser5.called_from_command_line}")
++
++try:
++    parser5.parse_args(['level1', 'level2'])  # Missing required 'arg'
++    print("ERROR: No exception raised!")
++except CommandError as e:
++    print(f"Test 5 passed: Got CommandError for nested subparser: {e}")
++except SystemExit as e:
++    print(f"Test 5 FAILED: Got SystemExit instead of CommandError")
++
++print("\nAll tests completed!")
+diff --git a/test_management_command.py b/test_management_command.py
+new file mode 100644
+index 0000000000..0ff67575a6
+--- /dev/null
++++ b/test_management_command.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++import os
++import sys
++import tempfile
++import shutil
++
++# Create a temporary Django project structure
++temp_dir = tempfile.mkdtemp()
++sys.path.insert(0, temp_dir)
++
++# Create management command directory structure
++cmd_dir = os.path.join(temp_dir, 'testapp', 'management', 'commands')
++os.makedirs(cmd_dir)
++
++# Create __init__.py files
++for path in [
++    os.path.join(temp_dir, 'testapp', '__init__.py'),
++    os.path.join(temp_dir, 'testapp', 'management', '__init__.py'),
++    os.path.join(temp_dir, 'testapp', 'management', 'commands', '__init__.py'),
++]:
++    with open(path, 'w') as f:
++        f.write('')
++
++# Create the test command
++with open(os.path.join(cmd_dir, 'testsubparser.py'), 'w') as f:
++    f.write('''
++from django.core.management.base import BaseCommand
++
++class Command(BaseCommand):
++    help = 'Test command with subparsers'
++    
++    def add_arguments(self, parser):
++        subparsers = parser.add_subparsers(required=True, dest='subcommand')
++        
++        # Create subparser
++        create_parser = subparsers.add_parser('create', help='Create something')
++        create_parser.add_argument('name', help='Name of the thing to create')
++        create_parser.add_argument('--type', default='default', help='Type of thing')
++        
++        # Delete subparser
++        delete_parser = subparsers.add_parser('delete', help='Delete something')
++        delete_parser.add_argument('name', help='Name of the thing to delete')
++        
++    def handle(self, *args, **options):
++        if options['subcommand'] == 'create':
++            self.stdout.write(f"Creating {options['name']} of type {options['type']}")
++        elif options['subcommand'] == 'delete':
++            self.stdout.write(f"Deleting {options['name']}")
++''')
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++with open(os.path.join(temp_dir, 'test_settings.py'), 'w') as f:
++    f.write('''
++DEBUG = True
++SECRET_KEY = 'test'
++INSTALLED_APPS = ['testapp']
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++''')
++
++import django
++django.setup()
++
++from django.core.management import execute_from_command_line, call_command
++from django.core.management.base import CommandError
++
++print("Test 1: Missing subcommand via execute_from_command_line")
++try:
++    execute_from_command_line(['manage.py', 'testsubparser'])
++except SystemExit as e:
++    print(f"Got SystemExit with code {e.code} (expected)")
++
++print("\nTest 2: Missing argument via execute_from_command_line")
++try:
++    execute_from_command_line(['manage.py', 'testsubparser', 'create'])
++except SystemExit as e:
++    print(f"Got SystemExit with code {e.code} (expected)")
++
++print("\nTest 3: Missing argument via call_command (programmatic)")
++try:
++    call_command('testsubparser', 'create')
++except CommandError as e:
++    print(f"Got CommandError: {e} (expected)")
++
++print("\nTest 4: Successful command execution")
++try:
++    call_command('testsubparser', 'create', 'myitem', type='special')
++    print("Command executed successfully")
++except Exception as e:
++    print(f"Unexpected error: {e}")
++
++# Cleanup
++shutil.rmtree(temp_dir)
++print("\nAll tests completed!")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..d96177f1e0
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""
++Test the exact scenario from the problem statement to verify the fix.
++"""
++import os
++import sys
++import tempfile
++import shutil
++import subprocess
++
++# Create a temporary directory for our test
++temp_dir = tempfile.mkdtemp()
++
++# Create the exact command from the problem statement
++command_content = '''
++from django.core.management.base import BaseCommand
++
++class Command(BaseCommand):
++    def add_arguments(self, parser):
++        subparsers = parser.add_subparsers(required=True)
++        create = subparsers.add_parser("create")
++        create.add_argument("name")
++    
++    def handle(self, *args, **options):
++        pass
++'''
++
++# Create a minimal Django project structure
++os.makedirs(os.path.join(temp_dir, 'testproject', 'management', 'commands'))
++with open(os.path.join(temp_dir, 'testproject', '__init__.py'), 'w') as f:
++    f.write('')
++with open(os.path.join(temp_dir, 'testproject', 'management', '__init__.py'), 'w') as f:
++    f.write('')
++with open(os.path.join(temp_dir, 'testproject', 'management', 'commands', '__init__.py'), 'w') as f:
++    f.write('')
++with open(os.path.join(temp_dir, 'testproject', 'management', 'commands', 'cheeses.py'), 'w') as f:
++    f.write(command_content)
++
++# Create settings file
++with open(os.path.join(temp_dir, 'settings.py'), 'w') as f:
++    f.write('''
++DEBUG = True
++SECRET_KEY = 'test'
++INSTALLED_APPS = ['testproject']
++''')
++
++# Create manage.py
++with open(os.path.join(temp_dir, 'manage.py'), 'w') as f:
++    f.write('''#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == "__main__":
++    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
++''')
++
++os.chmod(os.path.join(temp_dir, 'manage.py'), 0o755)
++
++# Test 1: Missing the required subparser name argument
++print("Test 1: ./manage.py cheeses")
++result = subprocess.run(
++    [sys.executable, 'manage.py', 'cheeses'],
++    cwd=temp_dir,
++    capture_output=True,
++    text=True
++)
++print("STDOUT:", result.stdout)
++print("STDERR:", result.stderr)
++print("Return code:", result.returncode)
++print("Has usage message:", "usage:" in result.stderr)
++print("Has error message:", "error:" in result.stderr)
++print("Has stack trace:", "Traceback" in result.stderr)
++
++print("\n" + "="*50 + "\n")
++
++# Test 2: Missing the name argument to create
++print("Test 2: ./manage.py cheeses create")
++result = subprocess.run(
++    [sys.executable, 'manage.py', 'cheeses', 'create'],
++    cwd=temp_dir,
++    capture_output=True,
++    text=True
++)
++print("STDOUT:", result.stdout)
++print("STDERR:", result.stderr)
++print("Return code:", result.returncode)
++print("Has usage message:", "usage:" in result.stderr)
++print("Has error message:", "error:" in result.stderr)
++print("Has stack trace:", "Traceback" in result.stderr)
++
++# Cleanup
++shutil.rmtree(temp_dir)
++
++print("\n" + "="*50)
++print("SUMMARY:")
++print("Before the fix, Test 2 would show a stack trace.")
++print("After the fix, Test 2 shows a nice usage message just like Test 1.")
+diff --git a/test_subparser_issue.py b/test_subparser_issue.py
+new file mode 100644
+index 0000000000..f2ed0cefde
+--- /dev/null
++++ b/test_subparser_issue.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management import execute_from_command_line
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Create a test command with subparser
++from django.core.management.base import BaseCommand
++
++class TestCommand(BaseCommand):
++    def add_arguments(self, parser):
++        subparsers = parser.add_subparsers(required=True)
++        create = subparsers.add_parser("create")
++        create.add_argument("name")
++    
++    def handle(self, *args, **options):
++        pass
++
++# Test the command
++print("Testing missing subparser argument:")
++try:
++    cmd = TestCommand()
++    cmd.run_from_argv(['manage.py', 'test_command'])
++except SystemExit as e:
++    print(f"SystemExit with code: {e.code}")
++except Exception as e:
++    print(f"Exception: {type(e).__name__}: {e}")
++
++print("\nTesting missing name argument to create subparser:")
++try:
++    cmd = TestCommand()
++    cmd.run_from_argv(['manage.py', 'test_command', 'create'])
++except SystemExit as e:
++    print(f"SystemExit with code: {e.code}")
++except Exception as e:
++    print(f"Exception: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_subparser_programmatic.py b/test_subparser_programmatic.py
+new file mode 100644
+index 0000000000..850a4640c3
+--- /dev/null
++++ b/test_subparser_programmatic.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management import call_command
++from django.core.management.base import BaseCommand, CommandError
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Create a test command with subparser
++class TestCommand(BaseCommand):
++    def add_arguments(self, parser):
++        subparsers = parser.add_subparsers(required=True)
++        create = subparsers.add_parser("create")
++        create.add_argument("name")
++    
++    def handle(self, *args, **options):
++        pass
++
++# Test programmatic call (should raise CommandError, not SystemExit)
++print("Testing programmatic call with missing name argument:")
++try:
++    # Create command instance
++    cmd = TestCommand()
++    # Create parser with called_from_command_line=False (programmatic mode)
++    parser = cmd.create_parser('manage.py', 'test_command')
++    # This should raise CommandError, not SystemExit
++    parser.parse_args(['create'])
++except CommandError as e:
++    print(f"Got CommandError as expected: {e}")
++except SystemExit as e:
++    print(f"ERROR: Got SystemExit instead of CommandError! Code: {e.code}")
++except Exception as e:
++    print(f"ERROR: Got unexpected exception: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()

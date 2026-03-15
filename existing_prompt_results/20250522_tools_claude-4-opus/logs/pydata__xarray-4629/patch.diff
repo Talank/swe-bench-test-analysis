@@ -1,0 +1,196 @@
+diff --git a/test_comprehensive_merge_attrs.py b/test_comprehensive_merge_attrs.py
+new file mode 100644
+index 00000000..1313a6f9
+--- /dev/null
++++ b/test_comprehensive_merge_attrs.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python
++"""Comprehensive test for merge attrs bug fix."""
++
++import xarray as xr
++import numpy as np
++
++def test_merge_attrs_override_with_data():
++    """Test merge with actual data and various attribute types."""
++    # Test with datasets containing data
++    ds1 = xr.Dataset(
++        {"temp": (["x", "y"], np.random.rand(3, 4))},
++        attrs={"title": "Dataset 1", "version": 1.0, "list_attr": [1, 2, 3]}
++    )
++    ds2 = xr.Dataset(
++        {"humidity": (["x", "y"], np.random.rand(3, 4))},
++        attrs={"title": "Dataset 2", "version": 2.0, "list_attr": [4, 5, 6]}
++    )
++    
++    # Merge with override
++    ds3 = xr.merge([ds1, ds2], combine_attrs="override")
++    
++    # Check attrs are from ds1
++    assert ds3.attrs == {"title": "Dataset 1", "version": 1.0, "list_attr": [1, 2, 3]}
++    
++    # Modify merged attrs
++    ds3.attrs["title"] = "Merged Dataset"
++    ds3.attrs["version"] = 3.0
++    ds3.attrs["list_attr"].append(4)
++    
++    # Check original attrs are unchanged
++    print(f"ds1.attrs after: {ds1.attrs}")
++    print(f"ds3.attrs after: {ds3.attrs}")
++    assert ds1.attrs["title"] == "Dataset 1"
++    assert ds1.attrs["version"] == 1.0
++    # Note: list_attr is modified because dict() creates a shallow copy
++    # This is expected behavior - only the dict itself is copied, not nested objects
++    
++    print("✓ Test with data passed")
++
++def test_merge_attrs_override_nested():
++    """Test with nested dictionary attributes - shallow copy behavior."""
++    ds1 = xr.Dataset(attrs={"meta": {"author": "Alice", "date": "2021"}})
++    ds2 = xr.Dataset(attrs={"meta": {"author": "Bob", "date": "2022"}})
++    
++    ds3 = xr.merge([ds1, ds2], combine_attrs="override")
++    
++    # Attrs should be from ds1
++    assert ds3.attrs["meta"]["author"] == "Alice"
++    
++    # Modify nested attrs - this WILL affect ds1 due to shallow copy
++    # This is expected Python behavior and consistent with other combine_attrs options
++    ds3.attrs["meta"]["author"] = "Charlie"
++    
++    # Due to shallow copy, nested dict is shared
++    assert ds1.attrs["meta"]["author"] == "Charlie"
++    
++    # But modifying the top-level attrs should not affect original
++    ds3.attrs["new_key"] = "new_value"
++    assert "new_key" not in ds1.attrs
++    
++    print("✓ Test with nested attrs passed (shallow copy behavior verified)")
++
++def test_merge_multiple_datasets():
++    """Test merging multiple datasets."""
++    ds1 = xr.Dataset(attrs={"source": "ds1"})
++    ds2 = xr.Dataset(attrs={"source": "ds2"})
++    ds3 = xr.Dataset(attrs={"source": "ds3"})
++    
++    merged = xr.merge([ds1, ds2, ds3], combine_attrs="override")
++    
++    # Should take attrs from first dataset
++    assert merged.attrs == {"source": "ds1"}
++    
++    # Modify merged attrs
++    merged.attrs["source"] = "merged"
++    
++    # All originals should be unchanged
++    assert ds1.attrs == {"source": "ds1"}
++    assert ds2.attrs == {"source": "ds2"}
++    assert ds3.attrs == {"source": "ds3"}
++    
++    print("✓ Test with multiple datasets passed")
++
++def test_merge_empty_attrs():
++    """Test merging with empty attrs."""
++    ds1 = xr.Dataset(attrs={})
++    ds2 = xr.Dataset(attrs={"key": "value"})
++    
++    # Merge with override - should get empty dict from ds1
++    ds3 = xr.merge([ds1, ds2], combine_attrs="override")
++    assert ds3.attrs == {}
++    
++    # Add attrs to merged dataset
++    ds3.attrs["new"] = "attr"
++    
++    # Original should still be empty
++    assert ds1.attrs == {}
++    
++    print("✓ Test with empty attrs passed")
++
++if __name__ == "__main__":
++    test_merge_attrs_override_with_data()
++    test_merge_attrs_override_nested()
++    test_merge_multiple_datasets()
++    test_merge_empty_attrs()
++    print("\nAll tests passed! ✓")
+diff --git a/test_merge_attrs_bug.py b/test_merge_attrs_bug.py
+new file mode 100644
+index 00000000..56ee7e8d
+--- /dev/null
++++ b/test_merge_attrs_bug.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Test script to reproduce the merge attrs bug."""
++
++import xarray as xr
++
++def test_merge_attrs_override_copy():
++    """Test that merge with combine_attrs='override' creates a copy of attrs."""
++    # Create test datasets
++    xds1 = xr.Dataset(attrs={'a': 'b'})
++    xds2 = xr.Dataset(attrs={'a': 'c'})
++    
++    print("Initial state:")
++    print(f"xds1.attrs: {xds1.attrs}")
++    print(f"xds2.attrs: {xds2.attrs}")
++    
++    # Merge with override
++    xds3 = xr.merge([xds1, xds2], combine_attrs='override')
++    
++    print("\nAfter merge:")
++    print(f"xds1.attrs: {xds1.attrs}")
++    print(f"xds2.attrs: {xds2.attrs}")
++    print(f"xds3.attrs: {xds3.attrs}")
++    
++    # Modify merged attrs
++    xds3.attrs['a'] = 'd'
++    
++    print("\nAfter modifying xds3.attrs['a'] = 'd':")
++    print(f"xds1.attrs: {xds1.attrs}")
++    print(f"xds2.attrs: {xds2.attrs}")
++    print(f"xds3.attrs: {xds3.attrs}")
++    
++    # Check if xds1.attrs was modified (it shouldn't be)
++    if xds1.attrs['a'] != 'b':
++        print("\nBUG: xds1.attrs was modified!")
++        return False
++    else:
++        print("\nSUCCESS: xds1.attrs was not modified!")
++        return True
++
++if __name__ == "__main__":
++    test_merge_attrs_override_copy()
+diff --git a/xarray/core/merge.py b/xarray/core/merge.py
+index ca4e29b6..dff00804 100644
+--- a/xarray/core/merge.py
++++ b/xarray/core/merge.py
+@@ -501,7 +501,7 @@ def merge_attrs(variable_attrs, combine_attrs):
+     if combine_attrs == "drop":
+         return {}
+     elif combine_attrs == "override":
+-        return variable_attrs[0]
++        return dict(variable_attrs[0])
+     elif combine_attrs == "no_conflicts":
+         result = dict(variable_attrs[0])
+         for attrs in variable_attrs[1:]:
+diff --git a/xarray/tests/test_merge.py b/xarray/tests/test_merge.py
+index 0994ed9a..67b6d60c 100644
+--- a/xarray/tests/test_merge.py
++++ b/xarray/tests/test_merge.py
+@@ -326,3 +326,19 @@ class TestMergeMethod:
+         da = xr.DataArray(data=1, name="b")
+ 
+         assert_identical(ds.merge(da), xr.merge([ds, da]))
++
++    def test_merge_attrs_override_copy(self):
++        # Test that merge with combine_attrs='override' creates a copy of attrs
++        # and doesn't modify the original dataset's attrs (see GH#4627)
++        ds1 = xr.Dataset(attrs={"a": "b"})
++        ds2 = xr.Dataset(attrs={"a": "c"})
++        
++        ds3 = xr.merge([ds1, ds2], combine_attrs="override")
++        
++        # Attrs should be copied from ds1
++        assert ds3.attrs == {"a": "b"}
++        
++        # Modifying ds3 attrs should not affect ds1
++        ds3.attrs["a"] = "d"
++        assert ds1.attrs == {"a": "b"}
++        assert ds3.attrs == {"a": "d"}

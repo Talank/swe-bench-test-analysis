@@ -1,0 +1,408 @@
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 6fe220bea7..0b25787ebc 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -522,8 +522,7 @@ class CheckboxInput(Input):
+ 
+     def get_context(self, name, value, attrs):
+         if self.check_test(value):
+-            if attrs is None:
+-                attrs = {}
++            attrs = {} if attrs is None else attrs.copy()
+             attrs['checked'] = True
+         return super().get_context(name, value, attrs)
+ 
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..34fa6be270
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,91 @@
++"""
++Final verification test for the CheckboxInput attrs modification fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.postgres',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import CheckboxInput
++
++
++def test_checkbox_attrs_isolation():
++    """Test that CheckboxInput doesn't leak state between invocations"""
++    widget = CheckboxInput()
++    
++    # Shared attrs dict - this simulates what happens in SplitArrayWidget
++    shared_attrs = {'class': 'form-check-input'}
++    
++    # First call with True value
++    context1 = widget.get_context('field1', True, shared_attrs)
++    assert context1['widget']['attrs']['checked'] is True
++    assert 'checked' not in shared_attrs, "Original attrs dict was modified!"
++    
++    # Second call with False value using the same attrs dict
++    context2 = widget.get_context('field2', False, shared_attrs)
++    assert 'checked' not in context2['widget']['attrs'], "False checkbox should not be checked!"
++    assert 'checked' not in shared_attrs, "Original attrs dict was modified!"
++    
++    print("PASS: CheckboxInput properly isolates attrs between calls")
++
++
++def test_multiwidget_scenario():
++    """Test the actual scenario that was failing with SplitArrayField"""
++    from django.forms.widgets import MultiWidget
++    
++    class TestMultiWidget(MultiWidget):
++        def __init__(self):
++            widgets = [CheckboxInput() for _ in range(5)]
++            super().__init__(widgets)
++        
++        def decompress(self, value):
++            if value:
++                return value
++            return [None] * 5
++    
++    widget = TestMultiWidget()
++    values = [True, False, True, False, False]
++    
++    # This simulates what SplitArrayWidget does
++    final_attrs = {'class': 'test'}
++    subwidgets = []
++    
++    for i, (w, value) in enumerate(zip(widget.widgets, values)):
++        # This is the problematic pattern - reusing final_attrs
++        context = w.get_context(f'field_{i}', value, final_attrs)
++        is_checked = context['widget']['attrs'].get('checked', False)
++        
++        print(f"Widget {i}: value={value}, checked={is_checked}, "
++              f"final_attrs has 'checked': {'checked' in final_attrs}")
++        
++        assert is_checked == value, f"Widget {i} checked state doesn't match value!"
++        assert 'checked' not in final_attrs, f"final_attrs was modified at widget {i}!"
++    
++    print("PASS: MultiWidget scenario works correctly")
++
++
++if __name__ == '__main__':
++    test_checkbox_attrs_isolation()
++    print()
++    test_multiwidget_scenario()
++    print("\nAll tests passed! The fix is working correctly.")
+diff --git a/test_splitarray_boolean.py b/test_splitarray_boolean.py
+new file mode 100644
+index 0000000000..268125c9ee
+--- /dev/null
++++ b/test_splitarray_boolean.py
+@@ -0,0 +1,32 @@
++from django import forms
++from django.contrib.postgres.forms import SplitArrayField
++
++# Test case to reproduce the issue
++def test_split_array_boolean_field():
++    # Create a SplitArrayField with BooleanField
++    field = SplitArrayField(forms.BooleanField(required=False), size=5)
++    
++    # Initial data with True, False, True, False, False
++    initial_data = [True, False, True, False, False]
++    
++    # Get the widget context
++    widget = field.widget
++    context = widget.get_context('test_field', initial_data, {})
++    
++    # Check the checked state of each subwidget
++    print("Testing SplitArrayField with BooleanField")
++    print("Initial data:", initial_data)
++    print("\nSubwidget checked states:")
++    
++    for i, subwidget in enumerate(context['widget']['subwidgets']):
++        is_checked = subwidget.get('attrs', {}).get('checked', False)
++        print(f"  Widget {i}: checked={is_checked}, expected={initial_data[i]}")
++        
++        # After the first True value, all subsequent widgets should not be checked
++        # unless their value is also True
++        if i > 0 and initial_data[i] is False:
++            if is_checked:
++                print(f"    ERROR: Widget {i} is checked but should not be!")
++
++if __name__ == "__main__":
++    test_split_array_boolean_field()
+diff --git a/test_splitarray_boolean_regression.py b/test_splitarray_boolean_regression.py
+new file mode 100644
+index 0000000000..d085cbfd6b
+--- /dev/null
++++ b/test_splitarray_boolean_regression.py
+@@ -0,0 +1,89 @@
++"""
++Test for the regression where SplitArrayField with BooleanField
++has all widgets checked after the first True value.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.postgres',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.contrib.postgres.forms.array import SplitArrayWidget, SplitArrayField
++from django.test import SimpleTestCase
++
++
++class SplitArrayBooleanFieldTest(SimpleTestCase):
++    def test_split_array_boolean_field_widget_attrs(self):
++        """
++        Test that SplitArrayField with BooleanField correctly sets checked
++        attribute for each widget based on its value, not carrying over
++        the checked state from previous widgets.
++        """
++        field = SplitArrayField(forms.BooleanField(required=False), size=5)
++        
++        # Test data with mixed True/False values
++        test_cases = [
++            ([True, False, True, False, False], "mixed values"),
++            ([False, False, False, False, False], "all False"),
++            ([True, True, True, True, True], "all True"),
++            ([False, True, False, True, False], "alternating values"),
++        ]
++        
++        for initial_data, description in test_cases:
++            with self.subTest(description=description):
++                widget = field.widget
++                context = widget.get_context('test_field', initial_data, {})
++                
++                for i, subwidget in enumerate(context['widget']['subwidgets']):
++                    is_checked = subwidget.get('attrs', {}).get('checked', False)
++                    expected = initial_data[i]
++                    
++                    self.assertEqual(
++                        is_checked, expected,
++                        f"Widget {i} should have checked={expected} for {description}"
++                    )
++    
++    def test_checkbox_input_does_not_modify_attrs(self):
++        """
++        Test that CheckboxInput.get_context() does not modify the attrs
++        dictionary passed to it.
++        """
++        from django.forms.widgets import CheckboxInput
++        
++        widget = CheckboxInput()
++        original_attrs = {'class': 'test-class', 'id': 'test-id'}
++        attrs_copy = original_attrs.copy()
++        
++        # Call get_context with value=True
++        widget.get_context('test', True, original_attrs)
++        
++        # The original attrs should not be modified
++        self.assertEqual(original_attrs, attrs_copy)
++        self.assertNotIn('checked', original_attrs)
++
++
++if __name__ == '__main__':
++    # Run the tests
++    test = SplitArrayBooleanFieldTest()
++    test.test_split_array_boolean_field_widget_attrs()
++    test.test_checkbox_input_does_not_modify_attrs()
++    print("All tests passed!")
+diff --git a/test_splitarray_boolean_simple.py b/test_splitarray_boolean_simple.py
+new file mode 100644
+index 0000000000..b7fab96b1d
+--- /dev/null
++++ b/test_splitarray_boolean_simple.py
+@@ -0,0 +1,90 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.postgres',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now we can import Django components
++from django import forms
++from django.contrib.postgres.forms.array import SplitArrayWidget, SplitArrayField
++
++# Test case to reproduce the issue
++def test_split_array_boolean_field():
++    print("Testing SplitArrayField with BooleanField")
++    print("=" * 50)
++    
++    # Create a SplitArrayField with BooleanField
++    field = SplitArrayField(forms.BooleanField(required=False), size=5)
++    
++    # Initial data with True, False, True, False, False
++    initial_data = [True, False, True, False, False]
++    
++    # Get the widget context
++    widget = field.widget
++    context = widget.get_context('test_field', initial_data, {})
++    
++    print(f"Initial data: {initial_data}")
++    print("\nSubwidget checked states:")
++    
++    has_error = False
++    for i, subwidget in enumerate(context['widget']['subwidgets']):
++        is_checked = subwidget.get('attrs', {}).get('checked', False)
++        expected = initial_data[i]
++        status = "OK" if is_checked == expected else "ERROR"
++        print(f"  Widget {i}: checked={is_checked}, expected={expected} {status}")
++        
++        if is_checked != expected:
++            has_error = True
++    
++    return not has_error
++
++def test_checkbox_input_modifies_attrs():
++    """Test that CheckboxInput modifies the attrs dict passed to it"""
++    print("\n\nTesting CheckboxInput attrs modification")
++    print("=" * 50)
++    
++    from django.forms.widgets import CheckboxInput
++    
++    widget = CheckboxInput()
++    attrs = {'class': 'test'}
++    
++    print(f"Original attrs: {attrs}")
++    print(f"attrs id: {id(attrs)}")
++    
++    # Call get_context with value=True
++    context = widget.get_context('test', True, attrs)
++    
++    print(f"After get_context with value=True:")
++    print(f"  attrs: {attrs}")
++    print(f"  attrs id: {id(attrs)}")
++    print(f"  'checked' in attrs: {'checked' in attrs}")
++    
++    # This demonstrates the problem - the original attrs dict is modified
++    return 'checked' not in attrs  # Should be True if attrs wasn't modified
++
++if __name__ == "__main__":
++    # Run tests
++    test1_passed = test_split_array_boolean_field()
++    test2_passed = test_checkbox_input_modifies_attrs()
++    
++    print("\n\nTest Results:")
++    print(f"SplitArrayField test: {'PASSED' if test1_passed else 'FAILED'}")
++    print(f"CheckboxInput attrs test: {'PASSED' if test2_passed else 'FAILED'}")
+diff --git a/tests/forms_tests/widget_tests/test_checkboxinput.py b/tests/forms_tests/widget_tests/test_checkboxinput.py
+index 6483b7f211..dbca767802 100644
+--- a/tests/forms_tests/widget_tests/test_checkboxinput.py
++++ b/tests/forms_tests/widget_tests/test_checkboxinput.py
+@@ -89,3 +89,26 @@ class CheckboxInputTest(WidgetTest):
+     def test_value_omitted_from_data(self):
+         self.assertIs(self.widget.value_omitted_from_data({'field': 'value'}, {}, 'field'), False)
+         self.assertIs(self.widget.value_omitted_from_data({}, {}, 'field'), False)
++
++    def test_get_context_does_not_modify_attrs(self):
++        """
++        get_context() should not modify the attrs dictionary passed to it.
++        This is a regression test for an issue where CheckboxInput modified
++        the attrs dict, which caused problems with SplitArrayField.
++        """
++        attrs = {'class': 'my-class', 'id': 'my-id'}
++        original_attrs = attrs.copy()
++        
++        # Test with checked=True
++        self.widget.get_context('field', True, attrs)
++        self.assertEqual(attrs, original_attrs)
++        self.assertNotIn('checked', attrs)
++        
++        # Test with checked=False
++        self.widget.get_context('field', False, attrs)
++        self.assertEqual(attrs, original_attrs)
++        self.assertNotIn('checked', attrs)
++        
++        # Test with None attrs
++        result = self.widget.get_context('field', True, None)
++        self.assertIn('checked', result['widget']['attrs'])
+diff --git a/tests/postgres_tests/test_array.py b/tests/postgres_tests/test_array.py
+index 481d93f830..9787175630 100644
+--- a/tests/postgres_tests/test_array.py
++++ b/tests/postgres_tests/test_array.py
+@@ -1130,3 +1130,32 @@ class TestSplitFormWidget(PostgreSQLWidgetTestCase):
+         self.assertIs(widget.value_omitted_from_data({'field_0': 'value'}, {}, 'field'), False)
+         self.assertIs(widget.value_omitted_from_data({'field_1': 'value'}, {}, 'field'), False)
+         self.assertIs(widget.value_omitted_from_data({'field_0': 'value', 'field_1': 'value'}, {}, 'field'), False)
++
++    def test_splitarrayfield_with_booleanfield_widget_attrs(self):
++        """
++        Test that SplitArrayField with BooleanField correctly sets the
++        'checked' attribute for each widget based on its individual value.
++        This is a regression test for when CheckboxInput modified the attrs
++        dict, causing all widgets after the first True to be checked.
++        """
++        class SplitArrayBooleanForm(forms.Form):
++            field = SplitArrayField(forms.BooleanField(required=False), size=5)
++        
++        form = SplitArrayBooleanForm(initial={'field': [True, False, True, False, False]})
++        widget_html = str(form['field'])
++        
++        # Count the number of 'checked' occurrences - should be 2 (for the two True values)
++        self.assertEqual(widget_html.count('checked'), 2)
++        
++        # More detailed check - ensure checkboxes have correct checked state
++        context = form['field'].field.widget.get_context(
++            'field', [True, False, True, False, False], {}
++        )
++        
++        expected_checked = [True, False, True, False, False]
++        for i, (subwidget, expected) in enumerate(zip(context['widget']['subwidgets'], expected_checked)):
++            is_checked = subwidget.get('attrs', {}).get('checked', False)
++            self.assertEqual(
++                is_checked, expected,
++                f"Widget {i} should have checked={expected}"
++            )

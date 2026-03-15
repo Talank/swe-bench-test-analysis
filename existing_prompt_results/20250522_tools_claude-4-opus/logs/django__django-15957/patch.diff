@@ -1,0 +1,605 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index be0deb90b0..1d17855e84 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -2448,6 +2448,19 @@ def prefetch_one_level(instances, prefetcher, lookup, level):
+     # The 'values to be matched' must be hashable as they will be used
+     # in a dictionary.
+ 
++    # Check if the queryset from the lookup is sliced
++    lookup_qs = lookup.get_current_queryset(level)
++    is_sliced = lookup_qs is not None and lookup_qs.query.is_sliced
++    if is_sliced:
++        # Save slice info before calling get_prefetch_queryset
++        low_mark = lookup_qs.query.low_mark
++        high_mark = lookup_qs.query.high_mark
++        # Clone without slice for get_prefetch_queryset
++        lookup_qs_no_slice = lookup_qs._chain()
++        lookup_qs_no_slice.query.clear_limits()
++    else:
++        lookup_qs_no_slice = lookup_qs
++    
+     (
+         rel_qs,
+         rel_obj_attr,
+@@ -2455,7 +2468,7 @@ def prefetch_one_level(instances, prefetcher, lookup, level):
+         single,
+         cache_name,
+         is_descriptor,
+-    ) = prefetcher.get_prefetch_queryset(instances, lookup.get_current_queryset(level))
++    ) = prefetcher.get_prefetch_queryset(instances, lookup_qs_no_slice)
+     # We have to handle the possibility that the QuerySet we just got back
+     # contains some prefetch_related lookups. We don't want to trigger the
+     # prefetch_related functionality by evaluating the query. Rather, we need
+@@ -2478,6 +2491,11 @@ def prefetch_one_level(instances, prefetcher, lookup, level):
+     for rel_obj in all_related_objects:
+         rel_attr_val = rel_obj_attr(rel_obj)
+         rel_obj_cache.setdefault(rel_attr_val, []).append(rel_obj)
++    
++    # If the original queryset was sliced, apply the slice to each group
++    if is_sliced:
++        for key, objects in rel_obj_cache.items():
++            rel_obj_cache[key] = objects[low_mark:high_mark]
+ 
+     to_attr, as_attr = lookup.get_current_to_attr(level)
+     # Make sure `to_attr` does not conflict with a field.
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..388743e432
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,114 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.db.models import Prefetch
++
++# Define test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Post(models.Model):
++    title = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['order', 'id']
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Post)
++
++# Test edge cases
++print("Test 1: Slice larger than available items")
++cat1 = Category.objects.create(name="Category 1")
++# Create only 2 posts
++Post.objects.create(title="Post 1", category=cat1)
++Post.objects.create(title="Post 2", category=cat1)
++
++categories = Category.objects.prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[:10],  # Requesting 10 but only 2 exist
++        to_attr='all_posts',
++    )
++)
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.all_posts)} posts (requested 10)")
++    
++print("\nTest 2: Negative slice indices")
++cat2 = Category.objects.create(name="Category 2")
++for i in range(5):
++    Post.objects.create(title=f"Post {i}", category=cat2)
++
++try:
++    categories = Category.objects.filter(id=cat2.id).prefetch_related(
++        Prefetch(
++            'post_set',
++            queryset=Post.objects.all()[-3:],  # Last 3 items
++            to_attr='last_three',
++        )
++    )
++    for cat in categories:
++        print(f"{cat.name}: {len(cat.last_three)} posts - {[p.title for p in cat.last_three]}")
++except Exception as e:
++    print(f"Negative slice error: {type(e).__name__}: {e}")
++
++print("\nTest 3: Step in slice")
++try:
++    categories = Category.objects.filter(id=cat2.id).prefetch_related(
++        Prefetch(
++            'post_set',
++            queryset=Post.objects.all()[::2],  # Every other item
++            to_attr='every_other',
++        )
++    )
++    for cat in categories:
++        print(f"{cat.name}: {len(cat.every_other)} posts - {[p.title for p in cat.every_other]}")
++except Exception as e:
++    print(f"Step slice error: {type(e).__name__}: {e}")
++
++print("\nTest 4: Empty slice [5:5]")
++categories = Category.objects.filter(id=cat2.id).prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[5:5],  # Empty slice
++        to_attr='empty_slice',
++    )
++)
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.empty_slice)} posts")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_prefetch_slice.py b/test_prefetch_slice.py
+new file mode 100644
+index 0000000000..0e4bf40c09
+--- /dev/null
++++ b/test_prefetch_slice.py
+@@ -0,0 +1,73 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.db.models import Prefetch
++
++# Define test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Post(models.Model):
++    title = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Post)
++
++# Create test data
++cat1 = Category.objects.create(name="Category 1")
++cat2 = Category.objects.create(name="Category 2")
++
++for i in range(10):
++    Post.objects.create(title=f"Post {i} in Cat 1", category=cat1)
++    Post.objects.create(title=f"Post {i} in Cat 2", category=cat2)
++
++# Try to reproduce the issue
++try:
++    categories = Category.objects.prefetch_related(
++        Prefetch(
++            'post_set',
++            queryset=Post.objects.all()[:3],
++            to_attr='example_posts',
++        )
++    )
++    
++    # Force evaluation
++    for cat in categories:
++        print(f"{cat.name}: {len(cat.example_posts)} posts")
++        
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_prefetch_slice_comprehensive.py b/test_prefetch_slice_comprehensive.py
+new file mode 100644
+index 0000000000..85bed5b8dd
+--- /dev/null
++++ b/test_prefetch_slice_comprehensive.py
+@@ -0,0 +1,133 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.db import models
++from django.db.models import Prefetch
++
++# Define test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Post(models.Model):
++    title = models.CharField(max_length=100)
++    category = models.ForeignKey(Category, on_delete=models.CASCADE)
++    order = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['order', 'id']
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Category)
++    schema_editor.create_model(Post)
++
++# Create test data
++cat1 = Category.objects.create(name="Category 1")
++cat2 = Category.objects.create(name="Category 2")
++cat3 = Category.objects.create(name="Category 3")
++
++# Create posts with specific order
++for i in range(10):
++    Post.objects.create(title=f"Post {i} in Cat 1", category=cat1, order=i)
++    Post.objects.create(title=f"Post {i} in Cat 2", category=cat2, order=i)
++    Post.objects.create(title=f"Post {i} in Cat 3", category=cat3, order=i)
++
++print("Test 1: Basic slice [:3]")
++categories = Category.objects.prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[:3],
++        to_attr='example_posts',
++    )
++).order_by('id')
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.example_posts)} posts - {[p.title for p in cat.example_posts]}")
++
++print("\nTest 2: Slice with offset [2:5]")
++categories = Category.objects.prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[2:5],
++        to_attr='example_posts_offset',
++    )
++).order_by('id')
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.example_posts_offset)} posts - {[p.title for p in cat.example_posts_offset]}")
++
++print("\nTest 3: Slice with ordering")
++categories = Category.objects.prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.order_by('-order')[:3],
++        to_attr='latest_posts',
++    )
++).order_by('id')
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.latest_posts)} posts - {[p.title for p in cat.latest_posts]}")
++
++print("\nTest 4: Multiple prefetches with slices")
++categories = Category.objects.prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[:2],
++        to_attr='first_two_posts',
++    ),
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[2:4],
++        to_attr='next_two_posts',
++    )
++).order_by('id')
++
++for cat in categories:
++    print(f"{cat.name}:")
++    print(f"  First two: {[p.title for p in cat.first_two_posts]}")
++    print(f"  Next two: {[p.title for p in cat.next_two_posts]}")
++
++print("\nTest 5: Empty slice result")
++# Create a category with no posts
++empty_cat = Category.objects.create(name="Empty Category")
++
++categories = Category.objects.filter(id=empty_cat.id).prefetch_related(
++    Prefetch(
++        'post_set',
++        queryset=Post.objects.all()[:3],
++        to_attr='example_posts',
++    )
++)
++
++for cat in categories:
++    print(f"{cat.name}: {len(cat.example_posts)} posts")
++
++print("\nAll tests completed successfully!")
+diff --git a/test_prefetch_slice_django.py b/test_prefetch_slice_django.py
+new file mode 100644
+index 0000000000..ef2eead896
+--- /dev/null
++++ b/test_prefetch_slice_django.py
+@@ -0,0 +1,106 @@
++"""
++Test for prefetch_related with sliced querysets
++"""
++from django.test import TestCase
++from django.db.models import Prefetch
++from prefetch_related.models import Author, Book
++
++
++class PrefetchSliceTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        # Create authors
++        cls.author1 = Author.objects.create(name="Author 1")
++        cls.author2 = Author.objects.create(name="Author 2")
++        cls.author3 = Author.objects.create(name="Author 3")
++        
++        # Create books for each author
++        for i in range(10):
++            Book.objects.create(title=f"Book {i} by Author 1").authors.add(cls.author1)
++            Book.objects.create(title=f"Book {i} by Author 2").authors.add(cls.author2)
++            Book.objects.create(title=f"Book {i} by Author 3").authors.add(cls.author3)
++    
++    def test_prefetch_with_slice(self):
++        """Test that prefetch_related works with sliced querysets."""
++        authors = Author.objects.prefetch_related(
++            Prefetch(
++                'books',
++                queryset=Book.objects.all()[:3],
++                to_attr='first_three_books'
++            )
++        ).order_by('id')
++        
++        # Check that each author has exactly 3 books
++        for author in authors:
++            self.assertEqual(len(author.first_three_books), 3)
++            # Check that the books belong to the correct author
++            for book in author.first_three_books:
++                self.assertIn(author.name, book.title)
++    
++    def test_prefetch_with_offset_slice(self):
++        """Test prefetch_related with offset in slice."""
++        authors = Author.objects.prefetch_related(
++            Prefetch(
++                'books',
++                queryset=Book.objects.all()[2:5],
++                to_attr='books_2_to_5'
++            )
++        ).order_by('id')
++        
++        for author in authors:
++            self.assertEqual(len(author.books_2_to_5), 3)
++            # Check that we got books 2, 3, and 4 (0-indexed)
++            book_numbers = []
++            for book in author.books_2_to_5:
++                # Extract the book number from title like "Book 2 by Author 1"
++                book_num = int(book.title.split()[1])
++                book_numbers.append(book_num)
++            self.assertEqual(sorted(book_numbers), [2, 3, 4])
++    
++    def test_prefetch_empty_slice(self):
++        """Test prefetch_related with slice on empty queryset."""
++        # Create an author with no books
++        empty_author = Author.objects.create(name="Empty Author")
++        
++        authors = Author.objects.filter(id=empty_author.id).prefetch_related(
++            Prefetch(
++                'books',
++                queryset=Book.objects.all()[:3],
++                to_attr='first_three_books'
++            )
++        )
++        
++        author = authors.first()
++        self.assertEqual(len(author.first_three_books), 0)
++    
++    def test_multiple_sliced_prefetches(self):
++        """Test multiple prefetch_related calls with different slices."""
++        authors = Author.objects.prefetch_related(
++            Prefetch(
++                'books',
++                queryset=Book.objects.all()[:2],
++                to_attr='first_two'
++            ),
++            Prefetch(
++                'books',
++                queryset=Book.objects.all()[2:4],
++                to_attr='next_two'
++            )
++        ).order_by('id')
++        
++        for author in authors:
++            self.assertEqual(len(author.first_two), 2)
++            self.assertEqual(len(author.next_two), 2)
++            # Ensure no overlap between the two sets
++            first_two_titles = {book.title for book in author.first_two}
++            next_two_titles = {book.title for book in author.next_two}
++            self.assertEqual(len(first_two_titles & next_two_titles), 0)
++
++
++if __name__ == '__main__':
++    from django.test.utils import setup_test_environment
++    setup_test_environment()
++    
++    from django.test import TestCase
++    suite = TestCase.TestLoader().loadTestsFromTestCase(PrefetchSliceTests)
++    TestCase.TestRunner().run(suite)
+diff --git a/tests/prefetch_related/tests.py b/tests/prefetch_related/tests.py
+index 1ac17fde73..ac41a2a435 100644
+--- a/tests/prefetch_related/tests.py
++++ b/tests/prefetch_related/tests.py
+@@ -1673,6 +1673,105 @@ class Ticket21410Tests(TestCase):
+         list(Author2.objects.prefetch_related("first_book", "favorite_books"))
+ 
+ 
++class PrefetchSliceTests(TestCase):
++    """Tests for prefetch_related with sliced querysets."""
++    
++    @classmethod
++    def setUpTestData(cls):
++        # Create books first
++        cls.books = []
++        for i in range(30):
++            book = Book.objects.create(title=f"Book {i}")
++            cls.books.append(book)
++        
++        # Create authors with their first book
++        cls.author1 = Author.objects.create(name="Slice Test Author 1", first_book=cls.books[0])
++        cls.author2 = Author.objects.create(name="Slice Test Author 2", first_book=cls.books[10])
++        cls.author3 = Author.objects.create(name="Slice Test Author 3", first_book=cls.books[20])
++        
++        # Add books to authors
++        for i in range(10):
++            cls.books[i].authors.add(cls.author1)
++            cls.books[i + 10].authors.add(cls.author2)
++            cls.books[i + 20].authors.add(cls.author3)
++    
++    def test_prefetch_with_slice(self):
++        """Test that prefetch_related works with sliced querysets."""
++        with self.assertNumQueries(2):
++            # 1 query for authors, 1 for prefetched books
++            authors = list(Author.objects.filter(name__startswith="Slice Test").prefetch_related(
++                Prefetch(
++                    'books',
++                    queryset=Book.objects.all()[:3],
++                    to_attr='first_three_books'
++                )
++            ).order_by('id'))
++        
++        # Check that each author has exactly 3 books
++        self.assertEqual(len(authors), 3)
++        for author in authors:
++            self.assertEqual(len(author.first_three_books), 3)
++    
++    def test_prefetch_with_offset_slice(self):
++        """Test prefetch_related with offset in slice."""
++        with self.assertNumQueries(2):
++            authors = list(Author.objects.filter(name__startswith="Slice Test").prefetch_related(
++                Prefetch(
++                    'books',
++                    queryset=Book.objects.all()[2:5],
++                    to_attr='books_2_to_5'
++                )
++            ).order_by('id'))
++        
++        self.assertEqual(len(authors), 3)
++        for author in authors:
++            self.assertEqual(len(author.books_2_to_5), 3)
++    
++    def test_prefetch_empty_slice(self):
++        """Test prefetch_related with slice on empty queryset."""
++        # Create an author with no books
++        empty_book = Book.objects.create(title="Empty Book")
++        empty_author = Author.objects.create(name="Empty Slice Author", first_book=empty_book)
++        
++        with self.assertNumQueries(2):
++            authors = list(Author.objects.filter(id=empty_author.id).prefetch_related(
++                Prefetch(
++                    'books',
++                    queryset=Book.objects.all()[:3],
++                    to_attr='first_three_books'
++                )
++            ))
++        
++        author = authors[0]
++        self.assertEqual(len(author.first_three_books), 0)
++    
++    def test_multiple_sliced_prefetches(self):
++        """Test multiple prefetch_related calls with different slices."""
++        with self.assertNumQueries(3):
++            # 1 query for authors, 2 for different book prefetches
++            authors = list(Author.objects.filter(name__startswith="Slice Test").prefetch_related(
++                Prefetch(
++                    'books',
++                    queryset=Book.objects.all()[:2],
++                    to_attr='first_two'
++                ),
++                Prefetch(
++                    'books',
++                    queryset=Book.objects.all()[2:4],
++                    to_attr='next_two'
++                )
++            ).order_by('id'))
++        
++        self.assertEqual(len(authors), 3)
++        for author in authors:
++            self.assertEqual(len(author.first_two), 2)
++            self.assertEqual(len(author.next_two), 2)
++            # Ensure no overlap between the two sets
++            first_two_titles = {book.title for book in author.first_two}
++            next_two_titles = {book.title for book in author.next_two}
++            self.assertEqual(len(first_two_titles & next_two_titles), 0)
++
++
+ class Ticket21760Tests(TestCase):
+     @classmethod
+     def setUpTestData(cls):

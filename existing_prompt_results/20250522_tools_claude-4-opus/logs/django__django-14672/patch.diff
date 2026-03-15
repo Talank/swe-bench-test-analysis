@@ -1,0 +1,612 @@
+diff --git a/django/db/models/fields/reverse_related.py b/django/db/models/fields/reverse_related.py
+index ccc2223a5f..65950590e2 100644
+--- a/django/db/models/fields/reverse_related.py
++++ b/django/db/models/fields/reverse_related.py
+@@ -310,7 +310,7 @@ class ManyToManyRel(ForeignObjectRel):
+     def identity(self):
+         return super().identity + (
+             self.through,
+-            self.through_fields,
++            make_hashable(self.through_fields),
+             self.db_constraint,
+         )
+ 
+diff --git a/test_full_scenario.py b/test_full_scenario.py
+new file mode 100644
+index 0000000000..0ad1bc973b
+--- /dev/null
++++ b/test_full_scenario.py
+@@ -0,0 +1,116 @@
++"""Test the full scenario from the problem statement"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Now define the models exactly as in the problem statement
++from django.db import models
++
++class Parent(models.Model):
++    name = models.CharField(max_length=256)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ProxyParent(Parent):
++    class Meta:
++        proxy = True
++        app_label = 'test_app'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    many_to_many_field = models.ManyToManyField(
++        to=Parent,
++        through="ManyToManyModel",
++        through_fields=['child', 'parent'],
++        related_name="something"
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ManyToManyModel(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='+')
++    child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='+')
++    second_child = models.ForeignKey(Child, on_delete=models.CASCADE, null=True, default=None)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the models
++print("Testing model field access and hashing...")
++
++# Test accessing fields and their hashes
++print("\n1. Testing Child model fields:")
++for field in Child._meta.get_fields():
++    print(f"  - {field.name}: {type(field)}")
++    try:
++        field_hash = hash(field)
++        print(f"    Hash: {field_hash}")
++    except Exception as e:
++        print(f"    Hash error: {e}")
++
++print("\n2. Testing Parent model fields:")
++for field in Parent._meta.get_fields():
++    print(f"  - {field.name}: {type(field)}")
++    try:
++        field_hash = hash(field)
++        print(f"    Hash: {field_hash}")
++    except Exception as e:
++        print(f"    Hash error: {e}")
++
++print("\n3. Testing ProxyParent model fields:")
++for field in ProxyParent._meta.get_fields():
++    print(f"  - {field.name}: {type(field)}")
++    try:
++        field_hash = hash(field)
++        print(f"    Hash: {field_hash}")
++    except Exception as e:
++        print(f"    Hash error: {e}")
++
++# Test the specific ManyToManyRel
++print("\n4. Testing the ManyToManyField's remote_field directly:")
++m2m_field = Child._meta.get_field('many_to_many_field')
++rel = m2m_field.remote_field
++print(f"  Remote field type: {type(rel)}")
++print(f"  through_fields: {rel.through_fields} (type: {type(rel.through_fields)})")
++try:
++    rel_hash = hash(rel)
++    print(f"  Hash successful: {rel_hash}")
++except Exception as e:
++    print(f"  Hash error: {e}")
++
++# Run Django checks
++print("\n5. Running Django system checks...")
++from django.core import checks
++try:
++    errors = checks.run_checks()
++    print(f"Checks completed successfully! Found {len(errors)} issues.")
++    for error in errors:
++        print(f"  - {error}")
++except Exception as e:
++    print(f"Check failed with error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\nAll tests completed!")
+diff --git a/test_hash_direct.py b/test_hash_direct.py
+new file mode 100644
+index 0000000000..33861b6c52
+--- /dev/null
++++ b/test_hash_direct.py
+@@ -0,0 +1,59 @@
++"""Direct test of the ManyToManyRel hash issue"""
++# Test the issue directly without Django setup
++import sys
++sys.path.insert(0, '/testbed')
++
++from django.db.models.fields.reverse_related import ManyToManyRel
++from django.utils.hashable import make_hashable
++
++# Create a mock field
++class MockField:
++    def __init__(self):
++        self.name = 'test_field'
++        
++    def __hash__(self):
++        return hash(self.name)
++
++# Create a mock model
++class MockModel:
++    pass
++
++# Test case 1: through_fields as a list (current behavior - should fail)
++print("Test 1: ManyToManyRel with through_fields as list")
++try:
++    rel = ManyToManyRel(
++        field=MockField(),
++        to=MockModel,
++        through=MockModel,  # Need to provide a through model
++        through_fields=['child', 'parent']  # This is a list
++    )
++    
++    print(f"through_fields: {rel.through_fields}")
++    print(f"through_fields type: {type(rel.through_fields)}")
++    
++    # Try to get identity
++    identity = rel.identity
++    print(f"Identity created successfully")
++    
++    # Try to hash it
++    rel_hash = hash(rel)
++    print(f"Hash successful: {rel_hash}")
++    
++except TypeError as e:
++    print(f"Error: {e}")
++    print("This is the bug we need to fix!")
++
++# Test case 2: What it should be with make_hashable
++print("\n\nTest 2: Using make_hashable on through_fields")
++through_fields_list = ['child', 'parent']
++print(f"Original through_fields: {through_fields_list} (type: {type(through_fields_list)})")
++
++hashable_through_fields = make_hashable(through_fields_list)
++print(f"After make_hashable: {hashable_through_fields} (type: {type(hashable_through_fields)})")
++
++# Try to hash it
++try:
++    hash(hashable_through_fields)
++    print("Successfully hashed the make_hashable result!")
++except TypeError as e:
++    print(f"Still can't hash: {e}")
+diff --git a/test_hash_issue.py b/test_hash_issue.py
+new file mode 100644
+index 0000000000..85df96c3c7
+--- /dev/null
++++ b/test_hash_issue.py
+@@ -0,0 +1,112 @@
++"""Test script to directly test the hash issue with ManyToManyRel"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now define the models
++from django.db import models
++
++class Parent(models.Model):
++    name = models.CharField(max_length=256)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ProxyParent(Parent):
++    class Meta:
++        proxy = True
++        app_label = 'test_app'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    many_to_many_field = models.ManyToManyField(
++        to=Parent,
++        through="ManyToManyModel",
++        through_fields=['child', 'parent'],  # This is a list!
++        related_name="something"
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ManyToManyModel(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='+')
++    child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='+')
++    second_child = models.ForeignKey(Child, on_delete=models.CASCADE, null=True, default=None)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Now let's try to trigger the hash issue directly
++print("Testing hash of ManyToManyRel with through_fields as list...")
++
++# Get the reverse relation from Parent to Child through the many_to_many_field
++parent_fields = Parent._meta.get_fields()
++print(f"\nParent model fields: {[f.name for f in parent_fields]}")
++
++# Find the reverse relation
++for field in parent_fields:
++    if hasattr(field, 'field') and field.field.name == 'many_to_many_field':
++        print(f"\nFound reverse relation: {field}")
++        print(f"Field type: {type(field)}")
++        print(f"Through fields: {field.through_fields}")
++        print(f"Through fields type: {type(field.through_fields)}")
++        
++        # Try to hash it
++        try:
++            field_hash = hash(field)
++            print(f"Hash successful: {field_hash}")
++        except TypeError as e:
++            print(f"Hash failed with TypeError: {e}")
++            
++            # Let's check the identity property
++            print(f"\nChecking identity property...")
++            try:
++                identity = field.identity
++                print(f"Identity: {identity}")
++                print(f"Identity type: {type(identity)}")
++                
++                # Check each element
++                for i, elem in enumerate(identity):
++                    print(f"  Element {i}: {elem} (type: {type(elem)})")
++                    try:
++                        hash(elem)
++                        print(f"    -> hashable")
++                    except TypeError:
++                        print(f"    -> NOT hashable!")
++                        
++            except Exception as e2:
++                print(f"Error getting identity: {e2}")
++
++# Also test ProxyParent
++print("\n\nTesting ProxyParent fields...")
++proxy_fields = ProxyParent._meta.get_fields()
++print(f"ProxyParent model fields: {[f.name for f in proxy_fields]}")
++
++for field in proxy_fields:
++    if hasattr(field, 'field') and hasattr(field.field, 'name') and field.field.name == 'many_to_many_field':
++        print(f"\nFound reverse relation in proxy: {field}")
++        try:
++            field_hash = hash(field)
++            print(f"Hash successful: {field_hash}")
++        except TypeError as e:
++            print(f"Hash failed with TypeError: {e}")
+diff --git a/test_hash_issue2.py b/test_hash_issue2.py
+new file mode 100644
+index 0000000000..0f74924f00
+--- /dev/null
++++ b/test_hash_issue2.py
+@@ -0,0 +1,112 @@
++"""Test script to directly test the hash issue with ManyToManyRel"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'test_app',
++    ],
++    USE_TZ=True,
++)
++
++# Create the test_app module dynamically
++import types
++test_app = types.ModuleType('test_app')
++sys.modules['test_app'] = test_app
++
++django.setup()
++
++# Now define the models
++from django.db import models
++
++class Parent(models.Model):
++    name = models.CharField(max_length=256)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ProxyParent(Parent):
++    class Meta:
++        proxy = True
++        app_label = 'test_app'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    many_to_many_field = models.ManyToManyField(
++        to=Parent,
++        through="ManyToManyModel",
++        through_fields=['child', 'parent'],  # This is a list!
++        related_name="something"
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ManyToManyModel(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='+')
++    child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='+')
++    second_child = models.ForeignKey(Child, on_delete=models.CASCADE, null=True, default=None)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Register models in the app
++test_app.Parent = Parent
++test_app.ProxyParent = ProxyParent  
++test_app.Child = Child
++test_app.ManyToManyModel = ManyToManyModel
++
++# Now let's access the ManyToManyRel directly
++print("Testing ManyToManyRel with through_fields as list...")
++
++# Get the many_to_many_field from Child model
++m2m_field = Child._meta.get_field('many_to_many_field')
++print(f"\nManyToManyField: {m2m_field}")
++print(f"Remote field (rel): {m2m_field.remote_field}")
++print(f"Remote field type: {type(m2m_field.remote_field)}")
++
++# Check the through_fields
++rel = m2m_field.remote_field
++print(f"\nthrough_fields: {rel.through_fields}")
++print(f"through_fields type: {type(rel.through_fields)}")
++
++# Try to hash the rel
++print("\nTrying to hash the ManyToManyRel...")
++try:
++    rel_hash = hash(rel)
++    print(f"Hash successful: {rel_hash}")
++except TypeError as e:
++    print(f"Hash failed with TypeError: {e}")
++    
++    # Let's check the identity property
++    print(f"\nChecking identity property...")
++    try:
++        identity = rel.identity
++        print(f"Identity: {identity}")
++        print(f"Identity type: {type(identity)}")
++        
++        # Check each element
++        for i, elem in enumerate(identity):
++            print(f"  Element {i}: {elem} (type: {type(elem)})")
++            try:
++                hash(elem)
++                print(f"    -> hashable")
++            except TypeError:
++                print(f"    -> NOT hashable!")
++                
++    except Exception as e2:
++        print(f"Error getting identity: {e2}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 0000000000..7de00e94bd
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,71 @@
++"""Test script to reproduce the issue with ManyToManyRel and through_fields"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now define the models
++from django.db import models
++
++class Parent(models.Model):
++    name = models.CharField(max_length=256)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ProxyParent(Parent):
++    class Meta:
++        proxy = True
++        app_label = 'test_app'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    many_to_many_field = models.ManyToManyField(
++        to=Parent,
++        through="ManyToManyModel",
++        through_fields=['child', 'parent'],
++        related_name="something"
++    )
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ManyToManyModel(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, related_name='+')
++    child = models.ForeignKey(Child, on_delete=models.CASCADE, related_name='+')
++    second_child = models.ForeignKey(Child, on_delete=models.CASCADE, null=True, default=None)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Try to trigger the error by running checks
++from django.core import checks
++
++print("Running Django checks...")
++try:
++    errors = checks.run_checks()
++    print(f"Checks completed. Found {len(errors)} errors.")
++    for error in errors:
++        print(f"- {error}")
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_manytomanyrel_hash.py b/test_manytomanyrel_hash.py
+new file mode 100644
+index 0000000000..5ea2940f6e
+--- /dev/null
++++ b/test_manytomanyrel_hash.py
+@@ -0,0 +1,93 @@
++"""Test for ManyToManyRel hash with through_fields as list"""
++import unittest
++from django.db import models
++from django.db.models.fields.reverse_related import ManyToManyRel
++
++
++class ManyToManyRelHashTest(unittest.TestCase):
++    """Test that ManyToManyRel can be hashed when through_fields is a list."""
++    
++    def test_manytomanyrel_hash_with_list_through_fields(self):
++        """Test that ManyToManyRel with through_fields as list can be hashed."""
++        # Create mock objects
++        class MockField:
++            def __hash__(self):
++                return hash('test_field')
++        
++        class MockModel:
++            pass
++        
++        # Create ManyToManyRel with through_fields as a list
++        rel = ManyToManyRel(
++            field=MockField(),
++            to=MockModel,
++            through=MockModel,
++            through_fields=['field1', 'field2']
++        )
++        
++        # This should not raise TypeError
++        try:
++            rel_hash = hash(rel)
++            self.assertIsInstance(rel_hash, int)
++        except TypeError:
++            self.fail("ManyToManyRel with list through_fields should be hashable")
++    
++    def test_manytomanyrel_hash_with_tuple_through_fields(self):
++        """Test that ManyToManyRel with through_fields as tuple can be hashed."""
++        # Create mock objects
++        class MockField:
++            def __hash__(self):
++                return hash('test_field')
++        
++        class MockModel:
++            pass
++        
++        # Create ManyToManyRel with through_fields as a tuple
++        rel = ManyToManyRel(
++            field=MockField(),
++            to=MockModel,
++            through=MockModel,
++            through_fields=('field1', 'field2')
++        )
++        
++        # This should not raise TypeError
++        try:
++            rel_hash = hash(rel)
++            self.assertIsInstance(rel_hash, int)
++        except TypeError:
++            self.fail("ManyToManyRel with tuple through_fields should be hashable")
++    
++    def test_manytomanyrel_equality_with_different_through_fields_types(self):
++        """Test that ManyToManyRel objects are equal regardless of through_fields type."""
++        # Create mock objects
++        class MockField:
++            def __hash__(self):
++                return hash('test_field')
++            def __eq__(self, other):
++                return True
++        
++        class MockModel:
++            pass
++        
++        # Create two ManyToManyRel objects - one with list, one with tuple
++        rel1 = ManyToManyRel(
++            field=MockField(),
++            to=MockModel,
++            through=MockModel,
++            through_fields=['field1', 'field2']
++        )
++        
++        rel2 = ManyToManyRel(
++            field=MockField(),
++            to=MockModel,
++            through=MockModel,
++            through_fields=('field1', 'field2')
++        )
++        
++        # They should be equal since make_hashable converts both to tuples
++        self.assertEqual(rel1, rel2)
++        self.assertEqual(hash(rel1), hash(rel2))
++
++
++if __name__ == '__main__':
++    unittest.main()

@@ -1,0 +1,752 @@
+diff --git a/debug_polyval_flow.py b/debug_polyval_flow.py
+new file mode 100644
+index 00000000..914a431b
+--- /dev/null
++++ b/debug_polyval_flow.py
+@@ -0,0 +1,57 @@
++import xarray as xr
++import numpy as np
++
++# Recreate the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++polyfit_coefficients = xr.DataArray(
++    [
++        [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++        [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++        [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++        [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++        [4.44739216e06, 1.45053974e06, 5.29960857e06],
++    ],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++)
++
++# Let's trace through polyval step by step
++print("Step 1: Input coord (azimuth_time DataArray)")
++print("Values:", azimuth_time.values)
++print("Dtype:", azimuth_time.dtype)
++
++# After _ensure_numeric
++from xarray.core.computation import _ensure_numeric
++numeric_coord = _ensure_numeric(azimuth_time)
++print("\nStep 2: After _ensure_numeric")
++print("Values:", numeric_coord.values)
++print("Dtype:", numeric_coord.dtype)
++
++# The issue might be that we're getting huge numbers because we're converting
++# datetime64 to nanoseconds since 1970-01-01
++print("\nDatetime values in nanoseconds since epoch:")
++print(numeric_coord.values)
++
++# But the expected behavior suggests we should be using smaller values
++# Let's check what the coordinate values would be if converted
++coord_vals = azimuth_time.coords["azimuth_time"].values
++print("\nCoordinate values (timedelta):", coord_vals)
++print("In nanoseconds:", coord_vals.astype('timedelta64[ns]').astype(np.int64))
++print("In seconds:", coord_vals / np.timedelta64(1, 's'))
++
++# The expected output from the issue suggests values around 4.4e6, 1.4e6, 5.3e6
++# These are much smaller than 1.6e18
+diff --git a/test_coordinate_preservation.py b/test_coordinate_preservation.py
+new file mode 100644
+index 00000000..1aa8706c
+--- /dev/null
++++ b/test_coordinate_preservation.py
+@@ -0,0 +1,31 @@
++import xarray as xr
++import numpy as np
++import pandas as pd
++
++# Simple test to understand coordinate preservation
++x = xr.DataArray([1, 2, 3], dims="x", coords={"x": [10, 20, 30]})
++coeffs = xr.DataArray([1, 2], dims="degree", coords={"degree": [0, 1]})
++
++print("Input x:")
++print(x)
++print("\nCoefficients:")
++print(coeffs)
++
++result = xr.polyval(x, coeffs)
++print("\nResult:")
++print(result)
++print("\nResult coordinates:")
++print(result.coords)
++
++# Now test with datetime coordinate
++dates = pd.date_range("2021-01-01", periods=3, freq="D")
++x_date = xr.DataArray([1, 2, 3], dims="time", coords={"time": dates})
++print("\n\nDatetime test:")
++print("Input x_date:")
++print(x_date)
++
++result_date = xr.polyval(x_date, coeffs)
++print("\nResult with datetime:")
++print(result_date)
++print("\nResult coordinates:")
++print(result_date.coords)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..68a868fa
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,49 @@
++import xarray as xr
++import numpy as np
++import pandas as pd
++
++# Test 1: DataArray without matching coordinate (should use data values)
++print("Test 1: DataArray without matching coordinate")
++x1 = xr.DataArray([1, 2, 3], dims="x")
++coeffs = xr.DataArray([1, 2], dims="degree", coords={"degree": [0, 1]})
++result1 = xr.polyval(x1, coeffs)
++print("Input:", x1.values)
++print("Result:", result1.values)
++print("Expected:", 1 + 2 * np.array([1, 2, 3]))
++print()
++
++# Test 2: DataArray with coordinate but not matching dim name (should use data values)
++print("Test 2: DataArray with coordinate but not matching dim name")
++x2 = xr.DataArray([1, 2, 3], dims="x", coords={"y": ("x", [10, 20, 30])})
++result2 = xr.polyval(x2, coeffs)
++print("Input:", x2.values)
++print("Result:", result2.values)
++print("Expected:", 1 + 2 * np.array([1, 2, 3]))
++print()
++
++# Test 3: DataArray with matching coordinate (should use coordinate values)
++print("Test 3: DataArray with matching coordinate")
++x3 = xr.DataArray([100, 200, 300], dims="x", coords={"x": [1, 2, 3]})
++result3 = xr.polyval(x3, coeffs)
++print("Data values:", x3.values)
++print("Coordinate values:", x3.coords["x"].values)
++print("Result:", result3.values)
++print("Expected (using coords):", 1 + 2 * np.array([1, 2, 3]))
++print()
++
++# Test 4: Dataset (should not be affected by our change)
++print("Test 4: Dataset")
++ds = xr.Dataset({"a": ("x", [1, 2, 3]), "b": ("x", [4, 5, 6])})
++coeffs_ds = xr.Dataset({"a": ("degree", [1, 2]), "b": ("degree", [0, 1])}, coords={"degree": [0, 1]})
++result4 = xr.polyval(ds, coeffs_ds)
++print("Result:", result4)
++print()
++
++# Test 5: The original datetime case from the issue
++print("Test 5: Original datetime case")
++dates = pd.date_range("1970-01-01", freq="s", periods=3)
++x5 = xr.DataArray(dates, dims="x")
++result5 = xr.polyval(x5, coeffs)
++print("Input dates:", dates)
++print("Result:", result5.values)
++print("Expected:", [1, 1 + 2e9, 1 + 4e9])  # 0, 1, 2 seconds in nanoseconds
+diff --git a/test_expected_behavior.py b/test_expected_behavior.py
+new file mode 100644
+index 00000000..8793ea36
+--- /dev/null
++++ b/test_expected_behavior.py
+@@ -0,0 +1,49 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++
++# Create coordinate values (timedelta)
++coord_values = values - values[0]
++print("Coordinate values (timedelta):", coord_values)
++print("In seconds:", coord_values / np.timedelta64(1, 's'))
++
++# Expected behavior: polyval should use coordinate values (0, 10, 20, 30, 40, 50 seconds)
++# Let's manually compute what the result should be
++
++polyfit_coefficients = np.array([
++    [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++    [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++    [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++    [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++    [4.44739216e06, 1.45053974e06, 5.29960857e06],
++])
++
++# Convert timedelta to seconds (numeric)
++x_values = np.array([0, 10, 20, 30, 40, 50], dtype=float)
++
++# Compute polynomial for each axis using Horner's method
++for axis in range(3):
++    coeffs = polyfit_coefficients[:, axis]
++    print(f"\nAxis {axis} coefficients:", coeffs)
++    
++    # Horner's method: start with highest degree coefficient
++    results = []
++    for x in x_values:
++        result = coeffs[0]  # degree 4
++        for i in range(1, 5):
++            result = result * x + coeffs[i]
++        results.append(result)
++    
++    print(f"Results for axis {axis}:", results)
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 00000000..d5e54fde
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,67 @@
++import xarray as xr
++import numpy as np
++import pandas as pd
++
++print("Testing various scenarios with polyval:")
++print("=" * 60)
++
++# Test 1: The original issue case
++print("\n1. Original issue case (datetime data with timedelta coordinate):")
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++polyfit_coefficients = xr.DataArray(
++    [[4.44739216e06, 1.45053974e06, 5.29960857e06]],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [0]},
++)
++result = xr.polyval(azimuth_time, polyfit_coefficients)
++print(f"Result shape: {result.shape}")
++print(f"First few values: {result.values[0, :3]}")
++print(f"Coordinate preserved: {result.coords['azimuth_time'].dtype}")
++
++# Test 2: Simple numeric case with coordinate
++print("\n2. Numeric data with different coordinate:")
++x = xr.DataArray([100, 200, 300], dims="x", coords={"x": [1, 2, 3]})
++coeffs = xr.DataArray([1, 1], dims="degree", coords={"degree": [0, 1]})
++result = xr.polyval(x, coeffs)
++print(f"Data: {x.values}, Coords: {x.coords['x'].values}")
++print(f"Result: {result.values} (should be 1 + 1*[1,2,3] = [2,3,4])")
++
++# Test 3: No coordinate case
++print("\n3. No coordinate case:")
++x_no_coord = xr.DataArray([1, 2, 3], dims="x")
++result = xr.polyval(x_no_coord, coeffs)
++print(f"Data: {x_no_coord.values}")
++print(f"Result: {result.values} (should be 1 + 1*[1,2,3] = [2,3,4])")
++
++# Test 4: Datetime case without timedelta coordinate
++print("\n4. Datetime case (standard):")
++dates = pd.date_range("1970-01-01", periods=3, freq="s")
++x_dates = xr.DataArray(dates, dims="time")
++coeffs_simple = xr.DataArray([0, 1], dims="degree", coords={"degree": [0, 1]})
++result = xr.polyval(x_dates, coeffs_simple)
++print(f"Dates: {dates}")
++print(f"Result: {result.values} (should be nanoseconds since epoch)")
++
++# Test 5: Multi-dimensional case
++print("\n5. Multi-dimensional case:")
++x_2d = xr.DataArray([[1, 2], [3, 4]], dims=["y", "x"], coords={"x": [10, 20], "y": [100, 200]})
++result = xr.polyval(x_2d, coeffs)
++print(f"Data shape: {x_2d.shape}")
++print(f"Result shape: {result.shape}")
++print(f"Result uses data values, not coordinates")
++
++print("\n" + "=" * 60)
++print("All tests completed successfully!")
+diff --git a/test_offset_issue.py b/test_offset_issue.py
+new file mode 100644
+index 00000000..d53b6c6c
+--- /dev/null
++++ b/test_offset_issue.py
+@@ -0,0 +1,26 @@
++import numpy as np
++from xarray.core.duck_array_ops import datetime_to_numeric
++
++# Test timedelta64 conversion with different offsets
++timedelta_values = np.array([0, 10000000000, 20000000000, 30000000000, 40000000000, 50000000000], dtype='timedelta64[ns]')
++
++print("Original timedelta values:", timedelta_values)
++print("In seconds:", timedelta_values / np.timedelta64(1, 's'))
++
++# Correct conversion (offset should be timedelta64(0))
++correct_numeric = datetime_to_numeric(timedelta_values, offset=np.timedelta64(0, 'ns'), datetime_unit='ns')
++print("\nCorrect conversion with timedelta64(0) offset:")
++print("Numeric values:", correct_numeric)
++
++# Wrong conversion (using datetime64 offset like in the bug)
++try:
++    wrong_offset = np.datetime64("1970-01-01")
++    print("\nTrying to subtract datetime64 offset from timedelta64...")
++    result = timedelta_values - wrong_offset
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Let's see what happens when datetime_to_numeric is called with None offset
++numeric_with_none = datetime_to_numeric(timedelta_values, offset=None, datetime_unit='ns')
++print("\nConversion with None offset (should auto-detect minimum):")
++print("Numeric values:", numeric_with_none)
+diff --git a/test_old_behavior.py b/test_old_behavior.py
+new file mode 100644
+index 00000000..b1a976b5
+--- /dev/null
++++ b/test_old_behavior.py
+@@ -0,0 +1,31 @@
++import xarray as xr
++import numpy as np
++from xarray.core.missing import get_clean_interp_index
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++print("azimuth_time DataArray:")
++print(azimuth_time)
++print("\nData values:", azimuth_time.values)
++print("Coordinate values:", azimuth_time.coords["azimuth_time"].values)
++
++# What does get_clean_interp_index return?
++x = get_clean_interp_index(azimuth_time, "azimuth_time", strict=False)
++print("\nget_clean_interp_index result:")
++print("Type:", type(x))
++print("Values:", x)
++print("In seconds:", x / 1e9)  # Convert nanoseconds to seconds
+diff --git a/test_polyval_coordinate.py b/test_polyval_coordinate.py
+new file mode 100644
+index 00000000..fb66c842
+--- /dev/null
++++ b/test_polyval_coordinate.py
+@@ -0,0 +1,45 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++
++# The key insight: in the original code, azimuth_time DataArray has:
++# - values: the datetime64 values
++# - coordinate 'azimuth_time': the timedelta64 values (relative to first)
++
++# Let's create the DataArray as in the issue
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++print("DataArray structure:")
++print("- azimuth_time.values:", azimuth_time.values)
++print("- azimuth_time.coords['azimuth_time'].values:", azimuth_time.coords['azimuth_time'].values)
++
++# The question is: should polyval use the coordinate values or the data values?
++# Based on the expected output, it seems polyval should use the COORDINATE values
++
++# Let's create a simpler test to understand
++simple_coord = xr.DataArray(
++    [100, 200, 300],  # data values
++    coords={"x": [0, 10, 20]}  # coordinate values
++)
++print("\nSimple example:")
++print("- simple_coord.values:", simple_coord.values)
++print("- simple_coord.coords['x'].values:", simple_coord.coords['x'].values)
++
++# Test polynomial coefficients (simple: y = 2*x + 1)
++simple_coeffs = xr.DataArray([2, 1], dims="degree", coords={"degree": [1, 0]})
++
++# What should polyval do? Use coordinate x values (0, 10, 20) or data values (100, 200, 300)?
+diff --git a/test_polyval_debug.py b/test_polyval_debug.py
+new file mode 100644
+index 00000000..729f844e
+--- /dev/null
++++ b/test_polyval_debug.py
+@@ -0,0 +1,34 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++print("azimuth_time DataArray:")
++print(azimuth_time)
++print("\nazimuth_time.data:", azimuth_time.data)
++print("azimuth_time.data dtype:", azimuth_time.data.dtype)
++
++# Let's manually convert the coordinate using _ensure_numeric
++from xarray.core.computation import _ensure_numeric
++
++# The issue is that polyval is passing the whole DataArray to _ensure_numeric
++# But the DataArray has datetime64 values, while the coordinate has timedelta64
++numeric_coord = _ensure_numeric(azimuth_time)
++print("\nAfter _ensure_numeric:")
++print(numeric_coord)
++print("numeric_coord.data:", numeric_coord.data)
++print("numeric_coord.coords['azimuth_time']:", numeric_coord.coords['azimuth_time'].data)
+diff --git a/test_polyval_issue.py b/test_polyval_issue.py
+new file mode 100644
+index 00000000..dcfa1128
+--- /dev/null
++++ b/test_polyval_issue.py
+@@ -0,0 +1,54 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++polyfit_coefficients = xr.DataArray(
++    [
++        [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++        [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++        [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++        [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++        [4.44739216e06, 1.45053974e06, 5.29960857e06],
++    ],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++)
++
++print("Input azimuth_time:")
++print(azimuth_time)
++print("\nInput azimuth_time coords:")
++print(azimuth_time.coords["azimuth_time"])
++print("\nInput azimuth_time dtype:")
++print(azimuth_time.coords["azimuth_time"].dtype)
++
++result = xr.polyval(azimuth_time, polyfit_coefficients)
++print("\nResult:")
++print(result)
++
++# Let's also test what happens when we manually convert timedelta to numeric
++from xarray.core.duck_array_ops import datetime_to_numeric
++
++coord_data = azimuth_time.coords["azimuth_time"].data
++print("\nCoordinate data type:", type(coord_data))
++print("Coordinate data dtype:", coord_data.dtype)
++print("Coordinate data values:", coord_data)
++
++# Convert to numeric
++numeric_data = datetime_to_numeric(coord_data, offset=np.timedelta64(0, 'ns'), datetime_unit='ns')
++print("\nNumeric data:", numeric_data)
++print("Numeric data dtype:", numeric_data.dtype)
+diff --git a/test_polyval_timedelta.py b/test_polyval_timedelta.py
+new file mode 100644
+index 00000000..8d70bc9f
+--- /dev/null
++++ b/test_polyval_timedelta.py
+@@ -0,0 +1,83 @@
++import pytest
++import numpy as np
++import xarray as xr
++
++
++def test_polyval_with_timedelta_coordinate():
++    """Test polyval with timedelta64 coordinates produces correct results.
++    
++    Regression test for issue where polyval with timedelta64 coordinates
++    produced wrong results after switching to Horner's algorithm.
++    """
++    # Create datetime values
++    values = np.array(
++        [
++            "2021-04-01T05:25:19.000000000",
++            "2021-04-01T05:25:29.000000000",
++            "2021-04-01T05:25:39.000000000",
++            "2021-04-01T05:25:49.000000000",
++            "2021-04-01T05:25:59.000000000",
++            "2021-04-01T05:26:09.000000000",
++        ],
++        dtype="datetime64[ns]",
++    )
++    
++    # Create DataArray with timedelta coordinate
++    azimuth_time = xr.DataArray(
++        values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++    )
++    
++    # Polynomial coefficients
++    polyfit_coefficients = xr.DataArray(
++        [
++            [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++            [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++            [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++            [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++            [4.44739216e06, 1.45053974e06, 5.29960857e06],
++        ],
++        dims=("degree", "axis"),
++        coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++    )
++    
++    # Compute result
++    result = xr.polyval(azimuth_time, polyfit_coefficients)
++    
++    # Expected values (from v2022.3.0)
++    expected = np.array([
++        [4447392.16      , 1450539.74      , 5299608.57      ],
++        [4505537.25588366, 1448882.82238152, 5250846.359196  ],
++        [4563174.92026797, 1446979.12250014, 5201491.44401733],
++        [4620298.31815291, 1444829.59596699, 5151549.377964  ],
++        [4676900.67053846, 1442435.23739315, 5101025.78153601],
++        [4732975.25442459, 1439797.08038974, 5049926.34223336]
++    ])
++    
++    # Check result
++    np.testing.assert_allclose(result.values.T, expected, rtol=1e-10)
++    
++    # Check that coordinate is preserved
++    assert result.coords["azimuth_time"].dtype == np.dtype("timedelta64[ns]")
++
++
++def test_polyval_preserves_coordinate_usage():
++    """Test that polyval uses coordinate values when available."""
++    # Test 1: DataArray with matching coordinate uses coordinate values
++    x = xr.DataArray([100, 200, 300], dims="x", coords={"x": [0, 10, 20]})
++    coeffs = xr.DataArray([1, 2], dims="degree", coords={"degree": [0, 1]})
++    result = xr.polyval(x, coeffs)
++    # Should use coordinate values [0, 10, 20], not data values [100, 200, 300]
++    expected = 1 + 2 * np.array([0, 10, 20])
++    np.testing.assert_array_equal(result.values, expected)
++    
++    # Test 2: DataArray without matching coordinate uses data values
++    x_no_coord = xr.DataArray([1, 2, 3], dims="x")
++    result_no_coord = xr.polyval(x_no_coord, coeffs)
++    expected_no_coord = 1 + 2 * np.array([1, 2, 3])
++    np.testing.assert_array_equal(result_no_coord.values, expected_no_coord)
++
++
++if __name__ == "__main__":
++    test_polyval_with_timedelta_coordinate()
++    test_polyval_preserves_coordinate_usage()
++    print("All tests passed!")
+diff --git a/test_real_issue.py b/test_real_issue.py
+new file mode 100644
+index 00000000..0274bfe8
+--- /dev/null
++++ b/test_real_issue.py
+@@ -0,0 +1,56 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++
++# Version 1: Using timedelta coordinate (as in the issue)
++azimuth_time_td = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++# Version 2: Using datetime coordinate (what might have been expected)
++azimuth_time_dt = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values}
++)
++
++polyfit_coefficients = xr.DataArray(
++    [
++        [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++        [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++        [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++        [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++        [4.44739216e06, 1.45053974e06, 5.29960857e06],
++    ],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++)
++
++print("Test 1: With timedelta coordinate (as in issue)")
++print("Coordinate type:", azimuth_time_td.coords["azimuth_time"].dtype)
++result_td = xr.polyval(azimuth_time_td, polyfit_coefficients)
++print("Result shape:", result_td.shape)
++print("Result values (first few):", result_td.values[:, :2])
++
++print("\n\nTest 2: With datetime coordinate")
++print("Coordinate type:", azimuth_time_dt.coords["azimuth_time"].dtype)
++result_dt = xr.polyval(azimuth_time_dt, polyfit_coefficients)
++print("Result shape:", result_dt.shape)
++print("Result values (first few):", result_dt.values[:, :2])
++
++# Let's also test what the expected values would be if we use seconds (0, 10, 20, 30, 40, 50)
++seconds = xr.DataArray([0, 10, 20, 30, 40, 50], dims="time")
++print("\n\nTest 3: With seconds directly")
++result_seconds = xr.polyval(seconds, polyfit_coefficients)
++print("Result shape:", result_seconds.shape)
++print("Result values:", result_seconds.values)
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 00000000..9948a985
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,50 @@
++import xarray as xr
++import numpy as np
++
++# Test case from the issue
++values = np.array(
++    [
++        "2021-04-01T05:25:19.000000000",
++        "2021-04-01T05:25:29.000000000",
++        "2021-04-01T05:25:39.000000000",
++        "2021-04-01T05:25:49.000000000",
++        "2021-04-01T05:25:59.000000000",
++        "2021-04-01T05:26:09.000000000",
++    ],
++    dtype="datetime64[ns]",
++)
++azimuth_time = xr.DataArray(
++    values, name="azimuth_time", coords={"azimuth_time": values - values[0]}
++)
++
++polyfit_coefficients = xr.DataArray(
++    [
++        [2.33333335e-43, 1.62499999e-43, 2.79166678e-43],
++        [-1.15316667e-30, 1.49518518e-31, 9.08833333e-31],
++        [-2.50272583e-18, -1.23851062e-18, -2.99098229e-18],
++        [5.83965193e-06, -1.53321770e-07, -4.84640242e-06],
++        [4.44739216e06, 1.45053974e06, 5.29960857e06],
++    ],
++    dims=("degree", "axis"),
++    coords={"axis": [0, 1, 2], "degree": [4, 3, 2, 1, 0]},
++)
++
++result = xr.polyval(azimuth_time, polyfit_coefficients)
++
++# Expected values from the issue
++expected = np.array([
++    [4447392.16      , 1450539.74      , 5299608.57      ],
++    [4505537.25588366, 1448882.82238152, 5250846.359196  ],
++    [4563174.92026797, 1446979.12250014, 5201491.44401733],
++    [4620298.31815291, 1444829.59596699, 5151549.377964  ],
++    [4676900.67053846, 1442435.23739315, 5101025.78153601],
++    [4732975.25442459, 1439797.08038974, 5049926.34223336]
++])
++
++print("Result shape:", result.shape)
++print("Expected shape:", expected.shape)
++print("\nResult values:")
++print(result.values.T)  # Transpose to match expected format
++print("\nExpected values:")
++print(expected)
++print("\nAre they close?", np.allclose(result.values.T, expected))
+diff --git a/xarray/core/computation.py b/xarray/core/computation.py
+index 823cbe02..0c33bbde 100644
+--- a/xarray/core/computation.py
++++ b/xarray/core/computation.py
+@@ -1905,6 +1905,20 @@ def polyval(
+     coeffs = coeffs.reindex(
+         {degree_dim: np.arange(max_deg + 1)}, fill_value=0, copy=False
+     )
++    
++    # If coord is a DataArray with a single dimension and a coordinate matching that dimension name,
++    # use the coordinate values instead of the data values (preserves old behavior)
++    from .dataarray import DataArray
++    from .dataset import Dataset
++    if isinstance(coord, DataArray) and coord.ndim == 1:
++        # Check if the DataArray has a coordinate with the same name as its dimension
++        dim = coord.dims[0]
++        if dim in coord.coords:
++            # Use the coordinate values like the old implementation did via get_clean_interp_index
++            coord_values = coord.coords[dim]
++            # Create a new DataArray with the coordinate values as data
++            coord = DataArray(coord_values.values, dims=coord.dims, coords=coord.coords, name=coord.name)
++    
+     coord = _ensure_numeric(coord)  # type: ignore # https://github.com/python/mypy/issues/1533 ?
+ 
+     # using Horner's method
+@@ -1934,10 +1948,15 @@ def _ensure_numeric(data: T_Xarray) -> T_Xarray:
+ 
+     def to_floatable(x: DataArray) -> DataArray:
+         if x.dtype.kind in "mM":
++            # Use appropriate offset based on dtype kind
++            if x.dtype.kind == "M":  # datetime64
++                offset = np.datetime64("1970-01-01")
++            else:  # timedelta64
++                offset = np.timedelta64(0, "ns")
+             return x.copy(
+                 data=datetime_to_numeric(
+                     x.data,
+-                    offset=np.datetime64("1970-01-01"),
++                    offset=offset,
+                     datetime_unit="ns",
+                 ),
+             )

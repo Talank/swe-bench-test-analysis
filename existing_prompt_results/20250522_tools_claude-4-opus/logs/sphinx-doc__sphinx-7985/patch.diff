@@ -1,0 +1,487 @@
+diff --git a/sphinx/builders/linkcheck.py b/sphinx/builders/linkcheck.py
+index dd5317087..5ffb2cfc1 100644
+--- a/sphinx/builders/linkcheck.py
++++ b/sphinx/builders/linkcheck.py
+@@ -208,21 +208,61 @@ class CheckExternalLinksBuilder(Builder):
+                 else:
+                     return 'redirected', new_url, 0
+ 
++        def check_local_uri(local_uri: str) -> Tuple[str, str, int]:
++            """Check if a local URI (document reference) is valid."""
++            # Split off anchor if present
++            if '#' in local_uri:
++                doc_name, anchor = local_uri.split('#', 1)
++            else:
++                doc_name = local_uri
++                anchor = None
++            
++            # Remove .html extension if present
++            if doc_name.endswith('.html'):
++                doc_name = doc_name[:-5]
++            
++            # Check if document exists in the environment
++            if doc_name and doc_name not in self.env.all_docs:
++                return 'broken', __('document not found: %s') % doc_name, 0
++            
++            # If there's an anchor, we need to check if it exists in the target document
++            if anchor and doc_name:
++                # Get the doctree for the target document
++                try:
++                    target_doctree = self.env.get_doctree(doc_name)
++                    # Look for the anchor in ids
++                    found = False
++                    for node in target_doctree.traverse():
++                        if hasattr(node, 'get') and node.get('ids') and anchor in node['ids']:
++                            found = True
++                            break
++                    if not found:
++                        return 'broken', __('anchor not found: %s') % anchor, 0
++                except Exception as e:
++                    # If we can't load the doctree, consider it broken
++                    return 'broken', __('could not check anchor in document: %s') % doc_name, 0
++            
++            return 'working', '', 0
++
+         def check() -> Tuple[str, str, int]:
+             # check for various conditions without bothering the network
+             if len(uri) == 0 or uri.startswith(('#', 'mailto:', 'ftp:')):
+                 return 'unchecked', '', 0
+-            elif not uri.startswith(('http:', 'https:')):
+-                return 'local', '', 0
++            
++            # Check ignore patterns first (for both local and external links)
++            for rex in self.to_ignore:
++                if rex.match(uri):
++                    return 'ignored', '', 0
++            
++            if not uri.startswith(('http:', 'https:')):
++                # Check local links instead of just marking them as 'local'
++                return check_local_uri(uri)
+             elif uri in self.good:
+                 return 'working', 'old', 0
+             elif uri in self.broken:
+                 return 'broken', self.broken[uri], 0
+             elif uri in self.redirected:
+                 return 'redirected', self.redirected[uri][0], self.redirected[uri][1]
+-            for rex in self.to_ignore:
+-                if rex.match(uri):
+-                    return 'ignored', '', 0
+ 
+             # need to actually check the URI
+             for _ in range(self.app.config.linkcheck_retries):
+@@ -267,10 +307,6 @@ class CheckExternalLinksBuilder(Builder):
+             else:
+                 logger.info(darkgray('-ignored- ') + uri)
+             self.write_linkstat(linkstat)
+-        elif status == 'local':
+-            logger.info(darkgray('-local-   ') + uri)
+-            self.write_entry('local', docname, filename, lineno, uri)
+-            self.write_linkstat(linkstat)
+         elif status == 'working':
+             logger.info(darkgreen('ok        ') + uri + info)
+             self.write_linkstat(linkstat)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..d38bf3c98
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,74 @@
++"""Test edge cases for local link checking."""
++
++import os
++import tempfile
++from sphinx.cmd.build import main as sphinx_build
++
++def test_edge_cases():
++    """Test edge cases for local link checking."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test files
++        index_rst = os.path.join(tmpdir, 'index.rst')
++        conf_py = os.path.join(tmpdir, 'conf.py')
++        
++        # Write conf.py
++        with open(conf_py, 'w') as f:
++            f.write("""
++project = 'Test'
++master_doc = 'index'
++""")
++        
++        # Write index.rst with edge cases
++        with open(index_rst, 'w') as f:
++            f.write("""Test Document
++=============
++
++Edge Cases
++----------
++
++1. Empty link: empty-link_
++2. Self reference: self-ref_
++3. Fragment only: `#some-anchor`_
++4. Mailto link: `mailto:test@example.com`_
++5. FTP link: `ftp://example.com/file`_
++6. Link with spaces: `link with spaces`_
++7. Link with special chars: `link-with-special-chars!@#$%`_
++
++.. _empty-link: 
++.. _self-ref: index
++.. _#some-anchor: #anchor
++.. _mailto\:test@example.com: mailto:test@example.com
++.. _ftp\://example.com/file: ftp://example.com/file
++.. _link with spaces: document with spaces
++.. _link-with-special-chars!@#$%: special!@#$%
++""")
++        
++        # Build with linkcheck
++        outdir = os.path.join(tmpdir, '_build')
++        argv = ['-b', 'linkcheck', tmpdir, outdir]
++        
++        print(f"Running sphinx-build with args: {argv}")
++        result = sphinx_build(argv)
++        
++        # Check output
++        output_file = os.path.join(outdir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.txt:")
++                print(content)
++                print("\n" + "="*60 + "\n")
++        
++        # Also check JSON output
++        json_file = os.path.join(outdir, 'output.json')
++        if os.path.exists(json_file):
++            with open(json_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.json:")
++                for line in content.splitlines():
++                    print(line)
++
++if __name__ == '__main__':
++    test_edge_cases()
+diff --git a/test_linkcheck_ignore.py b/test_linkcheck_ignore.py
+new file mode 100644
+index 000000000..0f4f4e86d
+--- /dev/null
++++ b/test_linkcheck_ignore.py
+@@ -0,0 +1,77 @@
++"""Test that linkcheck_ignore configuration still works with local links."""
++
++import os
++import tempfile
++from sphinx.cmd.build import main as sphinx_build
++
++def test_linkcheck_ignore():
++    """Test that linkcheck_ignore works for local links."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test files
++        index_rst = os.path.join(tmpdir, 'index.rst')
++        conf_py = os.path.join(tmpdir, 'conf.py')
++        
++        # Write conf.py with linkcheck_ignore
++        with open(conf_py, 'w') as f:
++            f.write("""
++project = 'Test'
++master_doc = 'index'
++linkcheck_ignore = [
++    r'.*ignore.*',  # Ignore any link containing 'ignore'
++    r'https://example\.com',  # Ignore specific domain
++]
++""")
++        
++        # Write index.rst
++        with open(index_rst, 'w') as f:
++            f.write("""Test Document
++=============
++
++Links to test ignore patterns:
++
++1. `Should be ignored (local) <ignore-this-doc.html>`_
++2. `Should be checked (local) <check-this-doc.html>`_
++3. `Should be ignored (external) <https://example.com/page>`_
++4. `Should be checked (external) <https://python.org>`_
++5. ignore-link_
++6. check-link_
++
++.. _ignore-link: ignore-this-doc
++.. _check-link: check-this-doc
++""")
++        
++        # Build with linkcheck
++        outdir = os.path.join(tmpdir, '_build')
++        argv = ['-b', 'linkcheck', tmpdir, outdir]
++        
++        print(f"Running sphinx-build with args: {argv}")
++        result = sphinx_build(argv)
++        
++        # Check output
++        output_file = os.path.join(outdir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.txt:")
++                print(content)
++                
++                # Verify that ignored links are not in the broken list
++                assert 'ignore-this-doc' not in content or 'ignored' in content
++                assert 'example.com' not in content or 'ignored' in content
++                
++                # Verify that non-ignored links are checked
++                assert 'check-this-doc' in content
++                
++        # Also check JSON output
++        json_file = os.path.join(outdir, 'output.json')
++        if os.path.exists(json_file):
++            with open(json_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.json:")
++                for line in content.splitlines():
++                    print(line)
++
++if __name__ == '__main__':
++    test_linkcheck_ignore()
+diff --git a/test_local_links.py b/test_local_links.py
+new file mode 100644
+index 000000000..8a8b38049
+--- /dev/null
++++ b/test_local_links.py
+@@ -0,0 +1,66 @@
++"""Test script to reproduce the local link checking issue."""
++
++import os
++import tempfile
++import shutil
++from sphinx.cmd.build import main as sphinx_build
++
++def test_local_links():
++    """Test that linkcheck should check local (internal) links."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test files
++        index_rst = os.path.join(tmpdir, 'index.rst')
++        conf_py = os.path.join(tmpdir, 'conf.py')
++        
++        # Write conf.py
++        with open(conf_py, 'w') as f:
++            f.write("""
++project = 'Test'
++master_doc = 'index'
++""")
++        
++        # Write index.rst with broken local and external links
++        with open(index_rst, 'w') as f:
++            f.write("""Test Document
++=============
++
++broken external-link_
++broken local-link_
++
++.. _external-link: https://lkfqhlkghflkhs
++.. _local-link: doesntexist
++""")
++        
++        # Build with linkcheck
++        outdir = os.path.join(tmpdir, '_build')
++        argv = ['-b', 'linkcheck', tmpdir, outdir]
++        
++        print(f"Running sphinx-build with args: {argv}")
++        result = sphinx_build(argv)
++        
++        # Check output
++        output_file = os.path.join(outdir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.txt:")
++                print(content)
++                
++                # Check if local link is reported
++                if 'doesntexist' in content:
++                    print("\n✓ Local link 'doesntexist' is being checked!")
++                else:
++                    print("\n✗ Local link 'doesntexist' is NOT being checked!")
++        
++        # Also check JSON output
++        json_file = os.path.join(outdir, 'output.json')
++        if os.path.exists(json_file):
++            with open(json_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.json:")
++                print(content)
++
++if __name__ == '__main__':
++    test_local_links()
+diff --git a/test_local_links_detailed.py b/test_local_links_detailed.py
+new file mode 100644
+index 000000000..faa26ca0c
+--- /dev/null
++++ b/test_local_links_detailed.py
+@@ -0,0 +1,88 @@
++"""Test script to understand different types of local links."""
++
++import os
++import tempfile
++from sphinx.cmd.build import main as sphinx_build
++
++def test_local_links_detailed():
++    """Test different types of local links."""
++    
++    # Create a temporary directory
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create test files
++        index_rst = os.path.join(tmpdir, 'index.rst')
++        existing_rst = os.path.join(tmpdir, 'existing.rst')
++        conf_py = os.path.join(tmpdir, 'conf.py')
++        
++        # Write conf.py
++        with open(conf_py, 'w') as f:
++            f.write("""
++project = 'Test'
++master_doc = 'index'
++""")
++        
++        # Write existing.rst
++        with open(existing_rst, 'w') as f:
++            f.write("""Existing Document
++=================
++
++.. _existing-anchor:
++
++This is an existing document with an anchor.
++""")
++        
++        # Write index.rst with various types of links
++        with open(index_rst, 'w') as f:
++            f.write("""Test Document
++=============
++
++External Links
++--------------
++
++1. broken-external-link_
++2. `Working external <https://www.python.org>`_
++
++Local Links
++-----------
++
++3. broken-local-link_
++4. working-local-link_
++5. :doc:`existing`
++6. :doc:`nonexisting`
++7. `Link to existing doc <existing.html>`_
++8. `Link to non-existing doc <nonexisting.html>`_
++9. `Link to anchor in existing doc <existing.html#existing-anchor>`_
++10. `Link to anchor in non-existing doc <nonexisting.html#some-anchor>`_
++
++.. _broken-external-link: https://lkfqhlkghflkhs
++.. _broken-local-link: nonexisting
++.. _working-local-link: existing
++""")
++        
++        # Build with linkcheck
++        outdir = os.path.join(tmpdir, '_build')
++        argv = ['-b', 'linkcheck', tmpdir, outdir]
++        
++        print(f"Running sphinx-build with args: {argv}")
++        result = sphinx_build(argv)
++        
++        # Check output
++        output_file = os.path.join(outdir, 'output.txt')
++        if os.path.exists(output_file):
++            with open(output_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.txt:")
++                print(content)
++                print("\n" + "="*60 + "\n")
++        
++        # Also check JSON output
++        json_file = os.path.join(outdir, 'output.json')
++        if os.path.exists(json_file):
++            with open(json_file, 'r') as f:
++                content = f.read()
++                print("\nLinkcheck output.json:")
++                for line in content.splitlines():
++                    print(line)
++
++if __name__ == '__main__':
++    test_local_links_detailed()
+diff --git a/tests/roots/test-linkcheck-locallinks/conf.py b/tests/roots/test-linkcheck-locallinks/conf.py
+new file mode 100644
+index 000000000..47276830a
+--- /dev/null
++++ b/tests/roots/test-linkcheck-locallinks/conf.py
+@@ -0,0 +1,2 @@
++"""Test configuration file."""
++master_doc = 'index'
+diff --git a/tests/roots/test-linkcheck-locallinks/existing.rst b/tests/roots/test-linkcheck-locallinks/existing.rst
+new file mode 100644
+index 000000000..1e0f8d7b2
+--- /dev/null
++++ b/tests/roots/test-linkcheck-locallinks/existing.rst
+@@ -0,0 +1,6 @@
++Existing Document
++=================
++
++.. _some-anchor:
++
++This is an existing document with an anchor.
+diff --git a/tests/roots/test-linkcheck-locallinks/index.rst b/tests/roots/test-linkcheck-locallinks/index.rst
+new file mode 100644
+index 000000000..c9b1dff1b
+--- /dev/null
++++ b/tests/roots/test-linkcheck-locallinks/index.rst
+@@ -0,0 +1,19 @@
++Test Local Link Checking
++========================
++
++External links:
++
++* `Python.org <https://www.python.org>`_
++* `Broken external <https://thisdomaindoesnotexist12345.com>`_
++
++Local links:
++
++* working-local-link_
++* broken-local-link_
++* `Link to existing doc <existing.html>`_
++* `Link to non-existing doc <nonexisting.html>`_
++* `Link with anchor to existing doc <existing.html#some-anchor>`_
++* `Link with anchor to non-existing doc <broken.html#some-anchor>`_
++
++.. _working-local-link: existing
++.. _broken-local-link: nonexisting
+diff --git a/tests/test_local_link_checking.py b/tests/test_local_link_checking.py
+new file mode 100644
+index 000000000..65cc2a7fd
+--- /dev/null
++++ b/tests/test_local_link_checking.py
+@@ -0,0 +1,25 @@
++"""Test that local links are properly checked by linkcheck builder."""
++
++import pytest
++from sphinx.testing.path import path
++
++
++@pytest.mark.sphinx('linkcheck', testroot='linkcheck-locallinks', freshenv=True)
++def test_local_link_checking(app, status, warning):
++    """Test that local links are checked and broken ones are reported."""
++    app.builder.build_all()
++
++    assert (app.outdir / 'output.txt').exists()
++    content = (app.outdir / 'output.txt').read_text()
++    
++    # Check that broken local links are reported
++    assert "document not found: nonexisting" in content
++    assert "document not found: broken" in content
++    
++    # Check that working local links are not reported as broken
++    assert "document not found: existing" not in content
++    
++    # Check JSON output
++    json_content = (app.outdir / 'output.json').read_text()
++    assert '"status": "broken"' in json_content
++    assert '"info": "document not found: nonexisting"' in json_content

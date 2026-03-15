@@ -1,0 +1,275 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..98565f77
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,21 @@
++import numpy as np
++from xarray import DataArray
++
++# Create test data
++empty = np.zeros((2,2))
++D1 = DataArray(empty, dims=['dim1', 'dim2'],   coords={'dim1':['x', 'y'], 'dim2':['a', 'b']})
++D2 = DataArray(empty, dims=['dim1', 'method'], coords={'dim1':['x', 'y'], 'method':['a', 'b']})
++
++print("Testing D1.loc[dict(dim1='x', dim2='a')]:")
++try:
++    result1 = D1.loc[dict(dim1='x', dim2='a')]
++    print("Success:", result1)
++except Exception as e:
++    print("Error:", type(e).__name__, str(e))
++
++print("\nTesting D2.loc[dict(dim1='x', method='a')]:")
++try:
++    result2 = D2.loc[dict(dim1='x', method='a')]
++    print("Success:", result2)
++except Exception as e:
++    print("Error:", type(e).__name__, str(e))
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..bd3ed0c3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,76 @@
++"""Test edge cases for the method dimension fix"""
++import numpy as np
++import pytest
++from xarray import DataArray, Dataset
++
++
++def test_method_dimension_with_actual_method_parameter():
++    """Test that we can still use the method parameter when needed"""
++    # Create a DataArray with missing values
++    data = np.array([1.0, np.nan, 3.0, np.nan, 5.0])
++    da = DataArray(data, dims=['x'], coords={'x': [0, 1, 2, 3, 4]})
++    
++    # Test that we can still use method parameter for interpolation
++    # This should work because we're not using 'method' as a dimension name
++    result = da.sel(x=1.5, method='nearest')
++    assert result.values == 3.0  # Should select the nearest non-NaN value
++
++
++def test_mixed_indexing_with_method_dimension():
++    """Test mixed positional and label indexing with method dimension"""
++    empty = np.zeros((3, 3, 3))
++    da = DataArray(empty, dims=['dim1', 'method', 'dim3'], 
++                   coords={'dim1': ['x', 'y', 'z'], 
++                           'method': ['a', 'b', 'c'],
++                           'dim3': [1, 2, 3]})
++    
++    # Test various indexing combinations
++    result = da.loc[dict(method='b')]
++    assert result.shape == (3, 3)
++    
++    result = da.loc[dict(dim1='x', method='b', dim3=2)]
++    assert result.values == 0.0
++    assert result.ndim == 0
++    
++    # Test with slices
++    result = da.loc[dict(method=slice('a', 'b'))]
++    assert result.shape == (3, 2, 3)
++
++
++def test_method_dimension_setitem():
++    """Test that __setitem__ also works with method dimension"""
++    empty = np.zeros((2, 2))
++    da = DataArray(empty, dims=['dim1', 'method'], 
++                   coords={'dim1': ['x', 'y'], 'method': ['a', 'b']})
++    
++    # This should not raise an error
++    da.loc[dict(dim1='x', method='a')] = 5.0
++    assert da.loc[dict(dim1='x', method='a')].values == 5.0
++    
++    # Check that only the specified element was modified
++    assert da.loc[dict(dim1='x', method='b')].values == 0.0
++    assert da.loc[dict(dim1='y', method='a')].values == 0.0
++    assert da.loc[dict(dim1='y', method='b')].values == 0.0
++
++
++def test_method_dimension_with_multiindex():
++    """Test method dimension with MultiIndex"""
++    # Create a simple MultiIndex
++    import pandas as pd
++    arrays = [['A', 'A', 'B', 'B'], [1, 2, 1, 2]]
++    index = pd.MultiIndex.from_arrays(arrays, names=['first', 'second'])
++    
++    data = np.arange(4)
++    da = DataArray(data, dims=['idx'], coords={'idx': index})
++    
++    # This should work normally
++    result = da.loc[dict(idx='A')]
++    assert len(result) == 2
++
++
++if __name__ == "__main__":
++    test_method_dimension_with_actual_method_parameter()
++    test_mixed_indexing_with_method_dimension()
++    test_method_dimension_setitem()
++    test_method_dimension_with_multiindex()
++    print("All edge case tests passed!")
+diff --git a/test_method_dimension.py b/test_method_dimension.py
+new file mode 100644
+index 00000000..17225691
+--- /dev/null
++++ b/test_method_dimension.py
+@@ -0,0 +1,73 @@
++import numpy as np
++import xarray as xr
++from xarray import DataArray, Dataset
++
++def test_method_dimension_dataarray():
++    """Test that dimension named 'method' works correctly with .loc indexing"""
++    # Test with DataArray
++    empty = np.zeros((2, 2))
++    da = DataArray(empty, dims=['dim1', 'method'], 
++                   coords={'dim1': ['x', 'y'], 'method': ['a', 'b']})
++    
++    # Test single value indexing
++    result = da.loc[dict(dim1='x', method='a')]
++    assert result.values == 0.0
++    assert result.coords['dim1'].values == 'x'
++    assert result.coords['method'].values == 'a'
++    
++    # Test slice indexing
++    result = da.loc[dict(method=slice('a', 'b'))]
++    assert result.shape == (2, 2)
++    
++    # Test with only method dimension
++    result = da.loc[dict(method='a')]
++    assert result.shape == (2,)
++    assert result.dims == ('dim1',)
++    
++    print("DataArray tests passed!")
++
++def test_method_dimension_dataset():
++    """Test that dimension named 'method' works correctly with Dataset .loc indexing"""
++    # Test with Dataset
++    empty = np.zeros((2, 2))
++    ds = Dataset({
++        'var1': DataArray(empty, dims=['dim1', 'method']),
++        'var2': DataArray(empty + 1, dims=['dim1', 'method'])
++    }, coords={'dim1': ['x', 'y'], 'method': ['a', 'b']})
++    
++    # Test single value indexing
++    result = ds.loc[dict(dim1='x', method='a')]
++    assert result['var1'].values == 0.0
++    assert result['var2'].values == 1.0
++    assert result.coords['dim1'].values == 'x'
++    assert result.coords['method'].values == 'a'
++    
++    # Test slice indexing
++    result = ds.loc[dict(method=slice('a', 'b'))]
++    assert result['var1'].shape == (2, 2)
++    
++    print("Dataset tests passed!")
++
++def test_other_reserved_names():
++    """Test other potential parameter names that might conflict"""
++    empty = np.zeros((2, 2))
++    
++    # Test 'tolerance' as dimension name
++    da = DataArray(empty, dims=['dim1', 'tolerance'], 
++                   coords={'dim1': ['x', 'y'], 'tolerance': ['a', 'b']})
++    result = da.loc[dict(dim1='x', tolerance='a')]
++    assert result.values == 0.0
++    
++    # Test 'drop' as dimension name
++    da = DataArray(empty, dims=['dim1', 'drop'], 
++                   coords={'dim1': ['x', 'y'], 'drop': ['a', 'b']})
++    result = da.loc[dict(dim1='x', drop='a')]
++    assert result.values == 0.0
++    
++    print("Other reserved names tests passed!")
++
++if __name__ == "__main__":
++    test_method_dimension_dataarray()
++    test_method_dimension_dataset()
++    test_other_reserved_names()
++    print("\nAll tests passed!")
+diff --git a/test_method_dimension_regression.py b/test_method_dimension_regression.py
+new file mode 100644
+index 00000000..142baf95
+--- /dev/null
++++ b/test_method_dimension_regression.py
+@@ -0,0 +1,55 @@
++"""Test for regression where dimension named 'method' caused errors with .loc indexing"""
++import numpy as np
++import pytest
++from xarray import DataArray, Dataset
++
++
++def test_dataarray_loc_with_method_dimension():
++    """Test that dimension named 'method' works correctly with DataArray.loc indexing"""
++    empty = np.zeros((2, 2))
++    da = DataArray(empty, dims=['dim1', 'method'], 
++                   coords={'dim1': ['x', 'y'], 'method': ['a', 'b']})
++    
++    # This should not raise ValueError about invalid fill method
++    result = da.loc[dict(dim1='x', method='a')]
++    assert result.values == 0.0
++    assert result.coords['dim1'].values == 'x'
++    assert result.coords['method'].values == 'a'
++
++
++def test_dataset_loc_with_method_dimension():
++    """Test that dimension named 'method' works correctly with Dataset.loc indexing"""
++    empty = np.zeros((2, 2))
++    ds = Dataset({
++        'var1': DataArray(empty, dims=['dim1', 'method'])
++    }, coords={'dim1': ['x', 'y'], 'method': ['a', 'b']})
++    
++    # This should not raise ValueError about invalid fill method
++    result = ds.loc[dict(dim1='x', method='a')]
++    assert result['var1'].values == 0.0
++    assert result.coords['dim1'].values == 'x'
++    assert result.coords['method'].values == 'a'
++
++
++def test_other_sel_parameter_names_as_dimensions():
++    """Test that other sel() parameter names work as dimension names"""
++    empty = np.zeros((2, 2))
++    
++    # Test 'tolerance' as dimension name
++    da = DataArray(empty, dims=['dim1', 'tolerance'], 
++                   coords={'dim1': ['x', 'y'], 'tolerance': ['a', 'b']})
++    result = da.loc[dict(dim1='x', tolerance='a')]
++    assert result.values == 0.0
++    
++    # Test 'drop' as dimension name
++    da = DataArray(empty, dims=['dim1', 'drop'], 
++                   coords={'dim1': ['x', 'y'], 'drop': ['a', 'b']})
++    result = da.loc[dict(dim1='x', drop='a')]
++    assert result.values == 0.0
++
++
++if __name__ == "__main__":
++    test_dataarray_loc_with_method_dimension()
++    test_dataset_loc_with_method_dimension()
++    test_other_sel_parameter_names_as_dimensions()
++    print("All tests passed!")
+diff --git a/xarray/core/dataarray.py b/xarray/core/dataarray.py
+index 32b24ef1..7b98c9aa 100644
+--- a/xarray/core/dataarray.py
++++ b/xarray/core/dataarray.py
+@@ -196,7 +196,7 @@ class _LocIndexer:
+             # expand the indexer so we can handle Ellipsis
+             labels = indexing.expanded_indexer(key, self.data_array.ndim)
+             key = dict(zip(self.data_array.dims, labels))
+-        return self.data_array.sel(**key)
++        return self.data_array.sel(indexers=key)
+ 
+     def __setitem__(self, key, value) -> None:
+         if not utils.is_dict_like(key):
+diff --git a/xarray/core/dataset.py b/xarray/core/dataset.py
+index dbac288c..2e96bffd 100644
+--- a/xarray/core/dataset.py
++++ b/xarray/core/dataset.py
+@@ -500,7 +500,7 @@ class _LocIndexer:
+     def __getitem__(self, key: Mapping[Hashable, Any]) -> "Dataset":
+         if not utils.is_dict_like(key):
+             raise TypeError("can only lookup dictionaries from Dataset.loc")
+-        return self.dataset.sel(key)
++        return self.dataset.sel(indexers=key)
+ 
+ 
+ class Dataset(Mapping, ImplementsDatasetReduce, DataWithCoords):

@@ -1,0 +1,292 @@
+diff --git a/debug_complex.py b/debug_complex.py
+new file mode 100644
+index 0000000000..e9fa0d7009
+--- /dev/null
++++ b/debug_complex.py
+@@ -0,0 +1,20 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++n = symbols('n', integer=True)
++
++# Test with more complex imaginary parts
++S2 = imageset(Lambda(n, n + (n**2 - 1)*I), S.Integers)
++print("S2 =", S2)
++print("S2.intersect(S.Reals) =", S2.intersect(S.Reals))
++
++# Check what solve_linear does with n**2 - 1
++from sympy.solvers.solvers import solve_linear
++im = n**2 - 1
++print("\nim =", im)
++print("Mul.make_args(im) =", Mul.make_args(im))
++
++# This is not a linear expression, so solve_linear won't work
++results = [solve_linear(i, 0) for i in Mul.make_args(im) if n in i.free_symbols]
++print("solve_linear results:", results)
+diff --git a/debug_intersection.py b/debug_intersection.py
+new file mode 100644
+index 0000000000..d75c8f51bc
+--- /dev/null
++++ b/debug_intersection.py
+@@ -0,0 +1,36 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++n = symbols('n', integer=True)
++
++# Create the imageset
++S1 = imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers)
++
++print("S1 =", S1)
++
++# Let's manually check the logic
++f = n + (n - 1)*(n + 1)*I
++print("\nFunction f(n) =", f)
++
++# Get real and imaginary parts (n is real since it's from Integers)
++re_part = n
++im_part = (n - 1)*(n + 1)
++print("Real part:", re_part)
++print("Imaginary part:", im_part)
++
++# When is imaginary part zero?
++from sympy.solvers import solve
++zeros_of_im = solve(im_part, n)
++print("\nImaginary part is zero when n =", zeros_of_im)
++
++# So the intersection with Reals should be the image of these values
++print("\nValues in S1 ∩ Reals:")
++for val in zeros_of_im:
++    result = f.subs(n, val)
++    print(f"  f({val}) = {result}")
++
++# Check current behavior
++print("\nCurrent behavior:")
++print("S1.intersect(Reals) =", S1.intersect(Reals))
++print("2 in S1.intersect(Reals) =", 2 in S1.intersect(Reals))
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..67b5fec808
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,19 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++n = symbols('n')
++
++# Create the imageset
++S1 = imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers)
++
++print("S1 =", S1)
++print("2 in S1 =", 2 in S1)
++print("2 in S1.intersect(Reals) =", 2 in S1.intersect(Reals))
++print("S1.intersect(Reals) =", S1.intersect(Reals))
++
++# Let's also check what elements are in S1
++print("\nChecking some elements of S1:")
++for n in range(-3, 4):
++    val = n + (n - 1)*(n + 1)*I
++    print(f"n={n}: {val} -> real part = {re(val)}, imag part = {im(val)}")
+diff --git a/sympy/sets/handlers/intersection.py b/sympy/sets/handlers/intersection.py
+index c54dc8f72a..3f406cc020 100644
+--- a/sympy/sets/handlers/intersection.py
++++ b/sympy/sets/handlers/intersection.py
+@@ -306,9 +306,9 @@ def intersection_sets(self, other): # noqa:F811
+             # univarite imaginary part in same variable
+             x, xis = zip(*[solve_linear(i, 0) for i in Mul.make_args(im) if n in i.free_symbols])
+             if x and all(i == n for i in x):
+-                base_set -= FiniteSet(xis)
++                base_set = base_set.intersect(FiniteSet(*xis))
+             else:
+-                base_set -= ConditionSet(n, Eq(im, 0), S.Integers)
++                base_set = ConditionSet(n, Eq(im, 0), base_set)
+         # exclude values that make denominators 0
+         for i in denoms(f):
+             if i.has(n):
+diff --git a/sympy/sets/tests/test_fancysets.py b/sympy/sets/tests/test_fancysets.py
+index 098020ca4e..3f17ce4622 100644
+--- a/sympy/sets/tests/test_fancysets.py
++++ b/sympy/sets/tests/test_fancysets.py
+@@ -657,7 +657,15 @@ def test_infinitely_indexed_set_2():
+ def test_imageset_intersect_real():
+     from sympy import I
+     from sympy.abc import n
+-    assert imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers).intersect(S.Reals) == Complement(S.Integers, FiniteSet((-1, 1)))
++    assert imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers).intersect(S.Reals) == FiniteSet(-1, 1)
++    
++    # Additional test cases for the bug fix
++    S1 = imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers)
++    assert 2 not in S1
++    assert 2 not in S1.intersect(S.Reals)
++    assert -1 in S1.intersect(S.Reals)
++    assert 1 in S1.intersect(S.Reals)
++    
+     s = ImageSet(
+         Lambda(n, -I*(I*(2*pi*n - pi/4) + log(Abs(sqrt(-I))))),
+         S.Integers)
+diff --git a/test_complex_cases.py b/test_complex_cases.py
+new file mode 100644
+index 0000000000..4fd3ecd37d
+--- /dev/null
++++ b/test_complex_cases.py
+@@ -0,0 +1,50 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++def test_complex_cases():
++    """Test more complex cases for ImageSet intersection with Reals"""
++    n = symbols('n', integer=True)
++    
++    # Test with expressions that have denominators
++    # This should exclude n=0 from the base set due to division by zero
++    try:
++        S1 = imageset(Lambda(n, 1/n + n*I), S.Integers)
++        result = S1.intersect(S.Reals)
++        # n*I = 0 only when n = 0, but n=0 makes 1/n undefined
++        # So the intersection should be empty
++        assert result == S.EmptySet
++        print("Test 1 passed: Division by zero handled correctly")
++    except:
++        print("Test 1: Expected behavior - division by zero")
++    
++    # Test with more complex imaginary parts
++    S2 = imageset(Lambda(n, n + (n**2 - 1)*I), S.Integers)
++    # Imaginary part is 0 when n^2 - 1 = 0, i.e., n = ±1
++    # For non-linear expressions, the result is a ConditionSet
++    result2 = S2.intersect(S.Reals)
++    assert isinstance(result2, ConditionSet)
++    # But we can check that -1 and 1 are in the result
++    assert -1 in result2
++    assert 1 in result2
++    assert 0 not in result2
++    assert 2 not in result2
++    print("Test 2 passed: Complex imaginary part")
++    
++    # Test with trigonometric functions
++    S3 = imageset(Lambda(n, n + sin(n)*I), S.Integers)
++    # This is more complex - sin(n) = 0 when n is a multiple of pi
++    # But n is an integer, so we need integer multiples of pi
++    # Since pi is irrational, the only integer n where sin(n) = 0 is n = 0
++    result3 = S3.intersect(S.Reals)
++    # The intersection might not simplify fully, but 0 should be in it
++    if result3 != S.EmptySet:
++        assert 0 in result3 or result3.contains(0) == True
++        print("Test 3 passed: Trigonometric functions")
++    else:
++        print("Test 3: Could not fully evaluate trigonometric case")
++    
++    print("\nAll complex case tests completed!")
++
++if __name__ == "__main__":
++    test_complex_cases()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0fc5f23f83
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,40 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++def test_edge_cases():
++    """Test edge cases for ImageSet intersection with Reals"""
++    n = symbols('n', integer=True)
++    
++    # Test 1: Original bug case
++    S1 = imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers)
++    assert S1.intersect(S.Reals) == FiniteSet(-1, 1)
++    assert 2 not in S1.intersect(S.Reals)
++    
++    # Test 2: Always real (imaginary part is always 0)
++    S2 = imageset(Lambda(n, n), S.Integers)
++    assert S2.intersect(S.Reals) == S.Integers
++    
++    # Test 3: Never real (imaginary part is never 0)
++    S3 = imageset(Lambda(n, n + I), S.Integers)
++    assert S3.intersect(S.Reals) == S.EmptySet
++    
++    # Test 4: Multiple zeros in imaginary part
++    S4 = imageset(Lambda(n, n + n*(n-1)*(n-2)*I), S.Integers)
++    assert S4.intersect(S.Reals) == FiniteSet(0, 1, 2)
++    
++    # Test 5: Quadratic real part, linear imaginary part
++    S5 = imageset(Lambda(n, n**2 + n*I), S.Integers)
++    assert S5.intersect(S.Reals) == FiniteSet(0)
++    
++    # Test 6: Check specific containment
++    assert -1 in S1
++    assert 1 in S1
++    assert 0 not in S1  # 0 + (-1)*1*I = -I
++    assert I not in S1
++    assert -I in S1  # when n=0
++    
++    print("All edge case tests passed!")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_imageset_reals_intersection.py b/test_imageset_reals_intersection.py
+new file mode 100644
+index 0000000000..7ecd726ec4
+--- /dev/null
++++ b/test_imageset_reals_intersection.py
+@@ -0,0 +1,31 @@
++from sympy import *
++from sympy.sets import imageset
++from sympy.core import Lambda, S, symbols
++
++def test_imageset_reals_intersection():
++    """Test for the bug in is_subset(Reals) - issue with ImageSet intersection"""
++    n = symbols('n', integer=True)
++    
++    # Create the imageset from the problem statement
++    S1 = imageset(Lambda(n, n + (n - 1)*(n + 1)*I), S.Integers)
++    
++    # Test that 2 is not in S1
++    assert 2 not in S1, "2 should not be in S1"
++    
++    # Test the intersection with Reals
++    intersection = S1.intersect(Reals)
++    
++    # The intersection should be {-1, 1}
++    assert intersection == FiniteSet(-1, 1), f"Expected FiniteSet(-1, 1), got {intersection}"
++    
++    # Test that 2 is not in the intersection
++    assert 2 not in intersection, "2 should not be in S1.intersect(Reals)"
++    
++    # Test that -1 and 1 are in the intersection
++    assert -1 in intersection, "-1 should be in S1.intersect(Reals)"
++    assert 1 in intersection, "1 should be in S1.intersect(Reals)"
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_imageset_reals_intersection()
+diff --git a/test_solve_linear.py b/test_solve_linear.py
+new file mode 100644
+index 0000000000..96d2f2caa7
+--- /dev/null
++++ b/test_solve_linear.py
+@@ -0,0 +1,17 @@
++from sympy import *
++from sympy.solvers.solvers import solve_linear
++
++n = symbols('n', integer=True)
++im = (n - 1)*(n + 1)
++
++print("im =", im)
++print("Mul.make_args(im) =", Mul.make_args(im))
++
++# This is what the code does
++results = [solve_linear(i, 0) for i in Mul.make_args(im) if n in i.free_symbols]
++print("solve_linear results:", results)
++
++if results:
++    x, xis = zip(*results)
++    print("x =", x)
++    print("xis =", xis)

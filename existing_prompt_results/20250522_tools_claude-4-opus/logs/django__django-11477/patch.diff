@@ -1,0 +1,717 @@
+diff --git a/django/urls/base.py b/django/urls/base.py
+index 0e1c3d909c..5542a0ab68 100644
+--- a/django/urls/base.py
++++ b/django/urls/base.py
+@@ -172,7 +172,9 @@ def translate_url(url, lang_code):
+         to_be_reversed = "%s:%s" % (match.namespace, match.url_name) if match.namespace else match.url_name
+         with override(lang_code):
+             try:
+-                url = reverse(to_be_reversed, args=match.args, kwargs=match.kwargs)
++                # Filter out None values from kwargs to handle optional named groups
++                kwargs = {k: v for k, v in match.kwargs.items() if v is not None}
++                url = reverse(to_be_reversed, args=match.args, kwargs=kwargs)
+             except NoReverseMatch:
+                 pass
+             else:
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..9af5e5a75a
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""Comprehensive test for translate_url with optional named groups."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.urls import path, re_path, reverse, translate_url, include
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++        ('de', 'German'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Import after Django setup
++from django.conf.urls.i18n import i18n_patterns
++
++# Define views
++def test_view(request, arg1, arg2=None, arg3=None):
++    return HttpResponse(f"arg1={arg1}, arg2={arg2}, arg3={arg3}")
++
++def another_view(request, name, year=None):
++    return HttpResponse(f"name={name}, year={year}")
++
++# Define URL patterns with i18n and optional named groups
++urlpatterns = i18n_patterns(
++    # Pattern with one optional argument
++    re_path(r'^test/(?P<arg1>\d+)/(?:(?P<arg2>\d+)/)?$', test_view, name='test_optional'),
++    # Pattern with multiple optional arguments
++    re_path(r'^multi/(?P<arg1>\w+)/(?:(?P<arg2>\w+)/)?(?:(?P<arg3>\w+)/)?$', test_view, name='multi_optional'),
++    # Pattern with optional argument in the middle
++    re_path(r'^person/(?P<name>\w+)(?:/(?P<year>\d{4}))?/$', another_view, name='person_optional'),
++)
++
++# Run tests
++print("Testing translate_url with various optional named group patterns...")
++print("="*70)
++
++test_cases = [
++    # (language, url, expected_translation)
++    ('en', '/en/test/123/', '/fr/test/123/'),
++    ('en', '/en/test/123/456/', '/fr/test/123/456/'),
++    ('en', '/en/multi/abc/', '/fr/multi/abc/'),
++    ('en', '/en/multi/abc/def/', '/fr/multi/abc/def/'),
++    ('en', '/en/multi/abc/def/ghi/', '/fr/multi/abc/def/ghi/'),
++    ('en', '/en/person/john/', '/fr/person/john/'),
++    ('en', '/en/person/john/2023/', '/fr/person/john/2023/'),
++]
++
++for lang, url, expected in test_cases:
++    with override(lang):
++        print(f"\nTest: {url}")
++        try:
++            match = django.urls.resolve(url)
++            print(f"  Resolved: {match.url_name}, kwargs={match.kwargs}")
++            
++            translated = translate_url(url, 'fr')
++            print(f"  Translated to 'fr': {translated}")
++            
++            if translated == expected:
++                print(f"  PASS: Got expected translation")
++            else:
++                print(f"  FAIL: Expected {expected}, got {translated}")
++                
++        except Exception as e:
++            print(f"  ERROR: {e}")
++            import traceback
++            traceback.print_exc()
++
++# Test edge cases
++print("\n" + "="*70)
++print("Edge cases:")
++
++# Test with non-existent URL
++print("\nNon-existent URL:")
++result = translate_url('/en/nonexistent/', 'fr')
++print(f"  translate_url('/en/nonexistent/', 'fr') = {result}")
++print(f"  PASS: Returns original URL" if result == '/en/nonexistent/' else f"  FAIL: Expected '/en/nonexistent/', got {result}")
++
++# Test with URL without language prefix
++print("\nURL without language prefix:")
++result = translate_url('/test/123/', 'fr')
++print(f"  translate_url('/test/123/', 'fr') = {result}")
++print(f"  PASS: Returns original URL" if result == '/test/123/' else f"  FAIL: Expected '/test/123/', got {result}")
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..2b6a37ce9b
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""
++Test to find the exact issue with translate_url and optional parameters.
++"""
++
++import django
++from django.conf import settings
++from django.urls import path, re_path, reverse, translate_url, register_converter
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.conf.urls.i18n import i18n_patterns
++
++# Custom converter that doesn't accept None
++class StrictIntConverter:
++    regex = '[0-9]+'
++    
++    def to_python(self, value):
++        return int(value)
++    
++    def to_url(self, value):
++        if value is None:
++            raise ValueError("Cannot convert None to URL")
++        return str(value)
++
++register_converter(StrictIntConverter, 'strictint')
++
++# View
++def my_view(request, required, optional=None):
++    return HttpResponse(f"Required: {required}, Optional: {optional}")
++
++# URL patterns with optional named groups using path()
++urlpatterns = i18n_patterns(
++    # Using path() with custom converter
++    path('strict/<strictint:required>/', my_view, name='strict-required'),
++    path('strict/<strictint:required>/<strictint:optional>/', my_view, name='strict-both'),
++    
++    # Using re_path with regex that matches specific pattern
++    re_path(r'^regex/(?P<required>[1-9]\d*)/(?:(?P<optional>[1-9]\d*)/)?$', my_view, name='regex-optional'),
++)
++
++print("Testing different URL patterns to find the exact issue...")
++print("=" * 60)
++
++# Test 1: path() with strict converter
++print("\n1. Testing path() with strict converter:")
++with override('en'):
++    try:
++        # This should work - no optional parameter
++        url = reverse('strict-required', kwargs={'required': 123})
++        print(f"  reverse('strict-required', kwargs={{'required': 123}}) = {url}")
++    except Exception as e:
++        print(f"  ERROR: {e}")
++
++# Test 2: Simulating what translate_url would do with regex pattern
++print("\n2. Simulating translate_url behavior with regex pattern:")
++with override('en'):
++    # First resolve a URL with missing optional parameter
++    from django.urls import resolve
++    match = resolve('/en/regex/123/')
++    print(f"  Resolved /en/regex/123/: kwargs = {match.kwargs}")
++    
++    # Now try to reverse with those kwargs (including None)
++    try:
++        url = reverse('regex-optional', kwargs=match.kwargs)
++        print(f"  reverse('regex-optional', kwargs={match.kwargs}) = {url}")
++    except Exception as e:
++        print(f"  ERROR: {type(e).__name__}: {e}")
++        
++    # Try without None
++    kwargs_without_none = {k: v for k, v in match.kwargs.items() if v is not None}
++    try:
++        url = reverse('regex-optional', kwargs=kwargs_without_none)
++        print(f"  reverse('regex-optional', kwargs={kwargs_without_none}) = {url}")
++    except Exception as e:
++        print(f"  ERROR: {e}")
++
++# Test 3: Direct translate_url test
++print("\n3. Testing translate_url directly:")
++with override('en'):
++    url = '/en/regex/123/'
++    print(f"  Original URL: {url}")
++    translated = translate_url(url, 'fr')
++    print(f"  Translated URL: {translated}")
+diff --git a/test_optional_groups.py b/test_optional_groups.py
+new file mode 100644
+index 0000000000..db7e7a9c1b
+--- /dev/null
++++ b/test_optional_groups.py
+@@ -0,0 +1,85 @@
++"""
++Test for translate_url with optional named groups.
++This test specifically checks the issue described in the problem statement.
++"""
++
++import os
++import django
++from django.conf import settings
++from django.test import SimpleTestCase, override_settings
++from django.urls import re_path, reverse, translate_url
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.conf.urls.i18n import i18n_patterns
++
++# Define a view
++def test_view(request, required_arg, optional_arg=None):
++    return HttpResponse(f"required={required_arg}, optional={optional_arg}")
++
++# Define URL patterns with optional named groups
++urlpatterns = i18n_patterns(
++    re_path(r'^test/(?P<required_arg>\w+)/(?:(?P<optional_arg>\w+)/)?$', test_view, name='test_optional'),
++)
++
++# Test class
++class TranslateURLOptionalGroupsTest(SimpleTestCase):
++    def test_translate_url_with_missing_optional_argument(self):
++        """Test that translate_url works correctly when optional named groups are missing."""
++        with override('en'):
++            # URL with only required argument (optional argument is missing)
++            url = '/en/test/required/'
++            
++            # This should not raise an error and should translate correctly
++            translated_url = translate_url(url, 'fr')
++            self.assertEqual(translated_url, '/fr/test/required/')
++            
++    def test_translate_url_with_all_arguments(self):
++        """Test that translate_url works correctly when all arguments are present."""
++        with override('en'):
++            # URL with both required and optional arguments
++            url = '/en/test/required/optional/'
++            
++            # This should translate correctly
++            translated_url = translate_url(url, 'fr')
++            self.assertEqual(translated_url, '/fr/test/required/optional/')
++            
++    def test_reverse_with_optional_argument(self):
++        """Test that reverse works correctly with optional arguments."""
++        with override('en'):
++            # Reverse with only required argument
++            url1 = reverse('test_optional', kwargs={'required_arg': 'test'})
++            self.assertEqual(url1, '/en/test/test/')
++            
++            # Reverse with both arguments
++            url2 = reverse('test_optional', kwargs={'required_arg': 'test', 'optional_arg': 'opt'})
++            self.assertEqual(url2, '/en/test/test/opt/')
++
++# Run the tests
++if __name__ == '__main__':
++    import unittest
++    
++    # Create test suite
++    suite = unittest.TestLoader().loadTestsFromTestCase(TranslateURLOptionalGroupsTest)
++    
++    # Run tests
++    runner = unittest.TextTestRunner(verbosity=2)
++    result = runner.run(suite)
++    
++    # Exit with appropriate code
++    exit(0 if result.wasSuccessful() else 1)
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..c8fbbafd3a
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++"""
++Test that demonstrates the exact problem from the problem statement.
++Before the fix, translate_url would fail when optional named groups are missing.
++"""
++
++import django
++from django.conf import settings
++from django.urls import re_path, reverse, translate_url
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.conf.urls.i18n import i18n_patterns
++
++# View
++def my_view(request, required, optional=None):
++    return HttpResponse(f"Required: {required}, Optional: {optional}")
++
++# URL patterns with optional named groups
++urlpatterns = i18n_patterns(
++    re_path(r'^page/(?P<required>\w+)/(?:(?P<optional>\w+)/)?$', my_view, name='my-page'),
++)
++
++print("Testing the problem statement...")
++print("-" * 50)
++
++# Before the fix, this would fail with NoReverseMatch
++with override('en'):
++    # URL with absent optional argument
++    url_with_missing_optional = '/en/page/test/'
++    print(f"Original URL: {url_with_missing_optional}")
++    
++    try:
++        # This is where the bug occurs - translate_url passes kwargs with None values
++        translated = translate_url(url_with_missing_optional, 'fr')
++        print(f"Translated URL: {translated}")
++        print("SUCCESS: translate_url handled missing optional argument correctly!")
++    except Exception as e:
++        print(f"ERROR: {type(e).__name__}: {e}")
++        print("FAILED: This is the bug described in the problem statement")
++
++print("\n" + "-" * 50)
++
++# This should always work
++with override('en'):
++    url_with_all_args = '/en/page/test/optional/'
++    print(f"Original URL: {url_with_all_args}")
++    translated = translate_url(url_with_all_args, 'fr')
++    print(f"Translated URL: {translated}")
++    print("SUCCESS: translate_url works with all arguments present")
+diff --git a/test_translate_url_issue.py b/test_translate_url_issue.py
+new file mode 100644
+index 0000000000..0d2fa2e4a8
+--- /dev/null
++++ b/test_translate_url_issue.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python
++"""Test script to reproduce the translate_url issue with optional named groups."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.urls import path, re_path, reverse, translate_url, include
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Import after Django setup
++from django.conf.urls.i18n import i18n_patterns
++
++# Define views
++def test_view(request, arg1, arg2=None):
++    return HttpResponse(f"arg1={arg1}, arg2={arg2}")
++
++# Define URL patterns with i18n and optional named groups
++urlpatterns = i18n_patterns(
++    re_path(r'^test/(?P<arg1>\d+)/(?:(?P<arg2>\d+)/)?$', test_view, name='test_optional'),
++)
++
++# Test the issue
++print("Testing translate_url with i18n_patterns and optional named groups...")
++print()
++
++# Test with optional argument missing
++with override('en'):
++    url = '/en/test/123/'
++    print(f"Original URL (en, optional arg missing): {url}")
++    try:
++        match = django.urls.resolve(url)
++        print(f"  Resolved: view_name={match.url_name}, kwargs={match.kwargs}")
++        
++        # Try to translate to French
++        translated = translate_url(url, 'fr')
++        print(f"  Translated to 'fr': {translated}")
++        
++        # Check if we can reverse with None in kwargs
++        print("\n  Testing reverse with None in kwargs:")
++        try:
++            reversed_url = reverse('test_optional', kwargs={'arg1': '123', 'arg2': None})
++            print(f"    Reversed with arg2=None: {reversed_url}")
++        except Exception as e:
++            print(f"    Error with arg2=None: {e}")
++            
++        # Check if we can reverse without arg2
++        try:
++            reversed_url = reverse('test_optional', kwargs={'arg1': '123'})
++            print(f"    Reversed without arg2: {reversed_url}")
++        except Exception as e:
++            print(f"    Error without arg2: {e}")
++            
++    except Exception as e:
++        print(f"  Error: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_translate_url_optional.py b/test_translate_url_optional.py
+new file mode 100644
+index 0000000000..2688e9f246
+--- /dev/null
++++ b/test_translate_url_optional.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python
++"""Test script to reproduce the translate_url issue with optional named groups."""
++
++import os
++import sys
++import django
++from django.conf import settings
++from django.urls import path, re_path, reverse, translate_url
++from django.http import HttpResponse
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    USE_L10N=True,
++    USE_TZ=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Define views
++def test_view(request, arg1, arg2=None):
++    return HttpResponse(f"arg1={arg1}, arg2={arg2}")
++
++# Define URL patterns with optional named groups
++urlpatterns = [
++    re_path(r'^test/(?P<arg1>\d+)/(?:(?P<arg2>\d+)/)?$', test_view, name='test_optional'),
++]
++
++# Test the issue
++print("Testing translate_url with optional named groups...")
++print()
++
++# Test 1: URL with both arguments
++url1 = '/test/123/456/'
++print(f"Original URL (both args): {url1}")
++try:
++    match = django.urls.resolve(url1)
++    print(f"  Resolved: view_name={match.url_name}, args={match.args}, kwargs={match.kwargs}")
++    translated = translate_url(url1, 'fr')
++    print(f"  Translated to 'fr': {translated}")
++except Exception as e:
++    print(f"  Error: {e}")
++
++print()
++
++# Test 2: URL with only required argument (optional arg missing)
++url2 = '/test/123/'
++print(f"Original URL (optional arg missing): {url2}")
++try:
++    match = django.urls.resolve(url2)
++    print(f"  Resolved: view_name={match.url_name}, args={match.args}, kwargs={match.kwargs}")
++    translated = translate_url(url2, 'fr')
++    print(f"  Translated to 'fr': {translated}")
++except Exception as e:
++    print(f"  Error: {e}")
++
++print()
++
++# Test 3: Try to reverse with missing optional argument
++print("Testing reverse with optional argument:")
++try:
++    # This should work - reversing with only required argument
++    reversed_url = reverse('test_optional', kwargs={'arg1': '123'})
++    print(f"  Reversed with arg1 only: {reversed_url}")
++except Exception as e:
++    print(f"  Error reversing with arg1 only: {e}")
++
++try:
++    # This should also work - reversing with both arguments
++    reversed_url = reverse('test_optional', kwargs={'arg1': '123', 'arg2': '456'})
++    print(f"  Reversed with both args: {reversed_url}")
++except Exception as e:
++    print(f"  Error reversing with both args: {e}")
+diff --git a/test_translate_url_patch.py b/test_translate_url_patch.py
+new file mode 100644
+index 0000000000..b824ab0675
+--- /dev/null
++++ b/test_translate_url_patch.py
+@@ -0,0 +1,64 @@
++"""
++Test case that demonstrates the problem and verifies the fix.
++This is what would be added to the Django test suite.
++"""
++
++import django
++from django.conf import settings
++from django.test import SimpleTestCase, override_settings
++from django.urls import re_path, translate_url
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.conf.urls.i18n import i18n_patterns
++
++# Define a view
++def optional_view(request, arg1, arg2=None):
++    return HttpResponse(f"arg1={arg1}, arg2={arg2}")
++
++# Define URL patterns with optional named groups
++urlpatterns = i18n_patterns(
++    re_path(r'^optional/(?P<arg1>\d+)/(?:(?P<arg2>\d+)/)?$', optional_view, name='optional_view'),
++)
++
++# Test to add to Django's test suite
++def test_translate_url_with_optional_named_groups():
++    """
++    translate_url() should work correctly with optional named groups.
++    
++    When a URL pattern contains optional named groups and the URL being
++    translated doesn't include values for those groups, translate_url()
++    should not pass None values to reverse(), as this causes NoReverseMatch.
++    """
++    # Test with missing optional argument
++    with override('en'):
++        url = '/en/optional/123/'
++        translated = translate_url(url, 'de')
++        assert translated == '/de/optional/123/', f"Expected '/de/optional/123/', got '{translated}'"
++        print("Test passed: URL with missing optional argument translated correctly")
++    
++    # Test with all arguments present
++    with override('en'):
++        url = '/en/optional/123/456/'
++        translated = translate_url(url, 'de')
++        assert translated == '/de/optional/123/456/', f"Expected '/de/optional/123/456/', got '{translated}'"
++        print("Test passed: URL with all arguments translated correctly")
++
++if __name__ == '__main__':
++    test_translate_url_with_optional_named_groups()
++    print("\nAll tests passed!")
+diff --git a/test_without_fix.py b/test_without_fix.py
+new file mode 100644
+index 0000000000..3f9e9337e6
+--- /dev/null
++++ b/test_without_fix.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python
++"""
++Test that shows what happens without the fix.
++This demonstrates the bug by directly calling reverse with None values.
++"""
++
++import django
++from django.conf import settings
++from django.urls import re_path, reverse
++from django.http import HttpResponse
++from django.utils.translation import override
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('fr', 'French'),
++    ],
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.conf.urls.i18n import i18n_patterns
++
++# View
++def my_view(request, required, optional=None):
++    return HttpResponse(f"Required: {required}, Optional: {optional}")
++
++# URL patterns with optional named groups
++urlpatterns = i18n_patterns(
++    re_path(r'^page/(?P<required>\w+)/(?:(?P<optional>\w+)/)?$', my_view, name='my-page'),
++)
++
++print("Demonstrating the bug...")
++print("-" * 50)
++
++with override('en'):
++    # This is what translate_url was doing before the fix:
++    # It would pass kwargs with None values to reverse()
++    
++    print("Calling reverse with kwargs containing None (what translate_url did before fix):")
++    try:
++        url = reverse('my-page', kwargs={'required': 'test', 'optional': None})
++        print(f"  Result: {url}")
++    except Exception as e:
++        print(f"  ERROR: {type(e).__name__}: {e}")
++        print("  This is the bug!")
++    
++    print("\nCalling reverse without the None value (what translate_url does after fix):")
++    try:
++        url = reverse('my-page', kwargs={'required': 'test'})
++        print(f"  Result: {url}")
++        print("  SUCCESS: This works correctly!")
++    except Exception as e:
++        print(f"  ERROR: {type(e).__name__}: {e}")
+diff --git a/tests/i18n/patterns/tests.py b/tests/i18n/patterns/tests.py
+index 6ed2c4ffeb..867ea0b317 100644
+--- a/tests/i18n/patterns/tests.py
++++ b/tests/i18n/patterns/tests.py
+@@ -158,6 +158,10 @@ class URLTranslationTests(URLTestCaseBase):
+             # path() URL pattern
+             self.assertEqual(translate_url('/en/account/register-as-path/', 'nl'), '/nl/profiel/registreren-als-pad/')
+             self.assertEqual(translation.get_language(), 'en')
++            
++            # Test with optional named groups - should not fail when optional group is missing
++            self.assertEqual(translate_url('/en/optional/test/', 'nl'), '/nl/optional/test/')
++            self.assertEqual(translate_url('/en/optional/test/second/', 'nl'), '/nl/optional/test/second/')
+ 
+         with translation.override('nl'):
+             self.assertEqual(translate_url('/nl/gebruikers/', 'en'), '/en/users/')
+diff --git a/tests/i18n/patterns/urls/default.py b/tests/i18n/patterns/urls/default.py
+index b0c2f2585e..2ca89fd92e 100644
+--- a/tests/i18n/patterns/urls/default.py
++++ b/tests/i18n/patterns/urls/default.py
+@@ -17,4 +17,6 @@ urlpatterns += i18n_patterns(
+     path('prefixed.xml', view, name='prefixed_xml'),
+     re_path(_(r'^users/$'), view, name='users'),
+     re_path(_(r'^account/'), include('i18n.patterns.urls.namespace', namespace='account')),
++    # URL pattern with optional named group for testing translate_url
++    re_path(r'^optional/(?P<arg1>\w+)/(?:(?P<arg2>\w+)/)?$', view, name='optional-test'),
+ )

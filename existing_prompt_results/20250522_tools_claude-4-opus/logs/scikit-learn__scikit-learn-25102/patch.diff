@@ -1,0 +1,848 @@
+diff --git a/sklearn/compose/_column_transformer.py b/sklearn/compose/_column_transformer.py
+index 5f76c2cc9..41b464242 100644
+--- a/sklearn/compose/_column_transformer.py
++++ b/sklearn/compose/_column_transformer.py
+@@ -271,7 +271,7 @@ class ColumnTransformer(TransformerMixin, _BaseComposition):
+         except (TypeError, ValueError):
+             self.transformers = value
+ 
+-    def set_output(self, *, transform=None):
++    def set_output(self, *, transform=None, preserve_dtypes=False):
+         """Set the output container when `"transform"` and `"fit_transform"` are called.
+ 
+         Calling `set_output` will set the output of all estimators in `transformers`
+@@ -285,13 +285,17 @@ class ColumnTransformer(TransformerMixin, _BaseComposition):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `None`: Transform configuration is unchanged
++            
++        preserve_dtypes : bool, default=False
++            If True and transform="pandas", preserve the dtypes of the input
++            DataFrame for columns that are not modified by the transformer.
+ 
+         Returns
+         -------
+         self : estimator instance
+             Estimator instance.
+         """
+-        super().set_output(transform=transform)
++        super().set_output(transform=transform, preserve_dtypes=preserve_dtypes)
+         transformers = (
+             trans
+             for _, trans, _ in chain(
+@@ -300,7 +304,7 @@ class ColumnTransformer(TransformerMixin, _BaseComposition):
+             if trans not in {"passthrough", "drop"}
+         )
+         for trans in transformers:
+-            _safe_set_output(trans, transform=transform)
++            _safe_set_output(trans, transform=transform, preserve_dtypes=preserve_dtypes)
+ 
+         return self
+ 
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 94d9465d7..8ed6086cc 100644
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -154,7 +154,7 @@ class Pipeline(_BaseComposition):
+         self.memory = memory
+         self.verbose = verbose
+ 
+-    def set_output(self, *, transform=None):
++    def set_output(self, *, transform=None, preserve_dtypes=False):
+         """Set the output container when `"transform"` and `"fit_transform"` are called.
+ 
+         Calling `set_output` will set the output of all estimators in `steps`.
+@@ -167,14 +167,26 @@ class Pipeline(_BaseComposition):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `None`: Transform configuration is unchanged
++            
++        preserve_dtypes : bool, default=False
++            If True and transform="pandas", preserve the dtypes of the input
++            DataFrame for columns that are not modified by the transformer.
+ 
+         Returns
+         -------
+         self : estimator instance
+             Estimator instance.
+         """
++        # Store the configuration for the pipeline itself
++        if not hasattr(self, "_sklearn_output_config"):
++            self._sklearn_output_config = {}
++        if transform is not None:
++            self._sklearn_output_config["transform"] = transform
++        self._sklearn_output_config["transform_preserve_dtypes"] = preserve_dtypes
++        
++        # Set output for all steps
+         for _, _, step in self._iter():
+-            _safe_set_output(step, transform=transform)
++            _safe_set_output(step, transform=transform, preserve_dtypes=preserve_dtypes)
+         return self
+ 
+     def get_params(self, deep=True):
+@@ -1027,7 +1039,7 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
+         self.transformer_weights = transformer_weights
+         self.verbose = verbose
+ 
+-    def set_output(self, *, transform=None):
++    def set_output(self, *, transform=None, preserve_dtypes=False):
+         """Set the output container when `"transform"` and `"fit_transform"` are called.
+ 
+         `set_output` will set the output of all estimators in `transformer_list`.
+@@ -1040,15 +1052,19 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `None`: Transform configuration is unchanged
++            
++        preserve_dtypes : bool, default=False
++            If True and transform="pandas", preserve the dtypes of the input
++            DataFrame for columns that are not modified by the transformer.
+ 
+         Returns
+         -------
+         self : estimator instance
+             Estimator instance.
+         """
+-        super().set_output(transform=transform)
++        super().set_output(transform=transform, preserve_dtypes=preserve_dtypes)
+         for _, step, _ in self._iter():
+-            _safe_set_output(step, transform=transform)
++            _safe_set_output(step, transform=transform, preserve_dtypes=preserve_dtypes)
+         return self
+ 
+     @property
+diff --git a/sklearn/utils/_set_output.py b/sklearn/utils/_set_output.py
+index 335773c6a..d22535706 100644
+--- a/sklearn/utils/_set_output.py
++++ b/sklearn/utils/_set_output.py
+@@ -12,6 +12,7 @@ def _wrap_in_pandas_container(
+     *,
+     columns,
+     index=None,
++    dtypes=None,
+ ):
+     """Create a Pandas DataFrame.
+ 
+@@ -36,6 +37,10 @@ def _wrap_in_pandas_container(
+     index : array-like, default=None
+         Index for data.
+ 
++    dtypes : dict or None, default=None
++        If not None, a dictionary mapping column names to dtypes. The dtypes
++        will be applied to the resulting dataframe.
++
+     Returns
+     -------
+     dataframe : DataFrame
+@@ -57,9 +62,19 @@ def _wrap_in_pandas_container(
+             data_to_wrap.columns = columns
+         if index is not None:
+             data_to_wrap.index = index
+-        return data_to_wrap
+-
+-    return pd.DataFrame(data_to_wrap, index=index, columns=columns)
++        df = data_to_wrap
++    else:
++        df = pd.DataFrame(data_to_wrap, index=index, columns=columns)
++    
++    # Apply dtypes if provided
++    if dtypes is not None:
++        # Only apply dtypes for columns that exist in both df and dtypes
++        columns_to_convert = set(df.columns) & set(dtypes.keys())
++        if columns_to_convert:
++            dtype_dict = {col: dtypes[col] for col in columns_to_convert}
++            df = df.astype(dtype_dict)
++    
++    return df
+ 
+ 
+ def _get_output_config(method, estimator=None):
+@@ -81,6 +96,7 @@ def _get_output_config(method, estimator=None):
+ 
+         - "dense": specifies the dense container for `method`. This can be
+           `"default"` or `"pandas"`.
++        - "preserve_dtypes": whether to preserve dtypes when using pandas output.
+     """
+     est_sklearn_output_config = getattr(estimator, "_sklearn_output_config", {})
+     if method in est_sklearn_output_config:
+@@ -93,7 +109,12 @@ def _get_output_config(method, estimator=None):
+             f"output config must be 'default' or 'pandas' got {dense_config}"
+         )
+ 
+-    return {"dense": dense_config}
++    # Check for dtype preservation config
++    preserve_dtypes = False
++    if method + "_preserve_dtypes" in est_sklearn_output_config:
++        preserve_dtypes = est_sklearn_output_config[method + "_preserve_dtypes"]
++    
++    return {"dense": dense_config, "preserve_dtypes": preserve_dtypes}
+ 
+ 
+ def _wrap_data_with_container(method, data_to_wrap, original_input, estimator):
+@@ -127,10 +148,28 @@ def _wrap_data_with_container(method, data_to_wrap, original_input, estimator):
+         return data_to_wrap
+ 
+     # dense_config == "pandas"
++    # Get dtypes from original input if preservation is enabled
++    dtypes = None
++    if output_config["preserve_dtypes"] and hasattr(original_input, "dtypes"):
++        # Get the feature names that will be in the output
++        try:
++            output_feature_names = estimator.get_feature_names_out()
++        except Exception:
++            output_feature_names = None
++        
++        if output_feature_names is not None:
++            # Create a mapping of output column names to their original dtypes
++            dtypes = {}
++            for out_name in output_feature_names:
++                # Try to find the corresponding column in the original input
++                if out_name in original_input.columns:
++                    dtypes[out_name] = original_input[out_name].dtype
++    
+     return _wrap_in_pandas_container(
+         data_to_wrap=data_to_wrap,
+         index=getattr(original_input, "index", None),
+         columns=estimator.get_feature_names_out,
++        dtypes=dtypes,
+     )
+ 
+ 
+@@ -208,7 +247,7 @@ class _SetOutputMixin:
+             setattr(cls, method, wrapped_method)
+ 
+     @available_if(_auto_wrap_is_configured)
+-    def set_output(self, *, transform=None):
++    def set_output(self, *, transform=None, preserve_dtypes=False):
+         """Set output container.
+ 
+         See :ref:`sphx_glr_auto_examples_miscellaneous_plot_set_output.py`
+@@ -222,23 +261,32 @@ class _SetOutputMixin:
+             - `"default"`: Default output format of a transformer
+             - `"pandas"`: DataFrame output
+             - `None`: Transform configuration is unchanged
++            
++        preserve_dtypes : bool, default=False
++            If True and transform="pandas", preserve the dtypes of the input
++            DataFrame for columns that are not modified by the transformer.
++            This only applies to transformers that select or reorder features
++            without changing their values.
+ 
+         Returns
+         -------
+         self : estimator instance
+             Estimator instance.
+         """
+-        if transform is None:
++        if transform is None and not preserve_dtypes:
+             return self
+ 
+         if not hasattr(self, "_sklearn_output_config"):
+             self._sklearn_output_config = {}
+ 
+-        self._sklearn_output_config["transform"] = transform
++        if transform is not None:
++            self._sklearn_output_config["transform"] = transform
++        
++        self._sklearn_output_config["transform_preserve_dtypes"] = preserve_dtypes
+         return self
+ 
+ 
+-def _safe_set_output(estimator, *, transform=None):
++def _safe_set_output(estimator, *, transform=None, preserve_dtypes=False):
+     """Safely call estimator.set_output and error if it not available.
+ 
+     This is used by meta-estimators to set the output for child estimators.
+@@ -255,6 +303,10 @@ def _safe_set_output(estimator, *, transform=None):
+         - `"fit_transform"`
+ 
+         If `None`, this operation is a no-op.
++        
++    preserve_dtypes : bool, default=False
++        If True and transform="pandas", preserve the dtypes of the input
++        DataFrame for columns that are not modified by the transformer.
+ 
+     Returns
+     -------
+@@ -276,4 +328,11 @@ def _safe_set_output(estimator, *, transform=None):
+             f"Unable to configure output for {estimator} because `set_output` "
+             "is not available."
+         )
+-    return estimator.set_output(transform=transform)
++    
++    # Check if the estimator's set_output supports preserve_dtypes
++    import inspect
++    sig = inspect.signature(estimator.set_output)
++    if "preserve_dtypes" in sig.parameters:
++        return estimator.set_output(transform=transform, preserve_dtypes=preserve_dtypes)
++    else:
++        return estimator.set_output(transform=transform)
+diff --git a/sklearn/utils/tests/test_set_output.py b/sklearn/utils/tests/test_set_output.py
+index ac73ca094..9a93e441e 100644
+--- a/sklearn/utils/tests/test_set_output.py
++++ b/sklearn/utils/tests/test_set_output.py
+@@ -9,6 +9,7 @@ from sklearn.utils._set_output import _wrap_in_pandas_container
+ from sklearn.utils._set_output import _safe_set_output
+ from sklearn.utils._set_output import _SetOutputMixin
+ from sklearn.utils._set_output import _get_output_config
++from sklearn.feature_selection import SelectKBest, chi2
+ 
+ 
+ def test__wrap_in_pandas_container_dense():
+@@ -45,6 +46,26 @@ def test__wrap_in_pandas_container_error_validation():
+         _wrap_in_pandas_container(X_csr, columns=["a", "b", "c"])
+ 
+ 
++def test__wrap_in_pandas_container_dtype_preservation():
++    """Check dtype preservation in _wrap_in_pandas_container."""
++    pd = pytest.importorskip("pandas")
++    X = np.asarray([[1, 0, 3], [0, 0, 1]], dtype=np.float32)
++    columns = ["f0", "f1", "f2"]
++    dtypes = {"f0": np.float16, "f1": np.int32, "f2": np.float64}
++    
++    df = _wrap_in_pandas_container(X, columns=columns, dtypes=dtypes)
++    assert df["f0"].dtype == np.float16
++    assert df["f1"].dtype == np.int32
++    assert df["f2"].dtype == np.float64
++    
++    # Test with existing DataFrame
++    X_df = pd.DataFrame(X, columns=columns)
++    df2 = _wrap_in_pandas_container(X_df, columns=None, dtypes=dtypes)
++    assert df2["f0"].dtype == np.float16
++    assert df2["f1"].dtype == np.int32
++    assert df2["f2"].dtype == np.float64
++
++
+ class EstimatorWithoutSetOutputAndWithoutTransform:
+     pass
+ 
+@@ -260,3 +281,35 @@ def test_set_output_mro():
+         pass
+ 
+     assert C().transform(None) == "B"
++
++
++def test_dtype_preservation_with_transformer():
++    """Test dtype preservation with actual transformers."""
++    pd = pytest.importorskip("pandas")
++    
++    # Create test data with various dtypes
++    X = pd.DataFrame({
++        "f0": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
++        "f1": np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float16),
++        "f2": np.array([9, 10, 11, 12], dtype=np.int32),
++        "f3": np.array([13.0, 14.0, 15.0, 16.0], dtype=np.float64),
++    })
++    y = np.array([0, 0, 1, 1])
++    
++    # Test with SelectKBest (feature selector that doesn't modify values)
++    selector = SelectKBest(chi2, k=2)
++    
++    # Without dtype preservation
++    selector.set_output(transform="pandas", preserve_dtypes=False)
++    X_out = selector.fit_transform(X, y)
++    # All dtypes should be float64 (default behavior)
++    assert all(X_out.dtypes == np.float64)
++    
++    # With dtype preservation
++    selector.set_output(transform="pandas", preserve_dtypes=True)
++    X_out_preserved = selector.fit_transform(X, y)
++    # Original dtypes should be preserved for selected features
++    selected_features = selector.get_feature_names_out()
++    for feat in selected_features:
++        if feat in X.columns:
++            assert X_out_preserved[feat].dtype == X[feat].dtype
+diff --git a/test_column_transformer_dtype.py b/test_column_transformer_dtype.py
+new file mode 100644
+index 000000000..f5da4baca
+--- /dev/null
++++ b/test_column_transformer_dtype.py
+@@ -0,0 +1,54 @@
++import numpy as np
++import pandas as pd
++from sklearn.compose import ColumnTransformer
++from sklearn.preprocessing import StandardScaler
++from sklearn.feature_selection import SelectKBest, chi2
++
++
++def test_column_transformer_dtype_preservation():
++    """Test dtype preservation with ColumnTransformer."""
++    # Create test data with various dtypes
++    X = pd.DataFrame({
++        "num1": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
++        "num2": np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float16),
++        "cat1": pd.Categorical(["A", "B", "A", "B"]),
++        "cat2": pd.Categorical(["X", "Y", "X", "Y"]),
++    })
++    
++    print("Original dtypes:")
++    print(X.dtypes)
++    print()
++    
++    # Create a column transformer that passes through all columns
++    ct = ColumnTransformer([
++        ("passthrough", "passthrough", ["num1", "num2", "cat1", "cat2"])
++    ])
++    
++    # Without dtype preservation
++    ct.set_output(transform="pandas")
++    X_out = ct.fit_transform(X)
++    print("ColumnTransformer output without dtype preservation:")
++    print(X_out.dtypes)
++    print()
++    
++    # With dtype preservation
++    ct.set_output(transform="pandas", preserve_dtypes=True)
++    X_out_preserved = ct.fit_transform(X)
++    print("ColumnTransformer output with dtype preservation:")
++    print(X_out_preserved.dtypes)
++    print()
++    
++    # Test with a more complex pipeline
++    ct2 = ColumnTransformer([
++        ("num", "passthrough", ["num1", "num2"]),
++        ("cat", "passthrough", ["cat1", "cat2"])
++    ])
++    
++    ct2.set_output(transform="pandas", preserve_dtypes=True)
++    X_out2 = ct2.fit_transform(X)
++    print("Complex ColumnTransformer output with dtype preservation:")
++    print(X_out2.dtypes)
++
++
++if __name__ == "__main__":
++    test_column_transformer_dtype_preservation()
+diff --git a/test_comprehensive_dtype_preservation.py b/test_comprehensive_dtype_preservation.py
+new file mode 100644
+index 000000000..c4635798e
+--- /dev/null
++++ b/test_comprehensive_dtype_preservation.py
+@@ -0,0 +1,86 @@
++import numpy as np
++import pandas as pd
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest, chi2
++from sklearn.preprocessing import StandardScaler, MinMaxScaler
++from sklearn.pipeline import Pipeline
++from sklearn.compose import ColumnTransformer
++
++
++def test_comprehensive_dtype_preservation():
++    """Test dtype preservation in various scenarios."""
++    # Create test data
++    X, y = load_iris(return_X_y=True, as_frame=True)
++    X = X.astype({
++        "sepal length (cm)": np.float32,
++        "sepal width (cm)": np.float64,
++        "petal length (cm)": np.float16,
++        "petal width (cm)": np.int32,
++    })
++    
++    print("Original dtypes:")
++    print(X.dtypes)
++    print()
++    
++    # Test 1: Feature selection preserves dtypes
++    print("Test 1: SelectKBest with dtype preservation")
++    selector = SelectKBest(chi2, k=3)
++    selector.set_output(transform="pandas", preserve_dtypes=True)
++    X_selected = selector.fit_transform(X, y)
++    print("Selected features:", X_selected.columns.tolist())
++    print("Dtypes:", X_selected.dtypes.to_dict())
++    print()
++    
++    # Test 2: Pipeline with feature selection
++    print("Test 2: Pipeline with SelectKBest")
++    pipe = Pipeline([
++        ('selector', SelectKBest(chi2, k=2))
++    ])
++    pipe.set_output(transform="pandas", preserve_dtypes=True)
++    X_pipe = pipe.fit_transform(X, y)
++    print("Pipeline output dtypes:", X_pipe.dtypes.to_dict())
++    print()
++    
++    # Test 3: ColumnTransformer with mixed transformers
++    print("Test 3: ColumnTransformer with mixed transformers")
++    ct = ColumnTransformer([
++        ('passthrough_float32', 'passthrough', ['sepal length (cm)']),
++        ('passthrough_float16', 'passthrough', ['petal length (cm)']),
++        ('scaler', MinMaxScaler(), ['sepal width (cm)']),  # This will change dtype
++    ])
++    ct.set_output(transform="pandas", preserve_dtypes=True)
++    X_ct = ct.fit_transform(X)
++    print("ColumnTransformer output dtypes:")
++    for col in X_ct.columns:
++        print(f"  {col}: {X_ct[col].dtype}")
++    print()
++    
++    # Test 4: Nested pipeline with ColumnTransformer
++    print("Test 4: Nested pipeline")
++    # First create a subset with feature selection
++    selector2 = SelectKBest(chi2, k=3)
++    selector2.set_output(transform="pandas", preserve_dtypes=True)
++    X_subset = selector2.fit_transform(X, y)
++    
++    # Then apply column transformer
++    ct2 = ColumnTransformer([
++        ('passthrough', 'passthrough', X_subset.columns.tolist())
++    ])
++    ct2.set_output(transform="pandas", preserve_dtypes=True)
++    X_final = ct2.fit_transform(X_subset)
++    print("Final output dtypes:")
++    for col in X_final.columns:
++        print(f"  {col}: {X_final[col].dtype}")
++    print()
++    
++    # Test 5: Verify that transformers that modify values don't preserve dtypes inappropriately
++    print("Test 5: StandardScaler (modifies values)")
++    scaler = StandardScaler()
++    scaler.set_output(transform="pandas", preserve_dtypes=True)
++    X_scaled = scaler.fit_transform(X)
++    print("StandardScaler output dtypes (should be float64 for proper precision):")
++    print(X_scaled.dtypes.to_dict())
++
++
++if __name__ == "__main__":
++    test_comprehensive_dtype_preservation()
+diff --git a/test_dtype_preservation.py b/test_dtype_preservation.py
+new file mode 100644
+index 000000000..6dad8d836
+--- /dev/null
++++ b/test_dtype_preservation.py
+@@ -0,0 +1,30 @@
++import numpy as np
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest
++from sklearn.feature_selection import chi2
++
++# Test case from the problem statement
++X, y = load_iris(return_X_y=True, as_frame=True)
++X = X.astype(
++   {
++       "petal width (cm)": np.float16,
++       "petal length (cm)": np.float16,
++   }
++)
++X["cat"] = y.astype("category")
++
++print("Original dtypes:")
++print(X.dtypes)
++print()
++
++selector = SelectKBest(chi2, k=2)
++selector.set_output(transform="pandas")
++X_out = selector.fit_transform(X, y)
++
++print("Output dtypes (current behavior):")
++print(X_out.dtypes)
++print()
++
++# Let's also check what columns were selected
++print("Selected columns:")
++print(X_out.columns.tolist())
+diff --git a/test_dtype_preservation_comprehensive.py b/test_dtype_preservation_comprehensive.py
+new file mode 100644
+index 000000000..87a0e2211
+--- /dev/null
++++ b/test_dtype_preservation_comprehensive.py
+@@ -0,0 +1,59 @@
++import numpy as np
++import pandas as pd
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest, chi2
++from sklearn.preprocessing import StandardScaler
++from sklearn.pipeline import Pipeline
++from sklearn.compose import ColumnTransformer
++
++
++def test_dtype_preservation():
++    """Test dtype preservation with various transformers."""
++    # Create test data with various dtypes
++    X, y = load_iris(return_X_y=True, as_frame=True)
++    X = X.astype({
++        "sepal length (cm)": np.float32,
++        "sepal width (cm)": np.float64,
++        "petal length (cm)": np.float16,
++        "petal width (cm)": np.int32,
++    })
++    X["cat"] = y.astype("category")
++    X["str_cat"] = pd.Categorical(["A", "B", "C"] * 50)
++    
++    print("Original dtypes:")
++    print(X.dtypes)
++    print()
++    
++    # Test 1: SelectKBest without dtype preservation (current behavior)
++    selector = SelectKBest(chi2, k=3)
++    selector.set_output(transform="pandas")
++    X_numeric = X.select_dtypes(include=[np.number])
++    X_out = selector.fit_transform(X_numeric, y)
++    
++    print("SelectKBest output dtypes (current behavior):")
++    print(X_out.dtypes)
++    print()
++    
++    # Test 2: StandardScaler (modifies values, so dtypes might change)
++    scaler = StandardScaler()
++    scaler.set_output(transform="pandas")
++    X_scaled = scaler.fit_transform(X_numeric)
++    
++    print("StandardScaler output dtypes (current behavior):")
++    print(X_scaled.dtypes)
++    print()
++    
++    # Test 3: Pipeline with selector only (chi2 needs non-negative values)
++    pipe = Pipeline([
++        ('selector', SelectKBest(chi2, k=2))
++    ])
++    pipe.set_output(transform="pandas")
++    X_pipe = pipe.fit_transform(X_numeric, y)
++    
++    print("Pipeline output dtypes (current behavior):")
++    print(X_pipe.dtypes)
++    print()
++
++
++if __name__ == "__main__":
++    test_dtype_preservation()
+diff --git a/test_dtype_preservation_with_fix.py b/test_dtype_preservation_with_fix.py
+new file mode 100644
+index 000000000..9a9c2fd9f
+--- /dev/null
++++ b/test_dtype_preservation_with_fix.py
+@@ -0,0 +1,69 @@
++import numpy as np
++import pandas as pd
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest, chi2
++from sklearn.preprocessing import StandardScaler
++from sklearn.pipeline import Pipeline
++
++
++def test_dtype_preservation_with_fix():
++    """Test dtype preservation with the new preserve_dtypes parameter."""
++    # Create test data with various dtypes
++    X, y = load_iris(return_X_y=True, as_frame=True)
++    X = X.astype({
++        "sepal length (cm)": np.float32,
++        "sepal width (cm)": np.float64,
++        "petal length (cm)": np.float16,
++        "petal width (cm)": np.int32,
++    })
++    X["cat"] = y.astype("category")
++    
++    print("Original dtypes:")
++    print(X.dtypes)
++    print()
++    
++    # Test 1: SelectKBest with dtype preservation enabled
++    selector = SelectKBest(chi2, k=3)
++    selector.set_output(transform="pandas", preserve_dtypes=True)
++    X_numeric = X.select_dtypes(include=[np.number])
++    X_out = selector.fit_transform(X_numeric, y)
++    
++    print("SelectKBest output dtypes (with preserve_dtypes=True):")
++    print(X_out.dtypes)
++    print()
++    
++    # Test 2: SelectKBest without dtype preservation (default)
++    selector2 = SelectKBest(chi2, k=3)
++    selector2.set_output(transform="pandas", preserve_dtypes=False)
++    X_out2 = selector2.fit_transform(X_numeric, y)
++    
++    print("SelectKBest output dtypes (with preserve_dtypes=False):")
++    print(X_out2.dtypes)
++    print()
++    
++    # Test 3: StandardScaler with dtype preservation
++    # Note: StandardScaler modifies values, so dtypes might need to change
++    scaler = StandardScaler()
++    scaler.set_output(transform="pandas", preserve_dtypes=True)
++    X_scaled = scaler.fit_transform(X_numeric)
++    
++    print("StandardScaler output dtypes (with preserve_dtypes=True):")
++    print(X_scaled.dtypes)
++    print()
++    
++    # Test 4: Test with categorical column included
++    selector3 = SelectKBest(chi2, k=2)
++    selector3.set_output(transform="pandas", preserve_dtypes=True)
++    
++    # For this test, we'll create a simple numeric representation of the categorical
++    X_with_cat = X_numeric.copy()
++    X_with_cat["cat_numeric"] = y
++    X_out3 = selector3.fit_transform(X_with_cat, y)
++    
++    print("SelectKBest output with mixed types (preserve_dtypes=True):")
++    print(X_out3.dtypes)
++    print()
++
++
++if __name__ == "__main__":
++    test_dtype_preservation_with_fix()
+diff --git a/test_final_requirements.py b/test_final_requirements.py
+new file mode 100644
+index 000000000..7631cea8c
+--- /dev/null
++++ b/test_final_requirements.py
+@@ -0,0 +1,121 @@
++"""
++Test that all requirements from the problem statement are met.
++"""
++import numpy as np
++import pandas as pd
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest, chi2
++from sklearn.compose import ColumnTransformer
++from sklearn.pipeline import Pipeline
++
++
++def test_problem_statement_requirements():
++    """Test the exact scenario from the problem statement."""
++    print("=== Testing Problem Statement Requirements ===\n")
++    
++    # Original test case from the problem statement
++    X, y = load_iris(return_X_y=True, as_frame=True)
++    X = X.astype(
++       {
++           "petal width (cm)": np.float16,
++           "petal length (cm)": np.float16,
++       }
++    )
++    X["cat"] = y.astype("category")
++    
++    print("Original dtypes:")
++    print(X.dtypes)
++    print()
++    
++    # Test without dtype preservation (current behavior)
++    selector = SelectKBest(chi2, k=2)
++    selector.set_output(transform="pandas")
++    X_out = selector.fit_transform(X, y)
++    print("Output without dtype preservation (current behavior):")
++    print(X_out.dtypes)
++    print()
++    
++    # Test with dtype preservation (new feature)
++    selector2 = SelectKBest(chi2, k=2)
++    selector2.set_output(transform="pandas", preserve_dtypes=True)
++    X_out2 = selector2.fit_transform(X, y)
++    print("Output with dtype preservation (NEW FEATURE):")
++    print(X_out2.dtypes)
++    print()
++    
++    # Verify the dtypes are preserved
++    assert X_out2["petal length (cm)"].dtype == np.float16, "float16 dtype not preserved!"
++    assert X_out2["cat"].dtype.name == "category", "category dtype not preserved!"
++    print("✓ Dtypes preserved correctly!")
++    print()
++    
++    # Test sequential use of ColumnTransformer (mentioned in problem statement)
++    print("=== Testing Sequential ColumnTransformer Use ===\n")
++    
++    # Create data with mixed dtypes
++    X_mixed = pd.DataFrame({
++        "num_float32": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
++        "num_float16": np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float16),
++        "num_int": np.array([9, 10, 11, 12], dtype=np.int32),
++        "cat": pd.Categorical(["A", "B", "A", "B"]),
++    })
++    
++    print("Original mixed dtypes:")
++    print(X_mixed.dtypes)
++    print()
++    
++    # First column transformer
++    ct1 = ColumnTransformer([
++        ("passthrough", "passthrough", ["num_float32", "num_float16", "cat"])
++    ])
++    ct1.set_output(transform="pandas", preserve_dtypes=True)
++    X_ct1 = ct1.fit_transform(X_mixed)
++    
++    print("After first ColumnTransformer:")
++    print(X_ct1.dtypes)
++    print()
++    
++    # Second column transformer (sequential use)
++    ct2 = ColumnTransformer([
++        ("passthrough", "passthrough", X_ct1.columns.tolist())
++    ])
++    ct2.set_output(transform="pandas", preserve_dtypes=True)
++    X_ct2 = ct2.fit_transform(X_ct1)
++    
++    print("After second ColumnTransformer (sequential):")
++    print(X_ct2.dtypes)
++    print()
++    
++    # Verify dtypes are still preserved after sequential transformations
++    assert "float32" in str(X_ct2.dtypes[0]), "float32 not preserved in sequential use!"
++    assert "float16" in str(X_ct2.dtypes[1]), "float16 not preserved in sequential use!"
++    assert "category" in str(X_ct2.dtypes[2]), "category not preserved in sequential use!"
++    print("✓ Dtypes preserved in sequential ColumnTransformer use!")
++    print()
++    
++    # Test that it works with Pipeline
++    print("=== Testing with Pipeline ===\n")
++    
++    pipe = Pipeline([
++        ('selector', SelectKBest(chi2, k=2))
++    ])
++    pipe.set_output(transform="pandas", preserve_dtypes=True)
++    
++    X_numeric = X.select_dtypes(include=[np.number])
++    X_pipe = pipe.fit_transform(X_numeric, y)
++    
++    print("Pipeline output dtypes:")
++    print(X_pipe.dtypes)
++    print()
++    
++    # Verify at least one non-float64 dtype is preserved
++    has_preserved_dtype = any(dtype != np.float64 for dtype in X_pipe.dtypes)
++    assert has_preserved_dtype, "No dtypes were preserved in pipeline!"
++    print("✓ Dtypes preserved in Pipeline!")
++    print()
++    
++    print("=== ALL REQUIREMENTS MET! ===")
++
++
++if __name__ == "__main__":
++    test_problem_statement_requirements()
+diff --git a/test_original_problem.py b/test_original_problem.py
+new file mode 100644
+index 000000000..a3a2822af
+--- /dev/null
++++ b/test_original_problem.py
+@@ -0,0 +1,33 @@
++import numpy as np
++from sklearn.datasets import load_iris
++from sklearn.feature_selection import SelectKBest
++from sklearn.feature_selection import chi2
++
++# Original test case from the problem statement
++X, y = load_iris(return_X_y=True, as_frame=True)
++X = X.astype(
++   {
++       "petal width (cm)": np.float16,
++       "petal length (cm)": np.float16,
++   }
++)
++X["cat"] = y.astype("category")
++
++print("Original dtypes:")
++print(X.dtypes)
++print()
++
++# Without dtype preservation (current behavior)
++selector = SelectKBest(chi2, k=2)
++selector.set_output(transform="pandas")
++X_out = selector.fit_transform(X, y)
++print("Output without dtype preservation:")
++print(X_out.dtypes)
++print()
++
++# With dtype preservation (new feature)
++selector2 = SelectKBest(chi2, k=2)
++selector2.set_output(transform="pandas", preserve_dtypes=True)
++X_out2 = selector2.fit_transform(X, y)
++print("Output with dtype preservation:")
++print(X_out2.dtypes)

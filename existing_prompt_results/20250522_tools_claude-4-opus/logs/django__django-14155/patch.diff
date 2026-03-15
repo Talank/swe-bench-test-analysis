@@ -1,0 +1,348 @@
+diff --git a/django/urls/resolvers.py b/django/urls/resolvers.py
+index 9b00e24509..338d5a7394 100644
+--- a/django/urls/resolvers.py
++++ b/django/urls/resolvers.py
+@@ -45,7 +45,17 @@ class ResolverMatch:
+         self.namespaces = [x for x in namespaces if x] if namespaces else []
+         self.namespace = ':'.join(self.namespaces)
+ 
+-        if not hasattr(func, '__name__'):
++        # Handle functools.partial objects for _func_path
++        if isinstance(func, functools.partial):
++            # For partial functions, extract the underlying function for path
++            underlying_func = func.func
++            if not hasattr(underlying_func, '__name__'):
++                # A class-based view
++                self._func_path = underlying_func.__class__.__module__ + '.' + underlying_func.__class__.__name__
++            else:
++                # A function-based view
++                self._func_path = underlying_func.__module__ + '.' + underlying_func.__name__
++        elif not hasattr(func, '__name__'):
+             # A class-based view
+             self._func_path = func.__class__.__module__ + '.' + func.__class__.__name__
+         else:
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..ce104a1d46
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""Test edge cases for functools.partial handling in ResolverMatch"""
++import functools
++from django.urls.resolvers import ResolverMatch
++
++
++def my_view(request, arg1, arg2, arg3):
++    """A simple view function for testing"""
++    return f"View called with {arg1}, {arg2}, {arg3}"
++
++
++def test_nested_partial():
++    """Test ResolverMatch with nested partials"""
++    # Create a nested partial
++    partial1 = functools.partial(my_view, 'arg1')
++    partial2 = functools.partial(partial1, 'arg2')
++    
++    match = ResolverMatch(partial2, ('arg3',), {}, url_name='nested_partial')
++    print("Nested partial:")
++    print(f"  repr: {repr(match)}")
++    print(f"  func: {match.func}")
++    print(f"  Underlying function chain:")
++    print(f"    partial2.func: {partial2.func}")
++    print(f"    partial1.func: {partial1.func}")
++    print()
++
++
++def test_lambda_function():
++    """Test ResolverMatch with lambda function"""
++    lambda_view = lambda request: "Lambda response"
++    match = ResolverMatch(lambda_view, (), {}, url_name='lambda_view')
++    print("Lambda function:")
++    print(f"  repr: {repr(match)}")
++    print()
++
++
++def test_callable_object():
++    """Test ResolverMatch with callable object"""
++    class CallableView:
++        def __call__(self, request):
++            return "Callable response"
++    
++    view = CallableView()
++    match = ResolverMatch(view, (), {}, url_name='callable_view')
++    print("Callable object:")
++    print(f"  repr: {repr(match)}")
++    print()
++
++
++if __name__ == "__main__":
++    test_nested_partial()
++    test_lambda_function()
++    test_callable_object()
+diff --git a/test_partial_comprehensive.py b/test_partial_comprehensive.py
+new file mode 100644
+index 0000000000..efe5a6426b
+--- /dev/null
++++ b/test_partial_comprehensive.py
+@@ -0,0 +1,107 @@
++#!/usr/bin/env python
++"""Comprehensive test for functools.partial handling in ResolverMatch"""
++import functools
++from django.urls.resolvers import ResolverMatch
++
++
++def my_view(request, arg1, arg2, kwarg1=None, kwarg2=None):
++    """A simple view function for testing"""
++    return f"View called with {arg1}, {arg2}, {kwarg1}, {kwarg2}"
++
++
++class MyClassView:
++    """A simple class-based view for testing"""
++    def __init__(self, arg1):
++        self.arg1 = arg1
++    
++    def __call__(self, request, arg2):
++        return f"Class view called with {self.arg1} and {arg2}"
++
++
++def test_regular_function():
++    """Test ResolverMatch with a regular function"""
++    match = ResolverMatch(my_view, ('val1', 'val2'), {'kwarg1': 'kw1'}, url_name='my_view')
++    print("1. Regular function:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print(f"   args: {match.args}")
++    print(f"   kwargs: {match.kwargs}")
++    print()
++
++
++def test_partial_with_args():
++    """Test ResolverMatch with a partial that has positional args"""
++    partial_view = functools.partial(my_view, 'fixed_arg1')
++    match = ResolverMatch(partial_view, ('val2',), {'kwarg1': 'kw1'}, url_name='partial_view')
++    print("2. Partial with positional args:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print(f"   args: {match.args}")
++    print(f"   kwargs: {match.kwargs}")
++    print()
++
++
++def test_partial_with_kwargs():
++    """Test ResolverMatch with a partial that has keyword args"""
++    partial_view = functools.partial(my_view, kwarg1='fixed_kw1', kwarg2='fixed_kw2')
++    match = ResolverMatch(partial_view, ('val1', 'val2'), {}, url_name='partial_view')
++    print("3. Partial with keyword args:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print(f"   args: {match.args}")
++    print(f"   kwargs: {match.kwargs}")
++    print()
++
++
++def test_partial_with_both():
++    """Test ResolverMatch with a partial that has both args and kwargs"""
++    partial_view = functools.partial(my_view, 'fixed_arg1', kwarg1='fixed_kw1')
++    match = ResolverMatch(partial_view, ('val2',), {'kwarg2': 'kw2'}, url_name='partial_view')
++    print("4. Partial with both args and kwargs:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print(f"   args: {match.args}")
++    print(f"   kwargs: {match.kwargs}")
++    print()
++
++
++def test_class_based_view():
++    """Test ResolverMatch with a class-based view"""
++    view_instance = MyClassView('init_arg')
++    match = ResolverMatch(view_instance, ('val2',), {}, url_name='class_view')
++    print("5. Class-based view:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print()
++
++
++def test_partial_class_based_view():
++    """Test ResolverMatch with a partial of a class-based view"""
++    view_instance = MyClassView('init_arg')
++    partial_view = functools.partial(view_instance, 'fixed_arg2')
++    match = ResolverMatch(partial_view, (), {}, url_name='partial_class_view')
++    print("6. Partial of class-based view:")
++    print(f"   repr: {repr(match)}")
++    print(f"   func: {match.func}")
++    print()
++
++
++def test_getitem_compatibility():
++    """Test that __getitem__ still works correctly"""
++    partial_view = functools.partial(my_view, 'fixed_arg1', kwarg1='fixed_kw1')
++    match = ResolverMatch(partial_view, ('val2',), {'kwarg2': 'kw2'}, url_name='partial_view')
++    print("7. Testing __getitem__ compatibility:")
++    print(f"   match[0] (func): {match[0]}")
++    print(f"   match[1] (args): {match[1]}")
++    print(f"   match[2] (kwargs): {match[2]}")
++    print()
++
++
++if __name__ == "__main__":
++    test_regular_function()
++    test_partial_with_args()
++    test_partial_with_kwargs()
++    test_partial_with_both()
++    test_class_based_view()
++    test_partial_class_based_view()
++    test_getitem_compatibility()
+diff --git a/test_partial_repr.py b/test_partial_repr.py
+new file mode 100644
+index 0000000000..6a6a0994f7
+--- /dev/null
++++ b/test_partial_repr.py
+@@ -0,0 +1,36 @@
++#!/usr/bin/env python
++"""Test script to reproduce the issue with functools.partial in ResolverMatch.__repr__()"""
++import functools
++from django.urls.resolvers import ResolverMatch
++
++
++def my_view(request, arg1, arg2):
++    """A simple view function for testing"""
++    return f"View called with {arg1} and {arg2}"
++
++
++def test_regular_function():
++    """Test ResolverMatch with a regular function"""
++    match = ResolverMatch(my_view, (), {}, url_name='my_view')
++    print("Regular function repr:")
++    print(repr(match))
++    print()
++
++
++def test_partial_function():
++    """Test ResolverMatch with a functools.partial function"""
++    partial_view = functools.partial(my_view, arg1="fixed_value")
++    match = ResolverMatch(partial_view, (), {}, url_name='partial_view')
++    print("Partial function repr (current behavior):")
++    print(repr(match))
++    print()
++    print("Partial function details:")
++    print(f"  - func: {partial_view.func}")
++    print(f"  - args: {partial_view.args}")
++    print(f"  - keywords: {partial_view.keywords}")
++    print()
++
++
++if __name__ == "__main__":
++    test_regular_function()
++    test_partial_function()
+diff --git a/test_partial_resolver.py b/test_partial_resolver.py
+new file mode 100644
+index 0000000000..fd693078b6
+--- /dev/null
++++ b/test_partial_resolver.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python
++"""Test for functools.partial handling in ResolverMatch"""
++import functools
++from django.test import SimpleTestCase
++from django.urls.resolvers import ResolverMatch
++
++
++def my_view(request, arg1, arg2, kwarg1=None):
++    """A simple view function for testing"""
++    return f"View called with {arg1}, {arg2}, {kwarg1}"
++
++
++class PartialResolverMatchTests(SimpleTestCase):
++    """Test ResolverMatch with functools.partial views"""
++    
++    def test_partial_function_repr(self):
++        """Test that ResolverMatch.__repr__ shows the underlying function for partials"""
++        partial_view = functools.partial(my_view, 'fixed_arg1')
++        match = ResolverMatch(partial_view, ('val2',), {'kwarg1': 'kw1'}, url_name='partial_view')
++        
++        # The repr should show the underlying function, not functools.partial
++        self.assertIn('.my_view', repr(match))
++        self.assertNotIn('functools.partial', repr(match))
++        
++        # The actual func should still be the partial
++        self.assertIsInstance(match.func, functools.partial)
++        self.assertEqual(match.func.func, my_view)
++        self.assertEqual(match.func.args, ('fixed_arg1',))
++    
++    def test_partial_with_kwargs(self):
++        """Test ResolverMatch with a partial that has keyword arguments"""
++        partial_view = functools.partial(my_view, kwarg1='fixed_kw1')
++        match = ResolverMatch(partial_view, ('val1', 'val2'), {}, url_name='partial_view')
++        
++        # The repr should show the underlying function
++        self.assertIn('.my_view', repr(match))
++        
++        # The actual func should still be the partial with its kwargs
++        self.assertEqual(match.func.keywords, {'kwarg1': 'fixed_kw1'})
++    
++    def test_regular_function_unchanged(self):
++        """Test that regular functions still work as before"""
++        match = ResolverMatch(my_view, ('val1', 'val2'), {}, url_name='my_view')
++        
++        # The repr should show the function as before
++        self.assertIn('.my_view', repr(match))
++        self.assertEqual(match.func, my_view)
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            SECRET_KEY='test-secret-key',
++        )
++        django.setup()
++    
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    test_runner.run_tests(['__main__'])
+diff --git a/tests/urlpatterns_reverse/tests.py b/tests/urlpatterns_reverse/tests.py
+index 09028be795..49b1b3d125 100644
+--- a/tests/urlpatterns_reverse/tests.py
++++ b/tests/urlpatterns_reverse/tests.py
+@@ -1145,6 +1145,26 @@ class ResolverMatchTests(SimpleTestCase):
+             "namespaces=[], route=^no_kwargs/([0-9]+)/([0-9]+)/$)",
+         )
+ 
++    def test_repr_functools_partial(self):
++        # Test that ResolverMatch handles functools.partial correctly
++        from functools import partial
++        from urlpatterns_reverse.views import empty_view
++        
++        partial_view = partial(empty_view, arg1='fixed')
++        match = ResolverMatch(
++            partial_view, ('42',), {}, 
++            url_name='partial-view', app_names=[], namespaces=[], route='test/'
++        )
++        
++        # The repr should show the underlying function, not functools.partial
++        self.assertIn('urlpatterns_reverse.views.empty_view', repr(match))
++        self.assertNotIn('functools.partial', repr(match))
++        
++        # The actual func should still be the partial
++        self.assertIsInstance(match.func, partial)
++        self.assertEqual(match.func.func, empty_view)
++        self.assertEqual(match.func.keywords, {'arg1': 'fixed'})
++
+ 
+ @override_settings(ROOT_URLCONF='urlpatterns_reverse.erroneous_urls')
+ class ErroneousViewTests(SimpleTestCase):

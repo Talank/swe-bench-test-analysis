@@ -1,0 +1,202 @@
+diff --git a/django/forms/widgets.py b/django/forms/widgets.py
+index 338d54d72f..e9f2e47d60 100644
+--- a/django/forms/widgets.py
++++ b/django/forms/widgets.py
+@@ -387,6 +387,9 @@ class FileInput(Input):
+     def value_omitted_from_data(self, data, files, name):
+         return name not in files
+ 
++    def use_required_attribute(self, initial):
++        return super().use_required_attribute(initial) and not initial
++
+ 
+ FILE_INPUT_CONTRADICTION = object()
+ 
+diff --git a/test_file_input_required.py b/test_file_input_required.py
+new file mode 100644
+index 0000000000..760c0d998b
+--- /dev/null
++++ b/test_file_input_required.py
+@@ -0,0 +1,79 @@
++"""Test script to reproduce the FileInput required attribute issue"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++)
++django.setup()
++
++from django.forms import FileField, Form
++from django.forms.widgets import FileInput, ClearableFileInput
++from django.core.files.uploadedfile import SimpleUploadedFile
++
++# Test 1: FileInput with initial data should not show required attribute
++class TestForm(Form):
++    file_field = FileField(required=True, widget=FileInput())
++
++form = TestForm()
++widget = form.fields['file_field'].widget
++widget.is_required = True  # Set by the field
++
++# Test without initial value
++print("Test 1 - FileInput without initial value:")
++print(f"use_required_attribute(None) = {widget.use_required_attribute(None)}")
++print(f"Expected: True (should show required attribute)")
++
++# Test with initial value (simulating a file already uploaded)
++initial_file = SimpleUploadedFile("test.txt", b"file content")
++print("\nTest 2 - FileInput with initial value:")
++print(f"use_required_attribute(initial_file) = {widget.use_required_attribute(initial_file)}")
++print(f"Expected: False (should NOT show required attribute)")
++
++# Test 3: ClearableFileInput behavior
++class TestForm2(Form):
++    file_field = FileField(required=True, widget=ClearableFileInput())
++
++form2 = TestForm2()
++widget2 = form2.fields['file_field'].widget
++widget2.is_required = True
++
++print("\nTest 3 - ClearableFileInput without initial value:")
++print(f"use_required_attribute(None) = {widget2.use_required_attribute(None)}")
++print(f"Expected: True")
++
++print("\nTest 4 - ClearableFileInput with initial value:")
++print(f"use_required_attribute(initial_file) = {widget2.use_required_attribute(initial_file)}")
++print(f"Expected: False")
++
++# Test the actual HTML rendering
++print("\n\nHTML Rendering Tests:")
++print("=" * 50)
++
++# Create a form with bound data
++from django.forms.boundfield import BoundField
++
++form3 = TestForm()
++bound_field = BoundField(form3, form3.fields['file_field'], 'file_field')
++
++# Test rendering without initial
++print("\nFileInput without initial:")
++attrs = bound_field.build_widget_attrs({})
++print(f"Attributes: {attrs}")
++print(f"Has 'required' attribute: {'required' in attrs}")
++
++# Test rendering with initial by creating a bound form with initial data
++class TestFormWithInitial(Form):
++    file_field = FileField(required=True, widget=FileInput())
++
++form4 = TestFormWithInitial(initial={'file_field': initial_file})
++bound_field2 = BoundField(form4, form4.fields['file_field'], 'file_field')
++attrs2 = bound_field2.build_widget_attrs({})
++print(f"\nFileInput with initial:")
++print(f"Attributes: {attrs2}")
++print(f"Has 'required' attribute: {'required' in attrs2}")
+diff --git a/test_form_integration.py b/test_form_integration.py
+new file mode 100644
+index 0000000000..c19306fbf3
+--- /dev/null
++++ b/test_form_integration.py
+@@ -0,0 +1,83 @@
++"""Test the FileInput required attribute behavior in a form context"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++)
++django.setup()
++
++from django import forms
++from django.db import models
++from django.core.files.uploadedfile import SimpleUploadedFile
++
++# Create a test model
++class Document(models.Model):
++    file = models.FileField(upload_to='documents/')
++    
++    class Meta:
++        app_label = 'test'
++
++# Create a ModelForm
++class DocumentForm(forms.ModelForm):
++    class Meta:
++        model = Document
++        fields = ['file']
++
++# Test 1: New form (no instance)
++print("Test 1: New form without instance")
++form = DocumentForm()
++field_html = str(form['file'])
++print(f"HTML: {field_html}")
++print(f"Has 'required' attribute: {'required' in field_html}")
++print()
++
++# Test 2: Form with instance that has a file
++print("Test 2: Form with instance that has a file")
++# Create a mock file field value
++class MockFile:
++    name = 'test.pdf'
++    url = '/media/documents/test.pdf'
++    
++    def __str__(self):
++        return self.name
++
++doc = Document()
++doc.file = MockFile()
++form = DocumentForm(instance=doc)
++field_html = str(form['file'])
++print(f"HTML: {field_html}")
++print(f"Has 'required' attribute: {'required' in field_html}")
++print()
++
++# Test 3: Regular Form with FileField
++class UploadForm(forms.Form):
++    document = forms.FileField(required=True)
++
++print("Test 3: Regular form without initial")
++form = UploadForm()
++field_html = str(form['document'])
++print(f"HTML: {field_html}")
++print(f"Has 'required' attribute: {'required' in field_html}")
++print()
++
++print("Test 4: Regular form with initial")
++form = UploadForm(initial={'document': SimpleUploadedFile('test.txt', b'content')})
++field_html = str(form['document'])
++print(f"HTML: {field_html}")
++print(f"Has 'required' attribute: {'required' in field_html}")
+diff --git a/tests/forms_tests/widget_tests/test_fileinput.py b/tests/forms_tests/widget_tests/test_fileinput.py
+index bbd7c7fe52..8eec26253a 100644
+--- a/tests/forms_tests/widget_tests/test_fileinput.py
++++ b/tests/forms_tests/widget_tests/test_fileinput.py
+@@ -18,3 +18,9 @@ class FileInputTest(WidgetTest):
+     def test_value_omitted_from_data(self):
+         self.assertIs(self.widget.value_omitted_from_data({}, {}, 'field'), True)
+         self.assertIs(self.widget.value_omitted_from_data({}, {'field': 'value'}, 'field'), False)
++
++    def test_use_required_attribute(self):
++        # False when initial data exists. The file input is left blank by the
++        # user to keep the existing, initial value.
++        self.assertIs(self.widget.use_required_attribute(None), True)
++        self.assertIs(self.widget.use_required_attribute('resume.txt'), False)

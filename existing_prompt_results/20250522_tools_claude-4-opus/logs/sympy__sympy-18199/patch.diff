@@ -1,0 +1,337 @@
+diff --git a/debug_trace.py b/debug_trace.py
+new file mode 100644
+index 0000000000..a04a767f50
+--- /dev/null
++++ b/debug_trace.py
+@@ -0,0 +1,56 @@
++from sympy.ntheory.residue_ntheory import nthroot_mod, _nthroot_mod1, primitive_root
++from sympy.core.numbers import igcdex
++
++# Let's trace through what happens with nthroot_mod(0, 3, 7)
++a = 0
++n = 3
++p = 7
++
++print(f"Tracing nthroot_mod({a}, {n}, {p}):")
++print(f"a % p = {a % p}")
++print(f"(p - 1) % n = {(p - 1) % n}")
++
++# Since (p-1) % n == 0, it will call _nthroot_mod1
++# Let's trace what happens in _nthroot_mod1
++
++s = a  # 0
++q = n  # 3
++
++print(f"\nIn _nthroot_mod1(s={s}, q={q}, p={p}):")
++
++g = primitive_root(p)
++print(f"g (primitive root of {p}) = {g}")
++
++f = p - 1  # 6
++print(f"f = p - 1 = {f}")
++
++# determine k
++k = 0
++f_temp = f
++while f_temp % q == 0:
++    k += 1
++    f_temp = f_temp // q
++print(f"k = {k}, f after division = {f_temp}")
++
++# find z, x, r1
++f1 = igcdex(-f_temp, q)[0] % q
++print(f"f1 = igcdex(-{f_temp}, {q})[0] % {q} = {f1}")
++
++z = f_temp * f1
++print(f"z = f * f1 = {f_temp} * {f1} = {z}")
++
++x = (1 + z) // q
++print(f"x = (1 + z) // q = (1 + {z}) // {q} = {x}")
++
++r1 = pow(s, x, p)
++print(f"r1 = pow(s, x, p) = pow({s}, {x}, {p}) = {r1}")
++
++s1 = pow(s, f_temp, p)
++print(f"s1 = pow(s, f, p) = pow({s}, {f_temp}, {p}) = {s1}")
++
++h = pow(g, f_temp*q, p)
++print(f"h = pow(g, f*q, p) = pow({g}, {f_temp}*{q}, {p}) = {h}")
++
++print(f"\nNow it tries to compute discrete_log({p}, {s1}, {h})")
++print("This fails because s1 = 0 and we're looking for t such that h^t ≡ 0 (mod p)")
++print("But since p is prime and h != 0, there's no such t.")
+diff --git a/sympy/ntheory/residue_ntheory.py b/sympy/ntheory/residue_ntheory.py
+index 9a3052d4c3..e19fa40512 100644
+--- a/sympy/ntheory/residue_ntheory.py
++++ b/sympy/ntheory/residue_ntheory.py
+@@ -707,6 +707,12 @@ def _nthroot_mod1(s, q, p, all_roots):
+     .. [1] A. M. Johnston "A Generalized qth Root Algorithm"
+ 
+     """
++    # Special case: if s % p == 0, then the only root is 0
++    if s % p == 0:
++        if all_roots:
++            return [0]
++        return 0
++    
+     g = primitive_root(p)
+     if not isprime(q):
+         r = _nthroot_mod2(s, q, p)
+diff --git a/sympy/ntheory/tests/test_residue.py b/sympy/ntheory/tests/test_residue.py
+index d4854547be..7d739c4eae 100644
+--- a/sympy/ntheory/tests/test_residue.py
++++ b/sympy/ntheory/tests/test_residue.py
+@@ -172,6 +172,13 @@ def test_residue():
+     assert nthroot_mod(11, 3, 109) is None
+     raises(NotImplementedError, lambda: nthroot_mod(16, 5, 36))
+     raises(NotImplementedError, lambda: nthroot_mod(9, 16, 36))
++    
++    # Test edge case where a % p == 0
++    assert nthroot_mod(17*17, 5, 17) == 0
++    assert nthroot_mod(0, 3, 7) == 0
++    assert nthroot_mod(0, 5, 17) == 0
++    assert nthroot_mod(14, 3, 7) == 0  # 14 % 7 == 0
++    assert nthroot_mod(17*17, 5, 17, all_roots=True) == [0]
+ 
+     for p in primerange(5, 100):
+         qv = range(3, p, 4)
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..acccf75ffd
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,63 @@
++from sympy.ntheory.residue_ntheory import nthroot_mod
++from sympy.ntheory.generate import primerange
++
++# Test comprehensive cases for a % p == 0
++print("Testing comprehensive cases where a % p == 0:")
++
++test_cases = []
++
++# Generate test cases for small primes
++for p in primerange(3, 20):
++    for n in range(2, min(p, 10)):
++        # Test with a = 0
++        test_cases.append((0, n, p))
++        # Test with a = k*p for small k
++        for k in range(1, 4):
++            test_cases.append((k*p, n, p))
++
++# Run all test cases
++errors = []
++for a, n, p in test_cases:
++    try:
++        result = nthroot_mod(a, n, p)
++        all_roots = nthroot_mod(a, n, p, all_roots=True)
++        
++        # Verify the result
++        if result is not None:
++            assert pow(result, n, p) == a % p, f"Failed verification for nthroot_mod({a}, {n}, {p})"
++            
++        if all_roots is not None:
++            for root in all_roots:
++                assert pow(root, n, p) == a % p, f"Failed verification for root {root} of nthroot_mod({a}, {n}, {p})"
++                
++    except Exception as e:
++        errors.append((a, n, p, str(e)))
++
++if errors:
++    print(f"\nFound {len(errors)} errors:")
++    for a, n, p, err in errors[:10]:  # Show first 10 errors
++        print(f"  nthroot_mod({a}, {n}, {p}): {err}")
++else:
++    print(f"\nAll {len(test_cases)} test cases passed!")
++
++# Test the specific case from the problem statement
++print("\n\nTesting the specific case from problem statement:")
++result = nthroot_mod(17*17, 5, 17)
++print(f"nthroot_mod(17*17, 5, 17) = {result}")
++print(f"Verification: {result}**5 mod 17 = {pow(result, 5, 17)}")
++print(f"Expected: (17*17) mod 17 = {(17*17) % 17}")
++
++# Test that non-zero cases still work correctly
++print("\n\nTesting non-zero cases to ensure we didn't break anything:")
++non_zero_tests = [
++    (11, 4, 19),
++    (3, 5, 31),
++    (7, 3, 13),
++]
++
++for a, n, p in non_zero_tests:
++    result = nthroot_mod(a, n, p)
++    if result is not None:
++        print(f"nthroot_mod({a}, {n}, {p}) = {result}, verification: {result}**{n} mod {p} = {pow(result, n, p)}")
++    else:
++        print(f"nthroot_mod({a}, {n}, {p}) = None (no solution)")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..751101898d
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,47 @@
++from sympy.ntheory.residue_ntheory import nthroot_mod
++
++# Let's test various cases to understand the behavior
++test_cases = [
++    # (a, n, p, description)
++    (0, 2, 5, "0^2 = 0 mod 5"),
++    (0, 3, 7, "0^3 = 0 mod 7"),
++    (0, 5, 17, "0^5 = 0 mod 17"),
++    (17*17, 5, 17, "289^5 = 0 mod 17 (from problem statement)"),
++    (25, 2, 5, "25^2 = 0 mod 5"),
++    (49, 3, 7, "49^3 = 0 mod 7"),
++]
++
++for a, n, p, desc in test_cases:
++    print(f"\nTest: {desc}")
++    print(f"nthroot_mod({a}, {n}, {p}):")
++    try:
++        result = nthroot_mod(a, n, p)
++        print(f"  Single root: {result}")
++        all_roots = nthroot_mod(a, n, p, all_roots=True)
++        print(f"  All roots: {all_roots}")
++        # Verify
++        if all_roots:
++            for r in all_roots:
++                print(f"  Verify: {r}^{n} mod {p} = {pow(r, n, p)}, expected: {a % p}")
++    except Exception as e:
++        print(f"  Error: {type(e).__name__}: {e}")
++
++# Now let's check if the issue is with the _nthroot_mod1 function when a=0
++print("\n\nChecking _nthroot_mod1 path:")
++# When (p-1) % n == 0, the function uses _nthroot_mod1
++# For p=7, n=3: (7-1) % 3 = 6 % 3 = 0
++# For p=7, n=2: (7-1) % 2 = 6 % 2 = 0
++print("Testing cases where (p-1) % n == 0:")
++test_cases_mod1 = [
++    (0, 3, 7),    # (7-1) % 3 = 0
++    (0, 2, 7),    # (7-1) % 2 = 0
++    (0, 2, 3),    # (3-1) % 2 = 0
++]
++
++for a, n, p in test_cases_mod1:
++    print(f"\nnthroot_mod({a}, {n}, {p}) where (p-1) % n = {(p-1) % n}:")
++    try:
++        result = nthroot_mod(a, n, p, all_roots=True)
++        print(f"  Result: {result}")
++    except Exception as e:
++        print(f"  Error: {type(e).__name__}: {e}")
+diff --git a/test_nthroot_mod_issue.py b/test_nthroot_mod_issue.py
+new file mode 100644
+index 0000000000..e1acb389b8
+--- /dev/null
++++ b/test_nthroot_mod_issue.py
+@@ -0,0 +1,33 @@
++from sympy.ntheory.residue_ntheory import nthroot_mod
++
++# Test case from the problem statement
++print("Testing nthroot_mod(17*17, 5, 17):")
++result = nthroot_mod(17*17, 5, 17)
++print(f"Result: {result}")
++
++# Test with all_roots=True
++print("\nTesting nthroot_mod(17*17, 5, 17, all_roots=True):")
++result_all = nthroot_mod(17*17, 5, 17, all_roots=True)
++print(f"Result: {result_all}")
++
++# Verify that 0 is indeed a root
++print("\nVerifying that 0 is a root:")
++print(f"0**5 mod 17 = {pow(0, 5, 17)}")
++print(f"17*17 mod 17 = {(17*17) % 17}")
++
++# Test more cases where a % p == 0
++print("\nTesting more cases where a % p == 0:")
++test_cases = [
++    (0, 3, 7),      # 0 mod 7
++    (14, 3, 7),     # 14 = 2*7, so 14 % 7 = 0
++    (21, 4, 7),     # 21 = 3*7, so 21 % 7 = 0
++    (25, 2, 5),     # 25 = 5*5, so 25 % 5 = 0
++]
++
++for a, n, p in test_cases:
++    print(f"\nnthroot_mod({a}, {n}, {p}):")
++    result = nthroot_mod(a, n, p)
++    print(f"Result: {result}")
++    result_all = nthroot_mod(a, n, p, all_roots=True)
++    print(f"All roots: {result_all}")
++    print(f"Verification: {a} mod {p} = {a % p}")
+diff --git a/test_specific_case.py b/test_specific_case.py
+new file mode 100644
+index 0000000000..2102ae2d06
+--- /dev/null
++++ b/test_specific_case.py
+@@ -0,0 +1,43 @@
++from sympy.ntheory.residue_ntheory import nthroot_mod, is_nthpow_residue
++
++# Test the specific case from the problem statement
++a = 17 * 17  # = 289
++n = 5
++p = 17
++
++print(f"Testing nthroot_mod({a}, {n}, {p}):")
++print(f"a = {a}, a % p = {a % p}")
++
++# Check if it's a residue
++print(f"is_nthpow_residue({a}, {n}, {p}) = {is_nthpow_residue(a, n, p)}")
++
++# Get the result
++result = nthroot_mod(a, n, p)
++print(f"nthroot_mod result: {result}")
++
++# Get all roots
++all_roots = nthroot_mod(a, n, p, all_roots=True)
++print(f"All roots: {all_roots}")
++
++# Verify each root
++if all_roots:
++    for root in all_roots:
++        print(f"Verification: {root}**{n} mod {p} = {pow(root, n, p)}")
++
++# Now let's test what happens with a=0 directly
++print("\n\nTesting with a=0:")
++try:
++    result = nthroot_mod(0, 5, 17)
++    print(f"nthroot_mod(0, 5, 17) = {result}")
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test with other values where a % p == 0
++print("\n\nTesting with a=34 (2*17):")
++try:
++    result = nthroot_mod(34, 5, 17)
++    print(f"nthroot_mod(34, 5, 17) = {result}")
++    all_roots = nthroot_mod(34, 5, 17, all_roots=True)
++    print(f"All roots: {all_roots}")
++except Exception as e:
++    print(f"Error: {e}")
+diff --git a/test_sqrt_mod.py b/test_sqrt_mod.py
+new file mode 100644
+index 0000000000..244d7e4f87
+--- /dev/null
++++ b/test_sqrt_mod.py
+@@ -0,0 +1,24 @@
++from sympy.ntheory.residue_ntheory import sqrt_mod
++
++# Test sqrt_mod with a % p == 0
++print("Testing sqrt_mod with a % p == 0:")
++
++test_cases = [
++    (0, 5),
++    (0, 7),
++    (25, 5),  # 25 % 5 == 0
++    (49, 7),  # 49 % 7 == 0
++]
++
++for a, p in test_cases:
++    print(f"\nsqrt_mod({a}, {p}):")
++    try:
++        result = sqrt_mod(a, p)
++        print(f"  Result: {result}")
++        if result is not None:
++            print(f"  Verification: {result}**2 mod {p} = {pow(result, 2, p)}")
++        
++        all_roots = sqrt_mod(a, p, all_roots=True)
++        print(f"  All roots: {all_roots}")
++    except Exception as e:
++        print(f"  Error: {type(e).__name__}: {e}")

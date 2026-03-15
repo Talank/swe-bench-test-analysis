@@ -1,0 +1,587 @@
+diff --git a/check_exp_type.py b/check_exp_type.py
+new file mode 100644
+index 0000000000..fcfa13f3b9
+--- /dev/null
++++ b/check_exp_type.py
+@@ -0,0 +1,13 @@
++from sympy import exp
++from sympy.core.function import Function
++from sympy.physics import units
++
++expr = units.second / (units.ohm * units.farad)
++exp_expr = exp(expr)
++
++print(f"Type of exp: {type(exp)}")
++print(f"Is exp a Function class: {isinstance(exp, type) and issubclass(exp, Function)}")
++print(f"Type of exp(expr): {type(exp_expr)}")
++print(f"Is exp(expr) a Function: {isinstance(exp_expr, Function)}")
++print(f"exp_expr.func: {exp_expr.func}")
++print(f"exp_expr.args: {exp_expr.args}")
+diff --git a/check_functions.py b/check_functions.py
+new file mode 100644
+index 0000000000..c25407248f
+--- /dev/null
++++ b/check_functions.py
+@@ -0,0 +1,20 @@
++from sympy.functions.elementary.exponential import exp, log
++from sympy.functions.elementary.trigonometric import sin, cos, tan, asin, acos, atan
++from sympy.functions.elementary.hyperbolic import sinh, cosh, tanh, asinh, acosh, atanh
++from sympy.functions.elementary.complexes import Abs
++from sympy.functions.elementary.miscellaneous import sqrt
++
++# These functions require dimensionless arguments
++transcendental_funcs = [exp, log, sin, cos, tan, asin, acos, atan, 
++                       sinh, cosh, tanh, asinh, acosh, atanh]
++
++# These functions can work with dimensional arguments
++dimensional_funcs = [Abs, sqrt]
++
++print("Transcendental functions (require dimensionless args):")
++for f in transcendental_funcs:
++    print(f"  {f}")
++
++print("\nFunctions that preserve dimensions:")
++for f in dimensional_funcs:
++    print(f"  {f}")
+diff --git a/debug_function_handling.py b/debug_function_handling.py
+new file mode 100644
+index 0000000000..014fdeaf02
+--- /dev/null
++++ b/debug_function_handling.py
+@@ -0,0 +1,26 @@
++from sympy import exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++
++# Test the function handling
++expr = units.second / (units.ohm * units.farad)
++exp_expr = exp(expr)
++
++print("Testing _collect_factor_and_dimension on the argument:")
++arg_result = SI._collect_factor_and_dimension(expr)
++print(f"arg_result: {arg_result}")
++print(f"Is argument dimensionless: {SI.get_dimension_system().is_dimensionless(arg_result[1])}")
++
++print("\nTesting function branch:")
++# Let's manually trace what happens in the function branch
++fds = [SI._collect_factor_and_dimension(arg) for arg in exp_expr.args]
++print(f"fds: {fds}")
++
++# The current code tries to do this which is wrong:
++# return (expr.func(*(f[0] for f in fds)), *(d[1] for d in fds))
++# This would unpack all dimensions which doesn't make sense for a function with one argument
++
++# Let's see what the correct behavior should be
++print(f"\nFunction: {exp_expr.func}")
++print(f"Arguments factors: {[f[0] for f in fds]}")
++print(f"Arguments dimensions: {[f[1] for f in fds]}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..e1c1bc6bb8
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,26 @@
++from sympy import exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++
++# First test case - this should work
++expr = units.second / (units.ohm * units.farad)
++print(f"expr = {expr}")
++factor_dim = SI._collect_factor_and_dimension(expr)
++print(f"factor_dim = {factor_dim}")
++dim = factor_dim[1]
++print(f"dim = {dim}")
++
++is_dimensionless = SI.get_dimension_system().is_dimensionless(dim)
++print(f"is_dimensionless = {is_dimensionless}")
++assert is_dimensionless, f"Expected dimensionless but got {dim}"
++
++# Second test case - this should fail with the bug
++print("\nTesting buggy expression...")
++buggy_expr = 100 + exp(expr)
++print(f"buggy_expr = {buggy_expr}")
++
++try:
++    result = SI._collect_factor_and_dimension(buggy_expr)
++    print(f"Result: {result}")
++except ValueError as e:
++    print(f"ValueError: {e}")
+diff --git a/run_single_test.py b/run_single_test.py
+new file mode 100644
+index 0000000000..c787e3c017
+--- /dev/null
++++ b/run_single_test.py
+@@ -0,0 +1,56 @@
++import sys
++sys.path.insert(0, '/testbed')
++
++# First, let's see what the original code does (with syntax fix)
++from sympy import log, exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++# Temporarily patch to see original behavior
++import sympy.physics.units.unitsystem as us
++
++original_method = us.UnitSystem._collect_factor_and_dimension
++
++def patched_collect(self, expr):
++    # Get to the Function branch
++    if isinstance(expr, us.Function):
++        # Use original logic but with syntax fix
++        fds = [self._collect_factor_and_dimension(arg) for arg in expr.args]
++        # Original (before fix): return (expr.func(*(f[0] for f in fds)), expr.func(*(d[1] for d in fds)))
++        # After "fix" (syntax error): return (expr.func(*(f[0] for f in fds)), *(d[1] for d in fds))
++        # Let's try what might have been intended - return first arg's dimension
++        return (expr.func(*(f[0] for f in fds)), fds[0][1] if fds else Dimension(1))
++    else:
++        return original_method(self, expr)
++
++us.UnitSystem._collect_factor_and_dimension = patched_collect
++
++try:
++    print("Testing with patched version (returns arg dimension):")
++    cH = Quantity('cH')
++    SI.set_quantity_dimension(cH, amount_of_substance/volume)
++    
++    pH = -log(cH)
++    print(f"pH = {pH}")
++    
++    # This should work with patched version
++    result = SI._collect_factor_and_dimension(pH)
++    print(f"_collect_factor_and_dimension(pH) = {result}")
++    
++    # Now test exp(pH)
++    result2 = SI._collect_factor_and_dimension(exp(pH))
++    print(f"_collect_factor_and_dimension(exp(pH)) = {result2}")
++    
++    print(f"\nExpected: (1, {volume/amount_of_substance})")
++    print(f"Got: {result2}")
++    print(f"Match: {result2 == (1, volume/amount_of_substance)}")
++    
++except Exception as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Restore
++us.UnitSystem._collect_factor_and_dimension = original_method
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..b2475f39af 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -192,8 +192,33 @@ def _collect_factor_and_dimension(self, expr):
+         elif isinstance(expr, Function):
+             fds = [self._collect_factor_and_dimension(
+                 arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            
++            # Import here to avoid circular imports
++            from sympy.functions.elementary.exponential import exp, log
++            from sympy.functions.elementary.trigonometric import (sin, cos, tan, 
++                                                                  asin, acos, atan)
++            from sympy.functions.elementary.hyperbolic import (sinh, cosh, tanh,
++                                                               asinh, acosh, atanh)
++            
++            # Functions that require dimensionless arguments
++            transcendental_funcs = (exp, log, sin, cos, tan, asin, acos, atan,
++                                   sinh, cosh, tanh, asinh, acosh, atanh)
++            
++            if expr.func in transcendental_funcs:
++                # Check if all arguments are dimensionless
++                dims = [d[1] for d in fds]
++                for i, dim in enumerate(dims):
++                    if not self.get_dimension_system().is_dimensionless(dim):
++                        raise ValueError(
++                            f'Dimension of "{expr.args[i]}" is {dim}, '
++                            f'but it should be Dimension(1)')
++                # Return dimensionless result
++                return expr.func(*(f[0] for f in fds)), Dimension(1)
++            else:
++                # For other functions, return the first dimension
++                # (this handles Abs, sqrt, etc.)
++                return (expr.func(*(f[0] for f in fds)),
++                        fds[0][1] if fds else Dimension(1))
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..a9f5a43f6f
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,55 @@
++from sympy import exp, sin, cos, tan, log, sqrt, symbols
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Dimension
++
++# Test 1: exp with dimensionless argument
++print("Test 1: exp with dimensionless argument")
++expr = units.second / (units.ohm * units.farad)
++result = SI._collect_factor_and_dimension(exp(expr))
++print(f"exp({expr}) -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++# Test 2: sin with dimensionless argument  
++print("\nTest 2: sin with dimensionless argument")
++result = SI._collect_factor_and_dimension(sin(expr))
++print(f"sin({expr}) -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++# Test 3: cos with dimensionless argument
++print("\nTest 3: cos with dimensionless argument")
++result = SI._collect_factor_and_dimension(cos(expr))
++print(f"cos({expr}) -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++# Test 4: log with dimensionless argument
++print("\nTest 4: log with dimensionless argument")
++# For log, we need a positive dimensionless quantity
++expr2 = 2 * units.meter / units.meter  # This is dimensionless and equals 2
++result = SI._collect_factor_and_dimension(log(expr2))
++print(f"log({expr2}) -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++# Test 5: Function with non-dimensionless argument should raise error
++print("\nTest 5: exp with non-dimensionless argument (should raise error)")
++try:
++    result = SI._collect_factor_and_dimension(exp(units.meter))
++    print(f"ERROR: Should have raised ValueError but got {result}")
++except ValueError as e:
++    print(f"Correctly raised ValueError: {e}")
++
++# Test 6: Complex expression with exp
++print("\nTest 6: Complex expression with exp")
++complex_expr = 100 + exp(expr)
++result = SI._collect_factor_and_dimension(complex_expr)
++print(f"{complex_expr} -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++# Test 7: Nested functions
++print("\nTest 7: Nested functions")
++nested_expr = exp(sin(expr))
++result = SI._collect_factor_and_dimension(nested_expr)
++print(f"exp(sin({expr})) -> factor: {result[0]}, dimension: {result[1]}")
++assert result[1] == Dimension(1), f"Expected Dimension(1), got {result[1]}"
++
++print("\nAll tests passed!")
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 0000000000..d9d0d037ef
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,38 @@
++"""Test for the issue where SI._collect_factor_and_dimension() cannot properly detect that exponent is dimensionless"""
++
++from sympy import exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++
++def test_exp_with_dimensionless_argument():
++    """Test that exp() correctly handles dimensionless arguments"""
++    # Create a dimensionless expression
++    expr = units.second / (units.ohm * units.farad)
++    
++    # Verify it's dimensionless
++    factor, dim = SI._collect_factor_and_dimension(expr)
++    assert SI.get_dimension_system().is_dimensionless(dim), f"Expected dimensionless but got {dim}"
++    
++    # This should not raise an error
++    buggy_expr = 100 + exp(expr)
++    result = SI._collect_factor_and_dimension(buggy_expr)
++    
++    # The result should be dimensionless
++    assert result[1] == units.Dimension(1), f"Expected Dimension(1) but got {result[1]}"
++    
++    print("Test passed: exp() correctly handles dimensionless arguments")
++
++def test_exp_with_dimensional_argument():
++    """Test that exp() raises error for dimensional arguments"""
++    try:
++        # This should raise an error
++        result = SI._collect_factor_and_dimension(exp(units.meter))
++        assert False, "Expected ValueError but no error was raised"
++    except ValueError as e:
++        assert "should be Dimension(1)" in str(e)
++        print("Test passed: exp() correctly rejects dimensional arguments")
++
++if __name__ == "__main__":
++    test_exp_with_dimensionless_argument()
++    test_exp_with_dimensional_argument()
++    print("\nAll tests passed!")
+diff --git a/test_pH.py b/test_pH.py
+new file mode 100644
+index 0000000000..19ae550e07
+--- /dev/null
++++ b/test_pH.py
+@@ -0,0 +1,28 @@
++from sympy import log, exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++# Reproduce the pH test case
++cH = Quantity('cH')
++SI.set_quantity_dimension(cH, amount_of_substance/volume)
++
++print(f"cH dimension: {SI.get_quantity_dimension(cH)}")
++
++# pH = -log(cH) - but log requires dimensionless argument
++# This should fail with our fix
++try:
++    pH = -log(cH)
++    print(f"pH = {pH}")
++    result = SI._collect_factor_and_dimension(pH)
++    print(f"pH factor and dimension: {result}")
++except ValueError as e:
++    print(f"Error with pH: {e}")
++
++# Let's try exp(pH) if pH was created
++try:
++    result = SI._collect_factor_and_dimension(exp(pH))
++    print(f"exp(pH) factor and dimension: {result}")
++except Exception as e:
++    print(f"Error with exp(pH): {e}")
+diff --git a/test_pH_detailed.py b/test_pH_detailed.py
+new file mode 100644
+index 0000000000..94cd67d85d
+--- /dev/null
++++ b/test_pH_detailed.py
+@@ -0,0 +1,31 @@
++from sympy import log, exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++# Create cH
++cH = Quantity('cH')
++SI.set_quantity_dimension(cH, amount_of_substance/volume)
++
++print(f"cH dimension: {SI.get_quantity_dimension(cH)}")
++
++# pH = -log(cH)
++pH = -log(cH)
++print(f"\npH expression: {pH}")
++print(f"pH type: {type(pH)}")
++print(f"pH args: {pH.args}")
++
++# Let's trace through manually
++# pH is Mul(-1, log(cH))
++print(f"\nManually collecting for -1:")
++result_neg1 = SI._collect_factor_and_dimension(-1)
++print(f"  Result: {result_neg1}")
++
++print(f"\nManually collecting for log(cH):")
++# This will use our new implementation
++try:
++    result_log = SI._collect_factor_and_dimension(log(cH))
++    print(f"  Result: {result_log}")
++except ValueError as e:
++    print(f"  Error: {e}")
+diff --git a/test_pH_only.py b/test_pH_only.py
+new file mode 100644
+index 0000000000..103330083e
+--- /dev/null
++++ b/test_pH_only.py
+@@ -0,0 +1,96 @@
++from sympy import log, exp
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++# Temporarily revert to see original behavior
++import sympy.physics.units.unitsystem as us
++
++# Save our implementation
++new_impl = us.UnitSystem._collect_factor_and_dimension
++
++# Create a version that mimics the original (with the bug fixed)
++def old_collect_factor_and_dimension(self, expr):
++    """
++    Return tuple with scale factor expression and dimension expression.
++    """
++    from sympy.physics.units import Quantity
++    from sympy.core.add import Add
++    from sympy.core.mul import Mul
++    from sympy.core.power import Pow
++    from sympy.core.function import Derivative, Function
++    from sympy.core.singleton import S
++    from sympy.physics.units.dimensions import Dimension
++    
++    if isinstance(expr, Quantity):
++        return expr.scale_factor, expr.dimension
++    elif isinstance(expr, Mul):
++        factor = 1
++        dimension = Dimension(1)
++        for arg in expr.args:
++            arg_factor, arg_dim = self._collect_factor_and_dimension(arg)
++            factor *= arg_factor
++            dimension *= arg_dim
++        return factor, dimension
++    elif isinstance(expr, Pow):
++        factor, dim = self._collect_factor_and_dimension(expr.base)
++        exp_factor, exp_dim = self._collect_factor_and_dimension(expr.exp)
++        if self.get_dimension_system().is_dimensionless(exp_dim):
++            exp_dim = 1
++        return factor ** exp_factor, dim ** (exp_factor * exp_dim)
++    elif isinstance(expr, Add):
++        factor, dim = self._collect_factor_and_dimension(expr.args[0])
++        for addend in expr.args[1:]:
++            addend_factor, addend_dim = \
++                self._collect_factor_and_dimension(addend)
++            if dim != addend_dim:
++                raise ValueError(
++                    'Dimension of "{}" is {}, '
++                    'but it should be {}'.format(
++                        addend, addend_dim, dim))
++            factor += addend_factor
++        return factor, dim
++    elif isinstance(expr, Derivative):
++        factor, dim = self._collect_factor_and_dimension(expr.args[0])
++        for independent, count in expr.variable_count:
++            ifactor, idim = self._collect_factor_and_dimension(independent)
++            factor /= ifactor**count
++            dim /= idim**count
++        return factor, dim
++    elif isinstance(expr, Function):
++        fds = [self._collect_factor_and_dimension(
++            arg) for arg in expr.args]
++        # Original code had: return (expr.func(*(f[0] for f in fds)), *(d[1] for d in fds))
++        # This is syntactically wrong. Let's return the dimension of the first arg
++        return (expr.func(*(f[0] for f in fds)), 
++                fds[0][1] if fds else Dimension(1))
++    elif isinstance(expr, Dimension):
++        return S.One, expr
++    else:
++        return expr, Dimension(1)
++
++# Temporarily use old implementation
++us.UnitSystem._collect_factor_and_dimension = old_collect_factor_and_dimension
++
++try:
++    # Test the pH case
++    cH = Quantity('cH')
++    SI.set_quantity_dimension(cH, amount_of_substance/volume)
++    
++    pH = -log(cH)
++    print(f"pH = {pH}")
++    result = SI._collect_factor_and_dimension(pH)
++    print(f"pH result: {result}")
++    
++    exp_pH = exp(pH)
++    result2 = SI._collect_factor_and_dimension(exp_pH)
++    print(f"exp(pH) result: {result2}")
++    
++except Exception as e:
++    print(f"Error: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Restore our implementation
++us.UnitSystem._collect_factor_and_dimension = new_impl
+diff --git a/trace_pH.py b/trace_pH.py
+new file mode 100644
+index 0000000000..1b64c03d5b
+--- /dev/null
++++ b/trace_pH.py
+@@ -0,0 +1,58 @@
++from sympy import log, exp, Mul
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++cH = Quantity('cH')
++SI.set_quantity_dimension(cH, amount_of_substance/volume)
++
++print("Step 1: cH")
++print(f"  cH dimension: {SI.get_quantity_dimension(cH)}")
++
++print("\nStep 2: log(cH)")
++log_cH = log(cH)
++print(f"  log(cH) = {log_cH}")
++print(f"  type: {type(log_cH)}")
++
++print("\nStep 3: -log(cH)")
++pH = -log(cH)
++print(f"  pH = {pH}")
++print(f"  type: {type(pH)}")
++print(f"  pH.args: {pH.args}")
++
++print("\nStep 4: Collecting pH = -log(cH)")
++print("  pH is a Mul(-1, log(cH))")
++
++# When collecting Mul, it multiplies dimensions
++# -1 has dimension 1
++# log(cH) would have dimension amount_of_substance/volume (if using arg dimension)
++# So pH would have dimension: 1 * (amount_of_substance/volume) = amount_of_substance/volume
++
++print("\nStep 5: exp(pH)")
++exp_pH = exp(pH)
++print(f"  exp(pH) = {exp_pH}")
++
++print("\nStep 6: But wait, let's check pH's dimension more carefully")
++# pH = -log(cH) = Mul(-1, log(cH))
++# Let's manually compute using the original logic
++
++# For Mul:
++factor1, dim1 = SI._collect_factor_and_dimension(-1)
++print(f"  -1: factor={factor1}, dim={dim1}")
++
++# For log(cH) with our current implementation, it would error
++# But with the patched version, it would return (log(scale_factor), cH_dimension)
++
++print("\nStep 7: The key insight!")
++print("  pH = -log(cH) = Mul(-1, log(cH))")
++print("  When we collect Mul, we multiply the dimensions")
++print("  But -1 has Dimension(1), and log(cH) has cH's dimension")
++print("  So pH has dimension = Dimension(1) * cH.dimension = cH.dimension")
++print("  But the test expects exp(pH) to have 1/cH.dimension")
++
++print("\nStep 8: Let's check what exp(Mul(-1, log(cH))) should be")
++print("  exp(-log(cH)) = exp(log(cH^-1)) = cH^-1")
++print("  So dimension should be 1/cH.dimension = volume/amount_of_substance")
++
++print("\nStep 9: The issue is that the current approach doesn't handle this correctly")
+diff --git a/verify_simplification.py b/verify_simplification.py
+new file mode 100644
+index 0000000000..2ad8b456e2
+--- /dev/null
++++ b/verify_simplification.py
+@@ -0,0 +1,28 @@
++from sympy import log, exp, Symbol
++from sympy.physics import units
++from sympy.physics.units.systems.si import SI
++from sympy.physics.units import Quantity, Dimension
++from sympy.physics.units.definitions.dimension_definitions import amount_of_substance, volume
++
++# Test with symbol
++x = Symbol('x')
++expr1 = exp(-log(x))
++print(f"exp(-log(x)) = {expr1}")
++print(f"Simplified: {expr1 == 1/x}")
++
++# Test with Quantity
++cH = Quantity('cH')
++SI.set_quantity_dimension(cH, amount_of_substance/volume)
++
++expr2 = exp(-log(cH))
++print(f"\nexp(-log(cH)) = {expr2}")
++print(f"Type: {type(expr2)}")
++print(f"Is it 1/cH? {expr2 == 1/cH}")
++
++# So when we call _collect_factor_and_dimension on exp(-log(cH)),
++# we're actually calling it on 1/cH, not on exp(...)!
++
++print("\nCollecting factor and dimension of 1/cH:")
++result = SI._collect_factor_and_dimension(1/cH)
++print(f"Result: {result}")
++print(f"Expected: (1, {volume/amount_of_substance})")

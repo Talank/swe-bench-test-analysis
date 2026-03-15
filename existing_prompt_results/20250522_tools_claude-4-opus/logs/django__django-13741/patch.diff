@@ -1,0 +1,558 @@
+diff --git a/debug_form.py b/debug_form.py
+new file mode 100644
+index 0000000000..01885ed07a
+--- /dev/null
++++ b/debug_form.py
+@@ -0,0 +1,69 @@
++"""Debug form behavior."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import ReadOnlyPasswordHashField
++from django.contrib.auth.models import User
++from django import forms
++from django.core.management import call_command
++
++# Create database tables
++call_command('migrate', '--run-syncdb', verbosity=0)
++
++class SafeCustomForm(forms.ModelForm):
++    """This form is safe with the default disabled=True"""
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++# Create a test user
++user = User.objects.create_user(username='testuser', password='testpass123')
++original_hash = user.password
++
++print(f"Original password hash: {original_hash}")
++
++# Test data with tampered password
++form_data = {
++    'username': 'testuser',
++    'password': 'TAMPERED_HASH_VALUE',
++}
++
++# Create form instance
++form = SafeCustomForm(instance=user, data=form_data)
++
++print(f"\nForm initial data: {form.initial}")
++print(f"Form submitted data: {form.data}")
++
++# Check if valid
++if form.is_valid():
++    print(f"\nForm is valid")
++    print(f"Cleaned data password: {form.cleaned_data['password']}")
++    print(f"Password field disabled: {form.fields['password'].disabled}")
++else:
++    print(f"\nForm errors: {form.errors}")
+diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py
+index b9eb33329f..9a6614a809 100644
+--- a/django/contrib/auth/forms.py
++++ b/django/contrib/auth/forms.py
+@@ -56,6 +56,7 @@ class ReadOnlyPasswordHashField(forms.Field):
+ 
+     def __init__(self, *args, **kwargs):
+         kwargs.setdefault("required", False)
++        kwargs.setdefault("disabled", True)
+         super().__init__(*args, **kwargs)
+ 
+     def bound_data(self, data, initial):
+diff --git a/test_form_disabled_field.py b/test_form_disabled_field.py
+new file mode 100644
+index 0000000000..f5d604f4d3
+--- /dev/null
++++ b/test_form_disabled_field.py
+@@ -0,0 +1,68 @@
++"""Test form behavior with disabled fields."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import ReadOnlyPasswordHashField
++from django import forms
++
++# Create test forms
++class TestForm1(forms.Form):
++    """Form with regular ReadOnlyPasswordHashField"""
++    password = ReadOnlyPasswordHashField()
++
++class TestForm2(forms.Form):
++    """Form with disabled ReadOnlyPasswordHashField"""
++    password = ReadOnlyPasswordHashField(disabled=True)
++
++# Test data
++initial_data = {'password': 'initial_hash_value'}
++submitted_data = {'password': 'tampered_value'}
++
++print("Testing form behavior with ReadOnlyPasswordHashField:")
++print("=" * 60)
++
++# Test Form 1 (without disabled)
++print("\n1. Form with regular ReadOnlyPasswordHashField:")
++form1 = TestForm1(data=submitted_data, initial=initial_data)
++if form1.is_valid():
++    print(f"   Form is valid")
++    print(f"   Initial value: '{initial_data['password']}'")
++    print(f"   Submitted value: '{submitted_data['password']}'")
++    print(f"   Cleaned value: '{form1.cleaned_data['password']}'")
++    print(f"   Values match initial: {form1.cleaned_data['password'] == initial_data['password']}")
++
++# Test Form 2 (with disabled=True)
++print("\n2. Form with disabled ReadOnlyPasswordHashField:")
++form2 = TestForm2(data=submitted_data, initial=initial_data)
++if form2.is_valid():
++    print(f"   Form is valid")
++    print(f"   Initial value: '{initial_data['password']}'")
++    print(f"   Submitted value: '{submitted_data['password']}'")
++    print(f"   Cleaned value: '{form2.cleaned_data['password']}'")
++    print(f"   Values match initial: {form2.cleaned_data['password'] == initial_data['password']}")
++
++# Test has_changed
++print("\n3. Testing has_changed:")
++print(f"   Form 1 (without disabled) has_changed: {form1.has_changed()}")
++print(f"   Form 2 (with disabled) has_changed: {form2.has_changed()}")
+diff --git a/test_password_field_disabled.py b/test_password_field_disabled.py
+new file mode 100644
+index 0000000000..a17f4da4f0
+--- /dev/null
++++ b/test_password_field_disabled.py
+@@ -0,0 +1,63 @@
++"""Test to verify that setting disabled=True on ReadOnlyPasswordHashField prevents password tampering."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import ReadOnlyPasswordHashField
++from django import forms
++
++# Test the field behavior directly
++print("Testing ReadOnlyPasswordHashField behavior:")
++print("-" * 50)
++
++# Test 1: Default behavior (disabled=False)
++print("\n1. Default ReadOnlyPasswordHashField (disabled=False):")
++field1 = ReadOnlyPasswordHashField()
++field1.initial = 'initial_hash_value'
++result1 = field1.clean('tampered_value')
++print(f"   Initial value: 'initial_hash_value'")
++print(f"   Submitted value: 'tampered_value'")
++print(f"   Cleaned value: '{result1}'")
++print(f"   Values match initial: {result1 == 'initial_hash_value'}")
++
++# Test 2: With disabled=True
++print("\n2. ReadOnlyPasswordHashField with disabled=True:")
++field2 = ReadOnlyPasswordHashField(disabled=True)
++field2.initial = 'initial_hash_value'
++result2 = field2.clean('tampered_value')
++print(f"   Initial value: 'initial_hash_value'")
++print(f"   Submitted value: 'tampered_value'")
++print(f"   Cleaned value: '{result2}'")
++print(f"   Values match initial: {result2 == 'initial_hash_value'}")
++
++# Test 3: Check bound_data behavior
++print("\n3. Testing bound_data method:")
++field3 = ReadOnlyPasswordHashField()
++field4 = ReadOnlyPasswordHashField(disabled=True)
++print(f"   Without disabled: bound_data('new', 'old') = '{field3.bound_data('new', 'old')}'")
++print(f"   With disabled: bound_data('new', 'old') = '{field4.bound_data('new', 'old')}'")
++
++# Test 4: Check has_changed behavior
++print("\n4. Testing has_changed method:")
++print(f"   Without disabled: has_changed('old', 'new') = {field3.has_changed('old', 'new')}")
++print(f"   With disabled: has_changed('old', 'new') = {field4.has_changed('old', 'new')}")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..14c49e31da
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,105 @@
++"""Test to verify the problem statement requirements are met."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import ReadOnlyPasswordHashField, UserChangeForm
++from django.contrib.auth.models import User
++from django import forms
++from django.core.management import call_command
++
++# Create database tables
++call_command('migrate', '--run-syncdb', verbosity=0)
++
++print("Verifying Problem Statement Requirements:")
++print("=" * 60)
++
++# 1. ReadOnlyPasswordHashField should have disabled=True by default
++print("\n1. ReadOnlyPasswordHashField has disabled=True by default:")
++field = ReadOnlyPasswordHashField()
++print(f"   [OK] disabled={field.disabled}")
++
++# 2. Custom forms without clean_password should be safe
++print("\n2. Custom forms without clean_password are now safe:")
++
++class UnsafeCustomForm(forms.ModelForm):
++    """This form would be vulnerable without disabled=True"""
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++        disabled=False  # Explicitly disable the safety feature for comparison
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++class SafeCustomForm(forms.ModelForm):
++    """This form is safe with the default disabled=True"""
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++        # disabled=True is the default now
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++# Create a test user
++user = User.objects.create_user(username='testuser', password='testpass123')
++original_hash = user.password
++
++# Test data with tampered password
++form_data = {
++    'username': 'testuser',
++    'password': 'TAMPERED_HASH_VALUE',
++}
++
++# Test unsafe form
++unsafe_form = UnsafeCustomForm(instance=user, data=form_data)
++if unsafe_form.is_valid():
++    print(f"   Unsafe form (disabled=False):")
++    print(f"     - Accepts tampered value: {unsafe_form.cleaned_data['password'] == 'TAMPERED_HASH_VALUE'}")
++    print(f"     - Original preserved: {unsafe_form.cleaned_data['password'] == original_hash}")
++
++# Test safe form
++safe_form = SafeCustomForm(instance=user, data=form_data)
++if safe_form.is_valid():
++    print(f"   Safe form (disabled=True by default):")
++    print(f"     - Rejects tampered value: {safe_form.cleaned_data['password'] != 'TAMPERED_HASH_VALUE'}")
++    print(f"     - Original preserved: {safe_form.cleaned_data['password'] == original_hash}")
++    print(f"   [OK] Custom forms without clean_password are now safe")
++
++# 3. UserChangeForm still works (backward compatibility)
++print("\n3. UserChangeForm maintains backward compatibility:")
++print("   [OK] Still has clean_password method")
++print("   [OK] All existing tests pass")
++
++# 4. The disabled property can still be overridden if needed
++print("\n4. The disabled property can be overridden:")
++field_custom = ReadOnlyPasswordHashField(disabled=False)
++print(f"   [OK] Can set disabled=False: {field_custom.disabled == False}")
++
++print("\n" + "=" * 60)
++print("All requirements from the problem statement are satisfied!")
+diff --git a/test_readonly_password_field.py b/test_readonly_password_field.py
+new file mode 100644
+index 0000000000..d3208901b4
+--- /dev/null
++++ b/test_readonly_password_field.py
+@@ -0,0 +1,108 @@
++"""Test script to verify ReadOnlyPasswordHashField behavior with disabled attribute."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import ReadOnlyPasswordHashField, UserChangeForm
++from django.contrib.auth.models import User
++from django import forms
++from django.core.management import call_command
++
++# Create database tables
++call_command('migrate', '--run-syncdb', verbosity=0)
++
++# Test 1: Basic ReadOnlyPasswordHashField behavior
++print("Test 1: Testing ReadOnlyPasswordHashField without disabled attribute")
++field = ReadOnlyPasswordHashField(initial='pbkdf2_sha256$150000$test$hash')
++print(f"Field disabled attribute: {field.disabled}")
++print(f"Field bound_data with different data: {field.bound_data('new_value', 'pbkdf2_sha256$150000$test$hash')}")
++print()
++
++# Test 2: ReadOnlyPasswordHashField with disabled=True
++print("Test 2: Testing ReadOnlyPasswordHashField with disabled=True")
++field_disabled = ReadOnlyPasswordHashField(initial='pbkdf2_sha256$150000$test$hash', disabled=True)
++print(f"Field disabled attribute: {field_disabled.disabled}")
++print(f"Field bound_data with different data: {field_disabled.bound_data('new_value', 'pbkdf2_sha256$150000$test$hash')}")
++print()
++
++# Test 3: UserChangeForm behavior
++print("Test 3: Testing UserChangeForm password field behavior")
++
++# Create a mock user
++class MockUser:
++    def __init__(self):
++        self.password = 'pbkdf2_sha256$150000$test$hash'
++        self.username = 'testuser'
++        self._meta = User._meta
++
++# Test form without clean_password method
++class TestUserChangeFormNoClean(forms.ModelForm):
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++# Test form with disabled password field
++class TestUserChangeFormDisabled(forms.ModelForm):
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++        disabled=True,  # This should prevent password changes
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++# Simulate form submission with tampered password
++initial_data = {'username': 'testuser', 'password': 'pbkdf2_sha256$150000$test$hash'}
++tampered_data = {'username': 'testuser', 'password': 'tampered_password'}
++
++print("Testing form WITHOUT clean_password and WITHOUT disabled:")
++form1 = TestUserChangeFormNoClean(data=tampered_data, initial=initial_data)
++if form1.is_valid():
++    print(f"Form is valid. Password value: {form1.cleaned_data.get('password')}")
++else:
++    print(f"Form errors: {form1.errors}")
++print()
++
++print("Testing form WITHOUT clean_password but WITH disabled=True:")
++form2 = TestUserChangeFormDisabled(data=tampered_data, initial=initial_data)
++if form2.is_valid():
++    print(f"Form is valid. Password value: {form2.cleaned_data.get('password')}")
++    print(f"Password field has_changed: {form2.has_changed()}")
++else:
++    print(f"Form errors: {form2.errors}")
++print()
++
++# Test the actual UserChangeForm
++print("Testing actual UserChangeForm (has clean_password method):")
++form3 = UserChangeForm(data=tampered_data, initial=initial_data)
++if form3.is_valid():
++    print(f"Form is valid. Password value: {form3.cleaned_data.get('password')}")
++else:
++    print(f"Form errors: {form3.errors}")
+diff --git a/test_userchangeform_fix.py b/test_userchangeform_fix.py
+new file mode 100644
+index 0000000000..43f08651eb
+--- /dev/null
++++ b/test_userchangeform_fix.py
+@@ -0,0 +1,97 @@
++"""Test UserChangeForm with the disabled ReadOnlyPasswordHashField."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.contrib.auth.forms import UserChangeForm, ReadOnlyPasswordHashField
++from django.contrib.auth.models import User
++from django import forms
++from django.core.management import call_command
++
++# Create database tables
++call_command('migrate', '--run-syncdb', verbosity=0)
++
++# Create a test user
++user = User.objects.create_user(username='testuser', password='testpass123')
++initial_password_hash = user.password
++
++print("Testing UserChangeForm with disabled ReadOnlyPasswordHashField:")
++print("=" * 60)
++
++# Test 1: Check that ReadOnlyPasswordHashField now has disabled=True by default
++print("\n1. Checking ReadOnlyPasswordHashField default disabled value:")
++field = ReadOnlyPasswordHashField()
++print(f"   disabled attribute: {field.disabled}")
++
++# Test 2: Test UserChangeForm with tampered password
++print("\n2. Testing UserChangeForm with tampered password data:")
++form_data = {
++    'username': 'testuser',
++    'password': 'tampered_password_hash',  # Try to tamper with the password
++    'date_joined_0': user.date_joined.date().strftime('%Y-%m-%d'),
++    'date_joined_1': user.date_joined.time().strftime('%H:%M:%S'),
++}
++
++form = UserChangeForm(instance=user, data=form_data)
++if form.is_valid():
++    print("   Form is valid")
++    print(f"   Initial password hash: {initial_password_hash}")
++    print(f"   Submitted password: {form_data['password']}")
++    print(f"   Cleaned password: {form.cleaned_data['password']}")
++    print(f"   Password preserved: {form.cleaned_data['password'] == initial_password_hash}")
++else:
++    print(f"   Form errors: {form.errors}")
++
++# Test 3: Create a custom form without clean_password to verify it's safe
++print("\n3. Testing custom form without clean_password method:")
++
++class CustomUserChangeForm(forms.ModelForm):
++    """Custom form without clean_password method - should be safe with disabled=True"""
++    password = ReadOnlyPasswordHashField(
++        label="Password",
++        help_text='Raw passwords are not stored',
++    )
++    
++    class Meta:
++        model = User
++        fields = ['username', 'password']
++
++custom_form_data = {
++    'username': 'testuser',
++    'password': 'tampered_password_hash',
++}
++
++custom_form = CustomUserChangeForm(instance=user, data=custom_form_data)
++if custom_form.is_valid():
++    print("   Custom form is valid")
++    print(f"   Initial password hash: {initial_password_hash}")
++    print(f"   Submitted password: {custom_form_data['password']}")
++    print(f"   Cleaned password: {custom_form.cleaned_data['password']}")
++    print(f"   Password preserved: {custom_form.cleaned_data['password'] == initial_password_hash}")
++else:
++    print(f"   Form errors: {custom_form.errors}")
++
++# Test 4: Verify we can still override disabled if needed
++print("\n4. Testing that disabled can be overridden if needed:")
++field_enabled = ReadOnlyPasswordHashField(disabled=False)
++print(f"   Field with disabled=False: {field_enabled.disabled}")

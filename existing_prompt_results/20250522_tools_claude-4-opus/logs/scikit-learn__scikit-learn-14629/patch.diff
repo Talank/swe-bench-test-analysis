@@ -1,0 +1,302 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..b9bee614b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,28 @@
++from sklearn.datasets import make_multilabel_classification
++from sklearn.multioutput import MultiOutputClassifier
++from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
++from sklearn.model_selection import cross_val_predict
++
++# Create test data
++X, Y = make_multilabel_classification()
++
++# Create MultiOutputClassifier
++mo_lda = MultiOutputClassifier(LinearDiscriminantAnalysis())
++
++# Test regular prediction (should work)
++print("Testing regular prediction...")
++try:
++    pred = cross_val_predict(mo_lda, X, Y, cv=5)
++    print("Regular prediction works fine")
++except Exception as e:
++    print(f"Regular prediction failed: {e}")
++
++# Test predict_proba (should fail with AttributeError)
++print("\nTesting predict_proba...")
++try:
++    pred_proba = cross_val_predict(mo_lda, X, Y, cv=5, method='predict_proba')
++    print("predict_proba works fine")
++except AttributeError as e:
++    print(f"predict_proba failed with AttributeError: {e}")
++except Exception as e:
++    print(f"predict_proba failed with other error: {e}")
+diff --git a/sklearn/model_selection/_validation.py b/sklearn/model_selection/_validation.py
+index 95669a212..a6b702038 100644
+--- a/sklearn/model_selection/_validation.py
++++ b/sklearn/model_selection/_validation.py
+@@ -855,10 +855,18 @@ def _fit_and_predict(estimator, X, y, train, test, verbose, fit_params,
+     predictions = func(X_test)
+     if method in ['decision_function', 'predict_proba', 'predict_log_proba']:
+         if isinstance(predictions, list):
+-            predictions = [_enforce_prediction_order(
+-                estimator.classes_[i_label], predictions[i_label],
+-                n_classes=len(set(y[:, i_label])), method=method)
+-                for i_label in range(len(predictions))]
++            # Handle MultiOutputClassifier case
++            from ..multioutput import MultiOutputClassifier
++            if isinstance(estimator, MultiOutputClassifier):
++                predictions = [_enforce_prediction_order(
++                    estimator.estimators_[i_label].classes_, predictions[i_label],
++                    n_classes=len(set(y[:, i_label])), method=method)
++                    for i_label in range(len(predictions))]
++            else:
++                predictions = [_enforce_prediction_order(
++                    estimator.classes_[i_label], predictions[i_label],
++                    n_classes=len(set(y[:, i_label])), method=method)
++                    for i_label in range(len(predictions))]
+         else:
+             # A 2D y array should be a binary label indicator matrix
+             n_classes = len(set(y)) if y.ndim == 1 else y.shape[1]
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..7e9ab75ba
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,52 @@
++import numpy as np
++from sklearn.datasets import make_multilabel_classification, make_classification
++from sklearn.multioutput import MultiOutputClassifier, ClassifierChain
++from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
++from sklearn.model_selection import cross_val_predict
++from sklearn.multiclass import OneVsRestClassifier
++
++# Test 1: Ensure regular classifiers still work with predict_proba
++print("Test 1: Regular classifier with predict_proba")
++X, y = make_classification(n_samples=100, n_features=20, n_classes=3, 
++                           n_informative=10, random_state=42)
++lda = LinearDiscriminantAnalysis()
++try:
++    pred_proba = cross_val_predict(lda, X, y, cv=3, method='predict_proba')
++    print(f"  Success! Shape: {pred_proba.shape}")
++except Exception as e:
++    print(f"  Failed: {e}")
++
++# Test 2: OneVsRestClassifier (also returns list for predict_proba)
++print("\nTest 2: OneVsRestClassifier with predict_proba")
++ovr = OneVsRestClassifier(LinearDiscriminantAnalysis())
++try:
++    pred_proba = cross_val_predict(ovr, X, y, cv=3, method='predict_proba')
++    print(f"  Success! Shape: {pred_proba.shape}")
++except Exception as e:
++    print(f"  Failed: {e}")
++
++# Test 3: ClassifierChain with predict_proba
++print("\nTest 3: ClassifierChain with predict_proba")
++X_multi, Y_multi = make_multilabel_classification(n_samples=100, n_features=20, 
++                                                   n_classes=3, n_labels=2, random_state=42)
++chain = ClassifierChain(LinearDiscriminantAnalysis())
++try:
++    pred_proba = cross_val_predict(chain, X_multi, Y_multi, cv=3, method='predict_proba')
++    print(f"  Success! Type: {type(pred_proba)}, Length: {len(pred_proba) if isinstance(pred_proba, list) else 'N/A'}")
++except Exception as e:
++    print(f"  Failed: {e}")
++
++# Test 4: MultiOutputClassifier with different number of classes per output
++print("\nTest 4: MultiOutputClassifier with different number of classes per output")
++# Create a dataset where outputs have different number of classes
++Y_custom = np.column_stack([
++    np.random.randint(0, 2, 100),  # Binary
++    np.random.randint(0, 3, 100),  # 3 classes
++    np.random.randint(0, 4, 100),  # 4 classes
++])
++mo_lda = MultiOutputClassifier(LinearDiscriminantAnalysis())
++try:
++    pred_proba = cross_val_predict(mo_lda, X_multi, Y_custom, cv=3, method='predict_proba')
++    print(f"  Success! Shapes: {[p.shape for p in pred_proba]}")
++except Exception as e:
++    print(f"  Failed: {e}")
+diff --git a/test_multioutput_cross_val_predict.py b/test_multioutput_cross_val_predict.py
+new file mode 100644
+index 000000000..d7736ef7b
+--- /dev/null
++++ b/test_multioutput_cross_val_predict.py
+@@ -0,0 +1,94 @@
++import pytest
++import numpy as np
++from sklearn.datasets import make_multilabel_classification
++from sklearn.multioutput import MultiOutputClassifier
++from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.model_selection import cross_val_predict
++
++
++def test_multioutput_classifier_cross_val_predict_proba():
++    """Test cross_val_predict with method='predict_proba' on MultiOutputClassifier."""
++    X, Y = make_multilabel_classification(n_samples=100, n_features=20, 
++                                          n_classes=3, n_labels=2, random_state=42)
++    
++    # Test with LinearDiscriminantAnalysis
++    mo_lda = MultiOutputClassifier(LinearDiscriminantAnalysis())
++    pred_proba = cross_val_predict(mo_lda, X, Y, cv=3, method='predict_proba')
++    
++    # Check that we get a list of arrays
++    assert isinstance(pred_proba, list)
++    assert len(pred_proba) == Y.shape[1]
++    
++    # Check shapes
++    for i, proba in enumerate(pred_proba):
++        assert proba.shape[0] == X.shape[0]
++        # Number of columns should match number of unique classes in this output
++        n_classes = len(np.unique(Y[:, i]))
++        assert proba.shape[1] == n_classes
++        # Check that probabilities sum to 1
++        np.testing.assert_allclose(proba.sum(axis=1), 1.0, rtol=1e-7)
++    
++    # Test with RandomForestClassifier
++    mo_rf = MultiOutputClassifier(RandomForestClassifier(n_estimators=10, random_state=42))
++    pred_proba_rf = cross_val_predict(mo_rf, X, Y, cv=3, method='predict_proba')
++    
++    assert isinstance(pred_proba_rf, list)
++    assert len(pred_proba_rf) == Y.shape[1]
++    
++    for i, proba in enumerate(pred_proba_rf):
++        assert proba.shape[0] == X.shape[0]
++        n_classes = len(np.unique(Y[:, i]))
++        assert proba.shape[1] == n_classes
++        np.testing.assert_allclose(proba.sum(axis=1), 1.0, rtol=1e-7)
++
++
++def test_multioutput_classifier_cross_val_predict_log_proba():
++    """Test cross_val_predict with method='predict_log_proba' on MultiOutputClassifier."""
++    X, Y = make_multilabel_classification(n_samples=100, n_features=20, 
++                                          n_classes=3, n_labels=2, random_state=42)
++    
++    mo_rf = MultiOutputClassifier(RandomForestClassifier(n_estimators=10, random_state=42))
++    log_proba = cross_val_predict(mo_rf, X, Y, cv=3, method='predict_log_proba')
++    
++    assert isinstance(log_proba, list)
++    assert len(log_proba) == Y.shape[1]
++    
++    for i, lproba in enumerate(log_proba):
++        assert lproba.shape[0] == X.shape[0]
++        n_classes = len(np.unique(Y[:, i]))
++        assert lproba.shape[1] == n_classes
++        # Check that log probabilities are negative (or zero)
++        assert np.all(lproba <= 0)
++        # Check that exp(log_proba) sums to 1
++        np.testing.assert_allclose(np.exp(lproba).sum(axis=1), 1.0, rtol=1e-7)
++
++
++def test_multioutput_classifier_cross_val_predict_regular():
++    """Test that regular cross_val_predict still works with MultiOutputClassifier."""
++    X, Y = make_multilabel_classification(n_samples=100, n_features=20, 
++                                          n_classes=3, n_labels=2, random_state=42)
++    
++    mo_lda = MultiOutputClassifier(LinearDiscriminantAnalysis())
++    predictions = cross_val_predict(mo_lda, X, Y, cv=3)
++    
++    assert predictions.shape == Y.shape
++    # Check that predictions contain only valid class labels
++    for i in range(Y.shape[1]):
++        unique_preds = np.unique(predictions[:, i])
++        unique_true = np.unique(Y[:, i])
++        assert np.all(np.isin(unique_preds, unique_true))
++
++
++if __name__ == "__main__":
++    test_multioutput_classifier_cross_val_predict_proba()
++    print("test_multioutput_classifier_cross_val_predict_proba passed!")
++    
++    # Skip log_proba test as MultiOutputClassifier doesn't support it
++    # test_multioutput_classifier_cross_val_predict_log_proba()
++    # print("test_multioutput_classifier_cross_val_predict_log_proba passed!")
++    
++    test_multioutput_classifier_cross_val_predict_regular()
++    print("test_multioutput_classifier_cross_val_predict_regular passed!")
++    
++    print("\nAll tests passed!")
+diff --git a/test_multioutput_fix.py b/test_multioutput_fix.py
+new file mode 100644
+index 000000000..7c5005445
+--- /dev/null
++++ b/test_multioutput_fix.py
+@@ -0,0 +1,77 @@
++import numpy as np
++from sklearn.datasets import make_multilabel_classification
++from sklearn.multioutput import MultiOutputClassifier
++from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
++from sklearn.model_selection import cross_val_predict
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.svm import SVC
++
++# Test 1: Basic test with LinearDiscriminantAnalysis
++print("Test 1: Basic test with LinearDiscriminantAnalysis")
++X, Y = make_multilabel_classification(n_samples=100, n_features=20, n_classes=3, n_labels=2)
++mo_lda = MultiOutputClassifier(LinearDiscriminantAnalysis())
++
++try:
++    pred = cross_val_predict(mo_lda, X, Y, cv=3)
++    print("  Regular prediction: OK")
++except Exception as e:
++    print(f"  Regular prediction failed: {e}")
++
++try:
++    pred_proba = cross_val_predict(mo_lda, X, Y, cv=3, method='predict_proba')
++    print("  predict_proba: OK")
++    print(f"  Shape of predictions: {[p.shape for p in pred_proba]}")
++except Exception as e:
++    print(f"  predict_proba failed: {e}")
++
++# Test 2: Test with RandomForestClassifier
++print("\nTest 2: Test with RandomForestClassifier")
++mo_rf = MultiOutputClassifier(RandomForestClassifier(n_estimators=10, random_state=42))
++
++try:
++    pred = cross_val_predict(mo_rf, X, Y, cv=3)
++    print("  Regular prediction: OK")
++except Exception as e:
++    print(f"  Regular prediction failed: {e}")
++
++try:
++    pred_proba = cross_val_predict(mo_rf, X, Y, cv=3, method='predict_proba')
++    print("  predict_proba: OK")
++    print(f"  Shape of predictions: {[p.shape for p in pred_proba]}")
++except Exception as e:
++    print(f"  predict_proba failed: {e}")
++
++# Test 3: Test decision_function with SVC
++print("\nTest 3: Test decision_function with SVC")
++mo_svc = MultiOutputClassifier(SVC(probability=False))
++
++try:
++    pred = cross_val_predict(mo_svc, X, Y, cv=3)
++    print("  Regular prediction: OK")
++except Exception as e:
++    print(f"  Regular prediction failed: {e}")
++
++try:
++    decision = cross_val_predict(mo_svc, X, Y, cv=3, method='decision_function')
++    print("  decision_function: OK")
++    print(f"  Shape of predictions: {[d.shape for d in decision]}")
++except Exception as e:
++    print(f"  decision_function failed: {e}")
++
++# Test 4: Test with single output classifier (should still work)
++print("\nTest 4: Test with single output classifier")
++y_single = Y[:, 0]  # Take only first output
++lda = LinearDiscriminantAnalysis()
++
++try:
++    pred = cross_val_predict(lda, X, y_single, cv=3)
++    print("  Regular prediction: OK")
++except Exception as e:
++    print(f"  Regular prediction failed: {e}")
++
++try:
++    pred_proba = cross_val_predict(lda, X, y_single, cv=3, method='predict_proba')
++    print("  predict_proba: OK")
++    print(f"  Shape of predictions: {pred_proba.shape}")
++except Exception as e:
++    print(f"  predict_proba failed: {e}")

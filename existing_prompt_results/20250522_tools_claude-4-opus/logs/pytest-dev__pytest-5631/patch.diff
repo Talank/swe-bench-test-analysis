@@ -1,0 +1,110 @@
+diff --git a/src/_pytest/compat.py b/src/_pytest/compat.py
+index d238061b4..27eeb4c6a 100644
+--- a/src/_pytest/compat.py
++++ b/src/_pytest/compat.py
+@@ -68,11 +68,30 @@ def num_mock_patch_args(function):
+     if any(mock_modules):
+         sentinels = [m.DEFAULT for m in mock_modules if m is not None]
+         return len(
+-            [p for p in patchings if not p.attribute_name and p.new in sentinels]
++            [
++                p
++                for p in patchings
++                if not p.attribute_name and _is_mock_sentinel(p.new, sentinels)
++            ]
+         )
+     return len(patchings)
+ 
+ 
++def _is_mock_sentinel(value, sentinels):
++    """
++    Check if a value is in the list of mock sentinels.
++    
++    Handles cases where the value might be an array or other object that
++    raises ValueError when used in membership testing.
++    """
++    try:
++        return value in sentinels
++    except (ValueError, TypeError):
++        # If the value doesn't support membership testing or raises ValueError
++        # (e.g., numpy arrays), it's definitely not a mock sentinel
++        return False
++
++
+ def getfuncargnames(function, is_method=False, cls=None):
+     """Returns the names of a function's mandatory arguments.
+ 
+diff --git a/testing/test_mock_array_patch.py b/testing/test_mock_array_patch.py
+new file mode 100644
+index 000000000..befc691ab
+--- /dev/null
++++ b/testing/test_mock_array_patch.py
+@@ -0,0 +1,68 @@
++"""Test for mock patch with array values."""
++import pytest
++
++
++class TestMockArrayPatch:
++    """Test that mock patches with array values work correctly."""
++
++    def test_patch_with_numpy_array(self, testdir):
++        """Test that patching with numpy array as 'new' value works."""
++        testdir.makepyfile(
++            """
++            import numpy as np
++            from unittest.mock import patch
++
++            @patch('builtins.print', new=np.array([-5.5, 3.0]))
++            def test_patch_array():
++                import builtins
++                assert isinstance(builtins.print, np.ndarray)
++                assert np.array_equal(builtins.print, np.array([-5.5, 3.0]))
++            """
++        )
++        # Install numpy in the test environment
++        testdir.run("pip", "install", "numpy")
++        result = testdir.runpytest("-v")
++        result.stdout.fnmatch_lines(["*test_patch_array PASSED*"])
++        assert result.ret == 0
++
++    def test_patch_with_custom_object_raising_valueerror(self, testdir):
++        """Test that patching with custom objects that raise ValueError works."""
++        testdir.makepyfile(
++            """
++            from unittest.mock import patch
++
++            class CustomObject:
++                def __eq__(self, other):
++                    if isinstance(other, list):
++                        raise ValueError("Cannot compare with list")
++                    return False
++
++            @patch('builtins.print', new=CustomObject())
++            def test_patch_custom():
++                import builtins
++                assert isinstance(builtins.print, CustomObject)
++            """
++        )
++        result = testdir.runpytest("-v")
++        result.stdout.fnmatch_lines(["*test_patch_custom PASSED*"])
++        assert result.ret == 0
++
++    def test_multiple_patches_with_arrays(self, testdir):
++        """Test multiple patches including arrays."""
++        testdir.makepyfile(
++            """
++            import numpy as np
++            from unittest.mock import patch, DEFAULT
++
++            @patch('builtins.len', new=np.array([1, 2, 3]))
++            @patch('builtins.print', new=DEFAULT)
++            def test_multiple_patches(mock_print):
++                import builtins
++                assert mock_print is not None
++                assert isinstance(builtins.len, np.ndarray)
++            """
++        )
++        testdir.run("pip", "install", "numpy")
++        result = testdir.runpytest("-v")
++        result.stdout.fnmatch_lines(["*test_multiple_patches PASSED*"])
++        assert result.ret == 0

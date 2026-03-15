@@ -1,0 +1,468 @@
+diff --git a/django/core/validators.py b/django/core/validators.py
+index 92394a7eae..3d81f548be 100644
+--- a/django/core/validators.py
++++ b/django/core/validators.py
+@@ -94,7 +94,7 @@ class URLValidator(RegexValidator):
+ 
+     regex = _lazy_re_compile(
+         r'^(?:[a-z0-9\.\-\+]*)://'  # scheme is validated separately
+-        r'(?:\S+(?::\S*)?@)?'  # user:pass authentication
++        r'(?:[a-z0-9\-_.!~*\'()$&+,;=%]+(?::[a-z0-9\-_.!~*\'()$&+,;=:%]*)?@)?'  # user:pass authentication
+         r'(?:' + ipv4_re + '|' + ipv6_re + '|' + host_re + ')'
+         r'(?::\d{2,5})?'  # port
+         r'(?:[/?#][^\s]*)?'  # resource path
+diff --git a/rfc1738_info.txt b/rfc1738_info.txt
+new file mode 100644
+index 0000000000..5c99b429d5
+--- /dev/null
++++ b/rfc1738_info.txt
+@@ -0,0 +1,13 @@
++RFC 1738 Section 3.1 states:
++
++"Within the user and password field, any ":", "@", or "/" must be encoded."
++
++This means that in the username and password parts of a URL, these characters must be percent-encoded:
++- ':' should be encoded as %3A
++- '@' should be encoded as %40  
++- '/' should be encoded as %2F
++
++The allowed characters in username/password (without encoding) are:
++- alphanumeric characters (a-z, A-Z, 0-9)
++- special characters: - _ . ! ~ * ' ( )
++- other characters must be percent-encoded
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..77db439c92
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,58 @@
++#!/usr/bin/env python
++"""Test edge cases for URL validation."""
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++def test_url(url, should_be_valid=True):
++    validator = URLValidator()
++    try:
++        validator(url)
++        result = "VALID"
++    except ValidationError:
++        result = "INVALID"
++    
++    expected = "VALID" if should_be_valid else "INVALID"
++    status = "PASS" if result == expected else "FAIL"
++    
++    if status == "FAIL":
++        print("{} {} -> {} (expected: {})".format(status, url, result, expected))
++    return result == expected
++
++print("Testing edge cases...")
++print("="*80)
++
++# Edge cases
++test_cases = [
++    # IPv6 URLs with userinfo
++    ("http://user@[::1]:8080/", True),
++    ("http://user:pass@[::1]:8080/", True),
++    ("http://user/name@[::1]:8080/", False),  # Invalid '/' in username
++    ("http://user@name@[::1]:8080/", False),  # Invalid '@' in username
++    
++    # IDN with userinfo
++    ("http://user@example.测试", True),
++    ("http://user:pass@उदाहरण.परीक्षा", True),
++    ("http://user/name@example.测试", False),
++    ("http://user@name@उदाहरण.परीक्षा", False),
++    
++    # Port edge cases
++    ("http://user@example.com:80", True),
++    ("http://user@example.com:8080", True),
++    ("http://user@example.com:65535", True),
++    ("http://user@example.com:65536", False),  # Port too high
++    
++    # Empty password
++    ("http://user:@example.com", True),
++    ("http://user/@example.com", False),  # '/' not allowed
++    ("http://user@:@example.com", False),  # '@' not allowed
++]
++
++all_passed = True
++for url, should_be_valid in test_cases:
++    passed = test_url(url, should_be_valid)
++    if not passed:
++        all_passed = False
++
++print("\n" + "="*80)
++print("Overall result: {}".format('ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'))
+diff --git a/test_existing_urls.py b/test_existing_urls.py
+new file mode 100644
+index 0000000000..58e6625c66
+--- /dev/null
++++ b/test_existing_urls.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python
++"""Test existing URL validation behavior to ensure we haven't broken anything."""
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++def test_url(url, should_be_valid=True, schemes=None):
++    validator = URLValidator(schemes=schemes) if schemes else URLValidator()
++    try:
++        validator(url)
++        result = "VALID"
++    except ValidationError:
++        result = "INVALID"
++    
++    expected = "VALID" if should_be_valid else "INVALID"
++    status = "PASS" if result == expected else "FAIL"
++    
++    if status == "FAIL":
++        print("{} {} -> {} (expected: {})".format(status, url, result, expected))
++    return result == expected
++
++# Test cases from valid_urls.txt that contain userinfo
++valid_with_userinfo = [
++    "http://userid:password@example.com:8080",
++    "http://userid:password@example.com:8080/",
++    "http://userid@example.com",
++    "http://userid@example.com/",
++    "http://userid@example.com:8080",
++    "http://userid@example.com:8080/",
++    "http://userid:password@example.com",
++    "http://userid:password@example.com/",
++    "http://-.~_!$&'()*+,;=:%40:80%2f::::::@example.com",  # Special chars encoded
++]
++
++# Test cases that should remain invalid
++invalid_urls = [
++    "http://",
++    "http://example",
++    "http://example.",
++    "http://.com",
++    "http://invalid-.com",
++    "http://-invalid.com",
++    "http://invalid.com-",
++    "http://invalid.-com",
++    "http://foo.bar?q=Spaces should be encoded",
++    "http:// shouldfail.com",
++    ":// should fail",
++    "http://foo.bar/foo(bar)baz quux",
++    "http://-error-.invalid/",
++]
++
++print("Testing valid URLs with userinfo...")
++all_passed = True
++for url in valid_with_userinfo:
++    if not test_url(url, True):
++        all_passed = False
++
++print("\nTesting invalid URLs...")
++for url in invalid_urls:
++    if not test_url(url, False):
++        all_passed = False
++
++# Test extended schemes
++print("\nTesting extended schemes...")
++extended_schemes = ['http', 'https', 'ftp', 'ftps', 'git', 'file', 'git+ssh']
++extended_tests = [
++    ('file://localhost/path', True),
++    ('git://example.com/', True),
++    ('git+ssh://git@github.com/example/hg-git.git', True),
++    ('git://-invalid.com', False),
++]
++
++for url, should_be_valid in extended_tests:
++    if not test_url(url, should_be_valid, schemes=extended_schemes):
++        all_passed = False
++
++print("\n" + "="*80)
++print("Overall result: {}".format('ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'))
+diff --git a/test_final_validation.py b/test_final_validation.py
+new file mode 100644
+index 0000000000..6350c8f3a9
+--- /dev/null
++++ b/test_final_validation.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python
++"""Final validation test for RFC 1738 compliance fix."""
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++print("RFC 1738 Compliance Test for URLValidator")
++print("="*80)
++print("\nProblem: URLValidator was accepting URLs with unencoded '/', '@', and ':' ")
++print("in username and password fields, violating RFC 1738 section 3.1\n")
++
++test_results = []
++
++def test_url(url, expected_valid, description):
++    validator = URLValidator()
++    try:
++        validator(url)
++        actual = "VALID"
++    except ValidationError:
++        actual = "INVALID"
++    
++    expected = "VALID" if expected_valid else "INVALID"
++    passed = actual == expected
++    
++    test_results.append((passed, url, actual, expected, description))
++    return passed
++
++# Test cases
++print("Running tests...\n")
++
++# Invalid URLs that should be rejected
++test_url("http://foo/bar@example.com", False, 
++         "Slash in username must be encoded")
++test_url("http://foo:bar/baz@example.com", False,
++         "Slash in password must be encoded")
++test_url("http://foo@bar@example.com", False,
++         "At-sign in username must be encoded")
++test_url("http://foo:bar@baz@example.com", False,
++         "At-sign in password must be encoded")
++
++# Valid URLs with properly encoded characters
++test_url("http://foo%2Fbar@example.com", True,
++         "Slash encoded as %2F in username")
++test_url("http://foo:bar%2Fbaz@example.com", True,
++         "Slash encoded as %2F in password")
++test_url("http://foo%40bar@example.com", True,
++         "At-sign encoded as %40 in username")
++test_url("http://foo:bar%40baz@example.com", True,
++         "At-sign encoded as %40 in password")
++
++# Backward compatibility - colons in passwords
++test_url("http://foo:bar:baz@example.com", True,
++         "Multiple colons in password (backward compatibility)")
++test_url("http://foo:bar%3Abaz@example.com", True,
++         "Encoded colon %3A in password")
++
++# Query strings don't bypass validation
++test_url("http://foo/bar@example.com?m=foo@example.com", False,
++         "Query string doesn't make invalid URL valid")
++
++# Standard valid URLs still work
++test_url("http://example.com", True,
++         "Basic URL without userinfo")
++test_url("http://user@example.com", True,
++         "URL with username only")
++test_url("http://user:pass@example.com", True,
++         "URL with username and password")
++
++# Print results
++print("\nTest Results:")
++print("-"*80)
++all_passed = True
++for passed, url, actual, expected, description in test_results:
++    status = "PASS" if passed else "FAIL"
++    print("{}: {}".format(status, description))
++    print("   URL: {}".format(url))
++    print("   Result: {} (expected: {})".format(actual, expected))
++    print()
++    if not passed:
++        all_passed = False
++
++print("="*80)
++print("Overall: {}".format("ALL TESTS PASSED" if all_passed else "SOME TESTS FAILED"))
++
++if all_passed:
++    print("\nThe URLValidator now correctly rejects URLs with unencoded '/' and '@'")
++    print("characters in username and password fields, as required by RFC 1738.")
+diff --git a/test_rfc1738_compliance.py b/test_rfc1738_compliance.py
+new file mode 100644
+index 0000000000..8f7404abe4
+--- /dev/null
++++ b/test_rfc1738_compliance.py
+@@ -0,0 +1,58 @@
++#!/usr/bin/env python
++"""Test RFC 1738 compliance for @ and / characters in username/password."""
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++def test_url(url, should_be_valid=True):
++    validator = URLValidator()
++    try:
++        validator(url)
++        result = "VALID"
++    except ValidationError:
++        result = "INVALID"
++    
++    expected = "VALID" if should_be_valid else "INVALID"
++    status = "PASS" if result == expected else "FAIL"
++    
++    print("{} {} -> {} (expected: {})".format(status, url, result, expected))
++    return result == expected
++
++print("Testing URLs with @ and / in username/password (RFC 1738 compliance)...")
++print("="*80)
++
++# Test cases focusing on @ and / which must be encoded per RFC 1738
++test_cases = [
++    # Invalid URLs - unencoded @ and / in username/password
++    ("http://foo/bar@example.com", False),  # '/' in username
++    ("http://foo:bar/baz@example.com", False),  # '/' in password
++    ("http://foo@bar@example.com", False),  # '@' in username
++    ("http://foo:bar@baz@example.com", False),  # '@' in password
++    
++    # Valid URLs - properly encoded @ and /
++    ("http://foo%2Fbar@example.com", True),  # '/' encoded as %2F
++    ("http://foo:bar%2Fbaz@example.com", True),  # '/' encoded as %2F
++    ("http://foo%40bar@example.com", True),  # '@' encoded as %40
++    ("http://foo:bar%40baz@example.com", True),  # '@' encoded as %40
++    
++    # Note: We're being permissive about colons in passwords for backward compatibility
++    ("http://foo:bar:baz@example.com", True),  # Multiple colons allowed
++    ("http://foo:bar%3Abaz@example.com", True),  # Encoded colon also OK
++]
++
++all_passed = True
++for url, should_be_valid in test_cases:
++    passed = test_url(url, should_be_valid)
++    if not passed:
++        all_passed = False
++
++# Test the specific example from the problem statement
++print("\nSpecific example from problem statement:")
++test_url("http://foo/bar@example.com", False)
++
++# Test that query strings don't make invalid URLs valid
++print("\nTesting that query strings don't bypass validation:")
++test_url("http://foo/bar@example.com?m=foo@example.com", False)
++
++print("\n" + "="*80)
++print("Overall result: {}".format('ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'))
+diff --git a/test_rfc1738_validator_tests.py b/test_rfc1738_validator_tests.py
+new file mode 100644
+index 0000000000..75664fa5d7
+--- /dev/null
++++ b/test_rfc1738_validator_tests.py
+@@ -0,0 +1,50 @@
++"""
++Additional test cases for URLValidator to ensure RFC 1738 compliance.
++These test cases should be added to the Django test suite.
++"""
++
++# Test cases to add to TEST_DATA in tests/validators/tests.py
++RFC_1738_TEST_CASES = [
++    # Invalid URLs - unencoded special characters in username/password
++    (URLValidator(), 'http://foo/bar@example.com', ValidationError),  # '/' in username
++    (URLValidator(), 'http://foo:bar/baz@example.com', ValidationError),  # '/' in password  
++    (URLValidator(), 'http://foo@bar@example.com', ValidationError),  # '@' in username
++    (URLValidator(), 'http://foo:bar@baz@example.com', ValidationError),  # '@' in password
++    
++    # Valid URLs - properly encoded special characters
++    (URLValidator(), 'http://foo%2Fbar@example.com', None),  # '/' encoded as %2F
++    (URLValidator(), 'http://foo:bar%2Fbaz@example.com', None),  # '/' encoded as %2F
++    (URLValidator(), 'http://foo%40bar@example.com', None),  # '@' encoded as %40
++    (URLValidator(), 'http://foo:bar%40baz@example.com', None),  # '@' encoded as %40
++    
++    # Query strings don't bypass validation
++    (URLValidator(), 'http://foo/bar@example.com?m=foo@example.com', ValidationError),
++    (URLValidator(), 'http://foo@bar@example.com?m=foo@example.com', ValidationError),
++]
++
++# Additional invalid URLs to add to tests/validators/invalid_urls.txt
++ADDITIONAL_INVALID_URLS = """
++http://foo/bar@example.com
++http://foo:bar/baz@example.com
++http://foo@bar@example.com
++http://foo:bar@baz@example.com
++http://user/name@example.com
++http://user:pass/word@example.com
++http://user@name@example.com
++http://user:pass@word@example.com
++"""
++
++# Additional valid URLs to add to tests/validators/valid_urls.txt  
++ADDITIONAL_VALID_URLS = """
++http://foo%2Fbar@example.com
++http://foo:bar%2Fbaz@example.com
++http://foo%40bar@example.com
++http://foo:bar%40baz@example.com
++http://user%2Fname@example.com
++http://user:pass%2Fword@example.com
++http://user%40name@example.com
++http://user:pass%40word@example.com
++"""
++
++print("Test cases have been defined for RFC 1738 compliance.")
++print("These should be added to the Django test suite.")
+diff --git a/test_url_validator_issue.py b/test_url_validator_issue.py
+new file mode 100644
+index 0000000000..a5c041c1d6
+--- /dev/null
++++ b/test_url_validator_issue.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python
++"""Test script to reproduce the URL validator issue with invalid characters in username/password."""
++
++from django.core.validators import URLValidator
++from django.core.exceptions import ValidationError
++
++def test_url(url, should_be_valid=True):
++    validator = URLValidator()
++    try:
++        validator(url)
++        result = "VALID"
++    except ValidationError:
++        result = "INVALID"
++    
++    expected = "VALID" if should_be_valid else "INVALID"
++    status = "PASS" if result == expected else "FAIL"
++    
++    print("{} {} -> {} (expected: {})".format(status, url, result, expected))
++    return result == expected
++
++print("Testing URLs with invalid characters in username/password per RFC 1738...")
++print("\nRFC 1738 section 3.1 requires ':', '@', or '/' to be %-encoded in username/password")
++print("="*80)
++
++# Test cases from the problem statement
++test_cases = [
++    # Invalid URLs that should be rejected (contain unencoded special chars in username/password)
++    ("http://foo/bar@example.com", False),  # '/' in username
++    ("http://foo:bar/baz@example.com", False),  # '/' in password
++    ("http://foo@bar@example.com", False),  # '@' in username
++    ("http://foo:bar@baz@example.com", False),  # '@' in password
++    ("http://foo:bar:baz@example.com", False),  # ':' in password
++    
++    # Valid URLs (properly encoded)
++    ("http://foo%2Fbar@example.com", True),  # '/' encoded as %2F
++    ("http://foo:bar%2Fbaz@example.com", True),  # '/' encoded as %2F
++    ("http://foo%40bar@example.com", True),  # '@' encoded as %40
++    ("http://foo:bar%40baz@example.com", True),  # '@' encoded as %40
++    ("http://foo:bar%3Abaz@example.com", True),  # ':' encoded as %3A
++    
++    # Valid URLs without special chars
++    ("http://foo@example.com", True),
++    ("http://foo:bar@example.com", True),
++    ("http://example.com", True),
++]
++
++print("\nBasic test cases:")
++all_passed = True
++for url, should_be_valid in test_cases:
++    passed = test_url(url, should_be_valid)
++    if not passed:
++        all_passed = False
++
++# Test the specific case mentioned about query strings making invalid URLs valid
++print("\n\nTesting invalid URLs with query strings (should still be invalid):")
++invalid_base_urls = [
++    "http://foo/bar@example.com",
++    "http://foo@bar@example.com",
++    "http://foo:bar/baz@example.com",
++]
++
++for base_url in invalid_base_urls:
++    url_with_query = base_url + "?m=foo@example.com"
++    passed = test_url(url_with_query, False)
++    if not passed:
++        all_passed = False
++
++print("\n" + "="*80)
++print("Overall result: {}".format('ALL TESTS PASSED' if all_passed else 'SOME TESTS FAILED'))

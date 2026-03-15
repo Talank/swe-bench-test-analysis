@@ -1,0 +1,636 @@
+diff --git a/django/contrib/admin/utils.py b/django/contrib/admin/utils.py
+index e4ddc8f017..d76bbd440c 100644
+--- a/django/contrib/admin/utils.py
++++ b/django/contrib/admin/utils.py
+@@ -398,6 +398,14 @@ def display_for_field(value, field, empty_value_display):
+         return formats.number_format(value)
+     elif isinstance(field, models.FileField) and value:
+         return format_html('<a href="{}">{}</a>', value.url, value)
++    elif isinstance(field, models.JSONField):
++        # Use the form field's prepare_value to properly format JSON
++        try:
++            form_field = field.formfield()
++            return form_field.prepare_value(value)
++        except Exception:
++            # If there's any issue, fall back to default behavior
++            return display_for_value(value, empty_value_display)
+     else:
+         return display_for_value(value, empty_value_display)
+ 
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/models.py b/test_app/models.py
+new file mode 100644
+index 0000000000..0489aa341a
+--- /dev/null
++++ b/test_app/models.py
+@@ -0,0 +1,8 @@
++
++from django.db import models
++
++class TestModel(models.Model):
++    json_field = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
+diff --git a/test_app_admin/__init__.py b/test_app_admin/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app_admin/admin.py b/test_app_admin/admin.py
+new file mode 100644
+index 0000000000..41dc5f4731
+--- /dev/null
++++ b/test_app_admin/admin.py
+@@ -0,0 +1,8 @@
++
++from django.contrib import admin
++from .models import TestModel
++
++@admin.register(TestModel)
++class TestModelAdmin(admin.ModelAdmin):
++    readonly_fields = ('json_field',)
++    fields = ('name', 'json_field')
+diff --git a/test_app_admin/models.py b/test_app_admin/models.py
+new file mode 100644
+index 0000000000..ede55fa6e1
+--- /dev/null
++++ b/test_app_admin/models.py
+@@ -0,0 +1,9 @@
++
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    json_field = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app_admin'
+diff --git a/test_json_admin_display.py b/test_json_admin_display.py
+new file mode 100644
+index 0000000000..9be26a5534
+--- /dev/null
++++ b/test_json_admin_display.py
+@@ -0,0 +1,133 @@
++"""
++Test for JSONField display in admin readonly fields
++"""
++import json
++from django.test import TestCase
++from django.db import models
++from django.contrib.admin.utils import display_for_field
++from django.forms.fields import InvalidJSONInput
++
++
++class JSONFieldAdminDisplayTest(TestCase):
++    def setUp(self):
++        # Create a test model with JSONField
++        class TestModel(models.Model):
++            json_field = models.JSONField()
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        self.field = TestModel._meta.get_field('json_field')
++    
++    def test_display_dict(self):
++        """Test that dict values are displayed as valid JSON"""
++        value = {"foo": "bar", "nested": {"key": "value"}}
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '{"foo": "bar", "nested": {"key": "value"}}')
++        # Verify it's valid JSON
++        self.assertEqual(json.loads(result), value)
++    
++    def test_display_list(self):
++        """Test that list values are displayed as valid JSON"""
++        value = [1, 2, 3, "test"]
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '[1, 2, 3, "test"]')
++        # Verify it's valid JSON
++        self.assertEqual(json.loads(result), value)
++    
++    def test_display_string(self):
++        """Test that string values are displayed as valid JSON"""
++        value = "test string"
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '"test string"')
++        # Verify it's valid JSON
++        self.assertEqual(json.loads(result), value)
++    
++    def test_display_number(self):
++        """Test that numeric values are displayed as valid JSON"""
++        # Integer
++        value = 42
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '42')
++        self.assertEqual(json.loads(result), value)
++        
++        # Float
++        value = 3.14
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '3.14')
++        self.assertEqual(json.loads(result), value)
++    
++    def test_display_boolean(self):
++        """Test that boolean values are displayed as valid JSON"""
++        # True
++        result = display_for_field(True, self.field, '')
++        self.assertEqual(result, 'true')
++        self.assertEqual(json.loads(result), True)
++        
++        # False
++        result = display_for_field(False, self.field, '')
++        self.assertEqual(result, 'false')
++        self.assertEqual(json.loads(result), False)
++    
++    def test_display_null(self):
++        """Test that None values use empty_value_display"""
++        result = display_for_field(None, self.field, 'EMPTY')
++        self.assertEqual(result, 'EMPTY')
++    
++    def test_display_complex_nested(self):
++        """Test complex nested structures"""
++        value = {
++            "users": [
++                {"name": "Alice", "age": 30, "active": True},
++                {"name": "Bob", "age": None, "active": False}
++            ],
++            "metadata": {
++                "version": 1.0,
++                "tags": ["python", "django"]
++            }
++        }
++        result = display_for_field(value, self.field, '')
++        # Verify it's valid JSON
++        parsed = json.loads(result)
++        self.assertEqual(parsed, value)
++    
++    def test_display_special_characters(self):
++        """Test that special characters are properly escaped"""
++        value = {"quote": 'He said "Hello"', "newline": "line1\nline2"}
++        result = display_for_field(value, self.field, '')
++        # Verify it's valid JSON
++        parsed = json.loads(result)
++        self.assertEqual(parsed, value)
++    
++    def test_display_invalid_json_input(self):
++        """Test handling of InvalidJSONInput"""
++        value = InvalidJSONInput('{"invalid": json}')
++        result = display_for_field(value, self.field, '')
++        self.assertEqual(result, '{"invalid": json}')
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++        USE_TZ=True,
++    )
++    
++    django.setup()
++    
++    import unittest
++    suite = unittest.TestLoader().loadTestsFromTestCase(JSONFieldAdminDisplayTest)
++    runner = unittest.TextTestRunner(verbosity=2)
++    runner.run(suite)
+diff --git a/test_json_admin_integration.py b/test_json_admin_integration.py
+new file mode 100644
+index 0000000000..22a089ba43
+--- /dev/null
++++ b/test_json_admin_integration.py
+@@ -0,0 +1,130 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings_admin'
++
++# Create a minimal settings module with admin
++with open('/testbed/test_settings_admin.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.sessions',
++    'django.contrib.messages',
++    'django.contrib.admin',
++    'test_app_admin',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
++MIDDLEWARE = [
++    'django.contrib.sessions.middleware.SessionMiddleware',
++    'django.contrib.auth.middleware.AuthenticationMiddleware',
++    'django.contrib.messages.middleware.MessageMiddleware',
++]
++TEMPLATES = [
++    {
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    },
++]
++ROOT_URLCONF = 'test_urls'
++""")
++
++# Create test URLs
++with open('/testbed/test_urls.py', 'w') as f:
++    f.write("""
++from django.contrib import admin
++from django.urls import path
++
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
++""")
++
++# Create a test app
++os.makedirs('/testbed/test_app_admin', exist_ok=True)
++with open('/testbed/test_app_admin/__init__.py', 'w') as f:
++    f.write('')
++
++with open('/testbed/test_app_admin/models.py', 'w') as f:
++    f.write("""
++from django.db import models
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    json_field = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app_admin'
++""")
++
++with open('/testbed/test_app_admin/admin.py', 'w') as f:
++    f.write("""
++from django.contrib import admin
++from .models import TestModel
++
++@admin.register(TestModel)
++class TestModelAdmin(admin.ModelAdmin):
++    readonly_fields = ('json_field',)
++    fields = ('name', 'json_field')
++""")
++
++django.setup()
++
++# Test the admin display
++from django.contrib.admin.helpers import AdminReadonlyField
++from django.contrib.admin import site
++from test_app_admin.models import TestModel
++from django.forms.models import modelform_factory
++
++# Create a test instance
++test_data = {"foo": "bar", "nested": {"key": "value"}}
++
++# Get the admin class
++model_admin = site._registry[TestModel]
++
++# Create a form instance
++Form = modelform_factory(TestModel, fields=['name', 'json_field'])
++form = Form()
++
++# Create a mock object with the JSON data
++class MockObj:
++    json_field = test_data
++    pk = 1
++
++# Test the readonly field display
++readonly_field = AdminReadonlyField(
++    form=form,
++    field='json_field',
++    is_first=True,
++    model_admin=model_admin
++)
++readonly_field.field = {'name': 'json_field'}
++
++# Get the display value
++from django.contrib.admin.utils import display_for_field
++field = TestModel._meta.get_field('json_field')
++result = display_for_field(test_data, field, '')
++
++print(f"Admin readonly display for JSONField:")
++print(f"Input: {test_data}")
++print(f"Output: {result}")
++expected = '{"foo": "bar", "nested": {"key": "value"}}'
++print(f"Is valid JSON: {result == expected}")
+diff --git a/test_json_edge_cases.py b/test_json_edge_cases.py
+new file mode 100644
+index 0000000000..1b5db84f67
+--- /dev/null
++++ b/test_json_edge_cases.py
+@@ -0,0 +1,99 @@
++import os
++import django
++from django.conf import settings
++import json
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Ensure test_settings.py exists
++if not os.path.exists('/testbed/test_settings.py'):
++    with open('/testbed/test_settings.py', 'w') as f:
++        f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.admin',
++    'test_app',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
++""")
++
++# Ensure test app exists
++os.makedirs('/testbed/test_app', exist_ok=True)
++if not os.path.exists('/testbed/test_app/__init__.py'):
++    with open('/testbed/test_app/__init__.py', 'w') as f:
++        f.write('')
++
++if not os.path.exists('/testbed/test_app/models.py'):
++    with open('/testbed/test_app/models.py', 'w') as f:
++        f.write("""
++from django.db import models
++
++class TestModel(models.Model):
++    json_field = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++""")
++
++django.setup()
++
++# Now test the display_for_field function with various edge cases
++from django.contrib.admin.utils import display_for_field
++from django.db import models
++from test_app.models import TestModel
++from django.forms.fields import InvalidJSONInput
++
++field = TestModel._meta.get_field('json_field')
++
++# Test cases
++test_cases = [
++    # (input_value, description)
++    ({"foo": "bar"}, "Simple dict"),
++    ({"nested": {"key": "value", "array": [1, 2, 3]}}, "Nested dict with array"),
++    ([1, 2, 3], "Simple array"),
++    ("string value", "String value"),
++    (123, "Integer value"),
++    (123.45, "Float value"),
++    (True, "Boolean true"),
++    (False, "Boolean false"),
++    (None, "None value"),
++    ({"key": None}, "Dict with None value"),
++    ({"unicode": "hello"}, "Unicode test"),
++    ({"special": 'string with "quotes"'}, "String with quotes"),
++]
++
++print("Testing display_for_field with JSONField:")
++print("-" * 60)
++
++for value, description in test_cases:
++    result = display_for_field(value, field, 'EMPTY')
++    print(f"\n{description}:")
++    print(f"  Input: {repr(value)}")
++    print(f"  Output: {result}")
++    
++    # Verify it's valid JSON (except for None which should show 'EMPTY')
++    if value is not None:
++        try:
++            parsed = json.loads(result)
++            print(f"  Valid JSON: YES")
++        except json.JSONDecodeError as e:
++            print(f"  Valid JSON: NO (Error: {e})")
++    else:
++        print(f"  Correctly shows empty value display: {'YES' if result == 'EMPTY' else 'NO'}")
++
++# Test with InvalidJSONInput (edge case from form processing)
++print("\n" + "-" * 60)
++print("\nTesting with InvalidJSONInput:")
++invalid_input = InvalidJSONInput('{"invalid": json}')
++result = display_for_field(invalid_input, field, 'EMPTY')
++print(f"  Input: {repr(invalid_input)}")
++print(f"  Output: {result}")
+diff --git a/test_json_readonly.py b/test_json_readonly.py
+new file mode 100644
+index 0000000000..60a5b2940b
+--- /dev/null
++++ b/test_json_readonly.py
+@@ -0,0 +1,61 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.admin',
++    'test_app',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
++""")
++
++# Create a test app
++os.makedirs('/testbed/test_app', exist_ok=True)
++with open('/testbed/test_app/__init__.py', 'w') as f:
++    f.write('')
++
++with open('/testbed/test_app/models.py', 'w') as f:
++    f.write("""
++from django.db import models
++
++class TestModel(models.Model):
++    json_field = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++""")
++
++django.setup()
++
++# Now test the display_for_field function
++from django.contrib.admin.utils import display_for_field
++from django.db import models
++from test_app.models import TestModel
++
++# Create a test instance
++field = TestModel._meta.get_field('json_field')
++
++# Test with a dict value (simulating what happens when readonly)
++test_value = {"foo": "bar", "nested": {"key": "value"}}
++result = display_for_field(test_value, field, '')
++print(f"Current output: {result}")
++expected = '{"foo": "bar", "nested": {"key": "value"}}'
++print(f"Expected output: {expected}")
++
++# The issue is that display_for_field returns str(value) which gives Python dict representation
++# instead of valid JSON
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..41818bf1fe
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,15 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.admin',
++    'test_app',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
+diff --git a/test_settings_admin.py b/test_settings_admin.py
+new file mode 100644
+index 0000000000..1199027270
+--- /dev/null
++++ b/test_settings_admin.py
+@@ -0,0 +1,38 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.sessions',
++    'django.contrib.messages',
++    'django.contrib.admin',
++    'test_app_admin',
++]
++SECRET_KEY = 'test-secret-key'
++USE_TZ = True
++MIDDLEWARE = [
++    'django.contrib.sessions.middleware.SessionMiddleware',
++    'django.contrib.auth.middleware.AuthenticationMiddleware',
++    'django.contrib.messages.middleware.MessageMiddleware',
++]
++TEMPLATES = [
++    {
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    },
++]
++ROOT_URLCONF = 'test_urls'
+diff --git a/test_urls.py b/test_urls.py
+new file mode 100644
+index 0000000000..a3c4a89d19
+--- /dev/null
++++ b/test_urls.py
+@@ -0,0 +1,7 @@
++
++from django.contrib import admin
++from django.urls import path
++
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
+diff --git a/tests/admin_utils/tests.py b/tests/admin_utils/tests.py
+index 463ba9556d..2e99a4c6a5 100644
+--- a/tests/admin_utils/tests.py
++++ b/tests/admin_utils/tests.py
+@@ -197,6 +197,38 @@ class UtilsTests(SimpleTestCase):
+         display_value = display_for_field(12345, models.IntegerField(), self.empty_value)
+         self.assertEqual(display_value, '12,345')
+ 
++    def test_json_display_for_field(self):
++        """Test that JSONField values are displayed as valid JSON."""
++        # Test dict
++        value = {"foo": "bar", "nested": {"key": "value"}}
++        display_value = display_for_field(value, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, '{"foo": "bar", "nested": {"key": "value"}}')
++        
++        # Test list
++        value = [1, 2, 3]
++        display_value = display_for_field(value, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, '[1, 2, 3]')
++        
++        # Test string
++        value = "test"
++        display_value = display_for_field(value, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, '"test"')
++        
++        # Test number
++        display_value = display_for_field(42, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, '42')
++        
++        # Test boolean
++        display_value = display_for_field(True, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, 'true')
++        
++        display_value = display_for_field(False, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, 'false')
++        
++        # Test None
++        display_value = display_for_field(None, models.JSONField(), self.empty_value)
++        self.assertEqual(display_value, self.empty_value)
++
+     def test_list_display_for_value(self):
+         display_value = display_for_value([1, 2, 3], self.empty_value)
+         self.assertEqual(display_value, '1, 2, 3')

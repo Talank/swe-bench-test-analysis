@@ -1,0 +1,329 @@
+diff --git a/sphinx/builders/gettext.py b/sphinx/builders/gettext.py
+index e8bc547b7..11444c884 100644
+--- a/sphinx/builders/gettext.py
++++ b/sphinx/builders/gettext.py
+@@ -32,7 +32,14 @@ class Message:
+     """An entry of translatable message."""
+     def __init__(self, text: str, locations: List[Tuple[str, int]], uuids: List[str]):
+         self.text = text
+-        self.locations = locations
++        # Remove duplicate locations while preserving order
++        seen = set()
++        unique_locations = []
++        for loc in locations:
++            if loc not in seen:
++                seen.add(loc)
++                unique_locations.append(loc)
++        self.locations = unique_locations
+         self.uuids = uuids
+ 
+ 
+diff --git a/test_duplicate_locations.py b/test_duplicate_locations.py
+new file mode 100644
+index 000000000..8ab938f9c
+--- /dev/null
++++ b/test_duplicate_locations.py
+@@ -0,0 +1,47 @@
++"""Test script to reproduce the duplicate locations issue."""
++from sphinx.builders.gettext import Message, Catalog, MsgOrigin
++
++def test_duplicate_locations():
++    # Create a catalog
++    catalog = Catalog()
++    
++    # Add the same message from the same file/line multiple times
++    # This simulates what happens when the same translatable text appears
++    # multiple times in the same location
++    origin1 = MsgOrigin("../../manual/modeling/hair.rst", 0)
++    origin2 = MsgOrigin("../../manual/modeling/hair.rst", 0)
++    origin3 = MsgOrigin("../../manual/modeling/hair.rst", 0)
++    origin4 = MsgOrigin("../../manual/modeling/metas/properties.rst", 92)
++    
++    catalog.add("Type", origin1)
++    catalog.add("Type", origin2)
++    catalog.add("Type", origin3)
++    catalog.add("Type", origin4)
++    
++    # Get the message
++    messages = list(catalog)
++    assert len(messages) == 1  # Should have only one message for "Type"
++    
++    message = messages[0]
++    print(f"Message text: {message.text}")
++    print(f"Number of locations: {len(message.locations)}")
++    print("Locations:")
++    for loc in message.locations:
++        print(f"  {loc}")
++    
++    # Check for duplicates
++    unique_locations = list(set(message.locations))
++    print(f"\nUnique locations: {len(unique_locations)}")
++    for loc in unique_locations:
++        print(f"  {loc}")
++    
++    if len(message.locations) != len(unique_locations):
++        print("\nDUPLICATE LOCATIONS FOUND!")
++        return False
++    return True
++
++if __name__ == "__main__":
++    if test_duplicate_locations():
++        print("\nNo duplicate locations - test passed!")
++    else:
++        print("\nDuplicate locations exist - test failed!")
+diff --git a/test_message_locations.py b/test_message_locations.py
+new file mode 100644
+index 000000000..1dc7dd0a6
+--- /dev/null
++++ b/test_message_locations.py
+@@ -0,0 +1,104 @@
++"""Comprehensive test for Message location deduplication."""
++import pytest
++from sphinx.builders.gettext import Message, Catalog, MsgOrigin
++
++
++def test_message_init_deduplicates_locations():
++    """Test that Message.__init__ removes duplicate locations."""
++    # Test with duplicate locations
++    locations = [
++        ("file1.rst", 10),
++        ("file1.rst", 10),  # duplicate
++        ("file2.rst", 20),
++        ("file1.rst", 10),  # duplicate
++        ("file3.rst", 30),
++    ]
++    uuids = ["uuid1", "uuid2", "uuid3", "uuid4", "uuid5"]
++    
++    msg = Message("Test message", locations, uuids)
++    
++    # Should have only unique locations
++    assert len(msg.locations) == 3
++    assert msg.locations == [
++        ("file1.rst", 10),
++        ("file2.rst", 20),
++        ("file3.rst", 30),
++    ]
++    # UUIDs should remain unchanged
++    assert len(msg.uuids) == 5
++
++
++def test_message_preserves_order():
++    """Test that deduplication preserves the order of first occurrence."""
++    locations = [
++        ("file3.rst", 30),
++        ("file1.rst", 10),
++        ("file2.rst", 20),
++        ("file1.rst", 10),  # duplicate
++        ("file3.rst", 30),  # duplicate
++    ]
++    uuids = ["uuid1", "uuid2", "uuid3", "uuid4", "uuid5"]
++    
++    msg = Message("Test message", locations, uuids)
++    
++    # Order should be preserved based on first occurrence
++    assert msg.locations == [
++        ("file3.rst", 30),
++        ("file1.rst", 10),
++        ("file2.rst", 20),
++    ]
++
++
++def test_catalog_with_duplicate_origins():
++    """Test the full flow through Catalog to Message."""
++    catalog = Catalog()
++    
++    # Add the same message from multiple origins, some duplicates
++    origins = [
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/render/shader_nodes/vector/vector_rotate.rst", 38),
++        MsgOrigin("../../manual/modeling/metas/properties.rst", 92),
++    ]
++    
++    for origin in origins:
++        catalog.add("Type", origin)
++    
++    # Get the message
++    messages = list(catalog)
++    assert len(messages) == 1
++    
++    message = messages[0]
++    assert message.text == "Type"
++    
++    # Should have deduplicated locations
++    expected_locations = [
++        ("../../manual/modeling/hair.rst", 0),
++        ("../../manual/render/shader_nodes/vector/vector_rotate.rst", 38),
++        ("../../manual/modeling/metas/properties.rst", 92),
++    ]
++    assert message.locations == expected_locations
++    
++    # But should have all UUIDs
++    assert len(message.uuids) == 5
++
++
++def test_empty_locations():
++    """Test handling of empty locations list."""
++    msg = Message("Test", [], [])
++    assert msg.locations == []
++    assert msg.uuids == []
++
++
++def test_single_location():
++    """Test with a single location (no duplicates possible)."""
++    locations = [("file.rst", 1)]
++    uuids = ["uuid1"]
++    msg = Message("Test", locations, uuids)
++    assert msg.locations == locations
++    assert msg.uuids == uuids
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/test_real_scenario.py b/test_real_scenario.py
+new file mode 100644
+index 000000000..902145eae
+--- /dev/null
++++ b/test_real_scenario.py
+@@ -0,0 +1,96 @@
++"""Test that simulates the real scenario from the problem statement."""
++from sphinx.builders.gettext import Catalog, MsgOrigin
++
++
++def test_real_scenario_from_problem_statement():
++    """Test the exact scenario described in the problem statement."""
++    catalog = Catalog()
++    
++    # First example from problem statement:
++    # #: ../../manual/render/shader_nodes/vector/vector_rotate.rst:38
++    # #: ../../manual/modeling/hair.rst:0
++    # #: ../../manual/modeling/hair.rst:0
++    # #: ../../manual/modeling/hair.rst:0
++    # #: ../../manual/modeling/metas/properties.rst:92
++    
++    origins1 = [
++        MsgOrigin("../../manual/render/shader_nodes/vector/vector_rotate.rst", 38),
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/modeling/hair.rst", 0),
++        MsgOrigin("../../manual/modeling/metas/properties.rst", 92),
++    ]
++    
++    for origin in origins1:
++        catalog.add("Type", origin)
++    
++    # Second example from problem statement:
++    # #: ../../manual/movie_clip/tracking/clip/toolbar/solve.rst:96
++    # #: ../../manual/physics/dynamic_paint/brush.rst:0
++    # #: ../../manual/physics/dynamic_paint/brush.rst:0
++    # #: ../../manual/physics/dynamic_paint/brush.rst:0
++    # #: ../../manual/physics/dynamic_paint/brush.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/dynamic_paint/canvas.rst:0
++    # #: ../../manual/physics/fluid/type/domain/cache.rst:0
++    
++    origins2 = [
++        MsgOrigin("../../manual/movie_clip/tracking/clip/toolbar/solve.rst", 96),
++        MsgOrigin("../../manual/physics/dynamic_paint/brush.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/brush.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/brush.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/brush.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        MsgOrigin("../../manual/physics/fluid/type/domain/cache.rst", 0),
++    ]
++    
++    for origin in origins2:
++        catalog.add("SomeOtherMessage", origin)
++    
++    # Get all messages
++    messages = list(catalog)
++    
++    # Check first message
++    type_msg = [m for m in messages if m.text == "Type"][0]
++    print("Message 'Type' locations:")
++    for loc in type_msg.locations:
++        print(f"  {loc}")
++    
++    # Should have only unique locations
++    expected_type_locations = [
++        ("../../manual/render/shader_nodes/vector/vector_rotate.rst", 38),
++        ("../../manual/modeling/hair.rst", 0),
++        ("../../manual/modeling/metas/properties.rst", 92),
++    ]
++    assert type_msg.locations == expected_type_locations
++    
++    # Check second message
++    other_msg = [m for m in messages if m.text == "SomeOtherMessage"][0]
++    print("\nMessage 'SomeOtherMessage' locations:")
++    for loc in other_msg.locations:
++        print(f"  {loc}")
++    
++    # Should have only unique locations
++    expected_other_locations = [
++        ("../../manual/movie_clip/tracking/clip/toolbar/solve.rst", 96),
++        ("../../manual/physics/dynamic_paint/brush.rst", 0),
++        ("../../manual/physics/dynamic_paint/canvas.rst", 0),
++        ("../../manual/physics/fluid/type/domain/cache.rst", 0),
++    ]
++    assert other_msg.locations == expected_other_locations
++    
++    print("\nTest passed! Duplicate locations have been removed.")
++    return True
++
++
++if __name__ == "__main__":
++    test_real_scenario_from_problem_statement()
+diff --git a/test_template_output.py b/test_template_output.py
+new file mode 100644
+index 000000000..5ba20fc0a
+--- /dev/null
++++ b/test_template_output.py
+@@ -0,0 +1,38 @@
++"""Test that the template output is correct after deduplication."""
++from sphinx.builders.gettext import Message
++
++
++def test_template_output_format():
++    """Verify that the Message object works correctly with template rendering."""
++    # Create a message with what would have been duplicate locations
++    locations = [
++        ("../../manual/modeling/hair.rst", 0),
++        ("../../manual/modeling/hair.rst", 0),  # Would be duplicate
++        ("../../manual/modeling/hair.rst", 0),  # Would be duplicate
++        ("../../manual/modeling/metas/properties.rst", 92),
++    ]
++    uuids = ["uuid1", "uuid2", "uuid3", "uuid4"]
++    
++    msg = Message("Type", locations, uuids)
++    
++    # Verify the message has deduplicated locations
++    assert len(msg.locations) == 2
++    assert msg.locations[0] == ("../../manual/modeling/hair.rst", 0)
++    assert msg.locations[1] == ("../../manual/modeling/metas/properties.rst", 92)
++    
++    # Verify all attributes are accessible as expected by the template
++    assert msg.text == "Type"
++    assert len(msg.uuids) == 4
++    
++    # Simulate template iteration
++    print("Template would render:")
++    for source, line in msg.locations:
++        print(f"#: {source}:{line}")
++    print(f'msgid "{msg.text}"')
++    print('msgstr ""')
++    
++    return True
++
++
++if __name__ == "__main__":
++    test_template_output_format()

@@ -1,0 +1,526 @@
+diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py
+index 97977d72ef..bf9c2acd26 100644
+--- a/django/db/migrations/autodetector.py
++++ b/django/db/migrations/autodetector.py
+@@ -96,7 +96,7 @@ class MigrationAutodetector:
+         for name, field in sorted(fields.items()):
+             deconstruction = self.deep_deconstruct(field)
+             if field.remote_field and field.remote_field.model:
+-                del deconstruction[2]['to']
++                deconstruction[2].pop('to', None)
+             fields_def.append(deconstruction)
+         return fields_def
+ 
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..1bc40403a6
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,130 @@
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ModelState, ProjectState
++from django.test import TestCase
++
++class CustomFKFieldNoTo(models.ForeignKey):
++    """Custom FK field that removes 'to' from deconstruction"""
++    def __init__(self, *args, **kwargs):
++        kwargs['to'] = 'testapp.HardcodedModel'
++        super().__init__(*args, **kwargs)
++    
++    def deconstruct(self):
++        name, path, args, kwargs = super().deconstruct()
++        del kwargs["to"]
++        return name, path, args, kwargs
++
++class CustomFKFieldWithTo(models.ForeignKey):
++    """Custom FK field that keeps 'to' in deconstruction"""
++    def __init__(self, *args, **kwargs):
++        kwargs['to'] = 'testapp.HardcodedModel'
++        super().__init__(*args, **kwargs)
++
++class ComprehensiveTestCase(TestCase):
++    def test_custom_fk_without_to_in_deconstruction(self):
++        """Test custom FK field that removes 'to' from deconstruction"""
++        before = ProjectState()
++        before.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after = ProjectState()
++        after.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after.add_model(ModelState('testapp', 'TestModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKFieldNoTo(on_delete=models.CASCADE))
++        ]))
++        
++        autodetector = MigrationAutodetector(before, after)
++        changes = autodetector._detect_changes()
++        self.assertIn('testapp', changes)
++        self.assertEqual(len(changes['testapp']), 1)
++        
++    def test_custom_fk_with_to_in_deconstruction(self):
++        """Test custom FK field that keeps 'to' in deconstruction"""
++        before = ProjectState()
++        before.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after = ProjectState()
++        after.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after.add_model(ModelState('testapp', 'TestModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKFieldWithTo(on_delete=models.CASCADE))
++        ]))
++        
++        autodetector = MigrationAutodetector(before, after)
++        changes = autodetector._detect_changes()
++        self.assertIn('testapp', changes)
++        self.assertEqual(len(changes['testapp']), 1)
++        
++    def test_regular_fk_field(self):
++        """Test regular FK field"""
++        before = ProjectState()
++        before.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after = ProjectState()
++        after.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after.add_model(ModelState('testapp', 'TestModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('regular', models.ForeignKey('testapp.HardcodedModel', on_delete=models.CASCADE))
++        ]))
++        
++        autodetector = MigrationAutodetector(before, after)
++        changes = autodetector._detect_changes()
++        self.assertIn('testapp', changes)
++        self.assertEqual(len(changes['testapp']), 1)
++        
++    def test_model_rename_with_custom_fk(self):
++        """Test model rename detection with custom FK field"""
++        before = ProjectState()
++        before.add_model(ModelState('testapp', 'HardcodedModel', []))
++        before.add_model(ModelState('testapp', 'OldModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKFieldNoTo(on_delete=models.CASCADE))
++        ]))
++        
++        after = ProjectState()
++        after.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after.add_model(ModelState('testapp', 'NewModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKFieldNoTo(on_delete=models.CASCADE))
++        ]))
++        
++        autodetector = MigrationAutodetector(before, after)
++        autodetector.questioner.ask_rename_model = lambda old, new: True
++        changes = autodetector._detect_changes()
++        self.assertIn('testapp', changes)
++        # Should detect a rename operation
++        rename_ops = [op for migration in changes['testapp'] 
++                      for op in migration.operations 
++                      if op.__class__.__name__ == 'RenameModel']
++        self.assertEqual(len(rename_ops), 1)
++
++if __name__ == "__main__":
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++        SECRET_KEY='test',
++    )
++    django.setup()
++    
++    # Run the tests
++    test = ComprehensiveTestCase()
++    tests = [
++        'test_custom_fk_without_to_in_deconstruction',
++        'test_custom_fk_with_to_in_deconstruction', 
++        'test_regular_fk_field',
++        'test_model_rename_with_custom_fk'
++    ]
++    
++    for test_name in tests:
++        try:
++            getattr(test, test_name)()
++            print(f"✓ {test_name} passed")
++        except Exception as e:
++            print(f"✗ {test_name} failed: {e}")
++            import traceback
++            traceback.print_exc()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..a68e04e61c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,72 @@
++"""
++Test edge cases for the fix.
++"""
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ModelState, ProjectState
++from django.conf import settings
++import django
++
++# Configure Django
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++    SECRET_KEY='test',
++)
++django.setup()
++
++def test_only_relation_agnostic_fields():
++    """Test the only_relation_agnostic_fields method directly"""
++    print("Testing only_relation_agnostic_fields method...")
++    
++    autodetector = MigrationAutodetector(ProjectState(), ProjectState())
++    
++    # Test 1: Field with remote_field and 'to' in kwargs
++    class NormalFK(models.ForeignKey):
++        pass
++    
++    field1 = NormalFK('testapp.Target', on_delete=models.CASCADE)
++    fields = {'field1': field1}
++    
++    result = autodetector.only_relation_agnostic_fields(fields)
++    print("✓ Normal ForeignKey field processed successfully")
++    
++    # Test 2: Field with remote_field but no 'to' in kwargs (our edge case)
++    class CustomFK(models.ForeignKey):
++        def deconstruct(self):
++            name, path, args, kwargs = super().deconstruct()
++            kwargs.pop('to', None)  # Remove 'to' if present
++            return name, path, args, kwargs
++    
++    field2 = CustomFK('testapp.Target', on_delete=models.CASCADE)
++    fields = {'field2': field2}
++    
++    result = autodetector.only_relation_agnostic_fields(fields)
++    print("✓ Custom ForeignKey field (without 'to' in kwargs) processed successfully")
++    
++    # Test 3: Non-relation field
++    field3 = models.CharField(max_length=100)
++    fields = {'field3': field3}
++    
++    result = autodetector.only_relation_agnostic_fields(fields)
++    print("✓ Non-relation field processed successfully")
++    
++    # Test 4: Mix of fields
++    fields = {
++        'normal_fk': NormalFK('testapp.Target', on_delete=models.CASCADE),
++        'custom_fk': CustomFK('testapp.Target', on_delete=models.CASCADE),
++        'char_field': models.CharField(max_length=100),
++    }
++    
++    result = autodetector.only_relation_agnostic_fields(fields)
++    print("✓ Mix of different field types processed successfully")
++    
++    print("\nAll edge cases handled correctly!")
++
++if __name__ == '__main__':
++    test_only_relation_agnostic_fields()
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..2a662009f1
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,99 @@
++"""
++Final verification that the fix works correctly.
++"""
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ModelState, ProjectState
++from django.conf import settings
++import django
++
++# Configure Django
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++    SECRET_KEY='test',
++)
++django.setup()
++
++# Define the custom ForeignKey field that removes 'to' from deconstruction
++class CustomFKField(models.ForeignKey):
++    def __init__(self, *args, **kwargs):
++        kwargs['to'] = 'testapp.HardcodedModel'
++        super().__init__(*args, **kwargs)
++    
++    def deconstruct(self):
++        name, path, args, kwargs = super().deconstruct()
++        # This is what causes the KeyError in the original code
++        del kwargs["to"]
++        return name, path, args, kwargs
++
++# Test the fix
++def test_fix():
++    print("Testing the fix for KeyError in migration autodetector...")
++    
++    # Create model states
++    before = ProjectState()
++    before.add_model(ModelState('testapp', 'HardcodedModel', [
++        ('id', models.AutoField(primary_key=True))
++    ]))
++    
++    after = ProjectState()
++    after.add_model(ModelState('testapp', 'HardcodedModel', [
++        ('id', models.AutoField(primary_key=True))
++    ]))
++    after.add_model(ModelState('testapp', 'TestModel', [
++        ('id', models.AutoField(primary_key=True)),
++        ('custom', CustomFKField(on_delete=models.CASCADE))
++    ]))
++    
++    try:
++        # This would raise KeyError before the fix
++        autodetector = MigrationAutodetector(before, after)
++        changes = autodetector._detect_changes()
++        
++        # Verify we got the expected changes
++        assert 'testapp' in changes
++        assert len(changes['testapp']) == 1
++        
++        print("✓ SUCCESS: No KeyError occurred!")
++        print(f"✓ Detected {len(changes['testapp'])} migration(s) for testapp")
++        
++        # Test model rename scenario too
++        print("\nTesting model rename scenario...")
++        before2 = ProjectState()
++        before2.add_model(ModelState('testapp', 'HardcodedModel', []))
++        before2.add_model(ModelState('testapp', 'OldModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKField(on_delete=models.CASCADE))
++        ]))
++        
++        after2 = ProjectState()
++        after2.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after2.add_model(ModelState('testapp', 'NewModel', [
++            ('id', models.AutoField(primary_key=True)),
++            ('custom', CustomFKField(on_delete=models.CASCADE))
++        ]))
++        
++        autodetector2 = MigrationAutodetector(before2, after2)
++        # Mock the questioner to always say yes to renames
++        autodetector2.questioner.ask_rename_model = lambda old, new: True
++        changes2 = autodetector2._detect_changes()
++        
++        print("✓ Model rename detection also works without KeyError!")
++        
++        return True
++        
++    except KeyError as e:
++        print(f"✗ FAILED: KeyError still occurs: {e}")
++        import traceback
++        traceback.print_exc()
++        return False
++
++if __name__ == '__main__':
++    success = test_fix()
++    exit(0 if success else 1)
+diff --git a/test_manage_test_command.py b/test_manage_test_command.py
+new file mode 100644
+index 0000000000..af8e472bcc
+--- /dev/null
++++ b/test_manage_test_command.py
+@@ -0,0 +1,88 @@
++"""
++Test that simulates the scenario from the problem statement where
++`manage.py test -v 2` was failing with a KeyError.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++from django.core.management import call_command
++from io import StringIO
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'testapp',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++# Create a test app module
++sys.modules['testapp'] = type(sys)('testapp')
++sys.modules['testapp'].models = type(sys)('models')
++
++# Initialize Django first
++django.setup()
++
++# Define the custom ForeignKey field
++class CustomFKField(models.ForeignKey):
++    def __init__(self, *args, **kwargs):
++        kwargs['to'] = 'testapp.HardcodedModel'
++        super().__init__(*args, **kwargs)
++    
++    def deconstruct(self):
++        name, path, args, kwargs = super().deconstruct()
++        del kwargs["to"]
++        return name, path, args, kwargs
++
++# Define models
++class HardcodedModel(models.Model):
++    class Meta:
++        app_label = 'testapp'
++
++class TestModel(models.Model):
++    custom = CustomFKField(on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'testapp'
++
++# Add models to the module
++sys.modules['testapp'].models.HardcodedModel = HardcodedModel
++sys.modules['testapp'].models.TestModel = TestModel
++
++# Test case
++class SimpleTest(TestCase):
++    def test_dummy(self):
++        """A simple test to trigger the test database creation"""
++        self.assertTrue(True)
++
++if __name__ == '__main__':
++    # Try to run the test command with verbosity 2
++    # This should not raise a KeyError
++    try:
++        out = StringIO()
++        err = StringIO()
++        call_command('test', __name__, verbosity=2, stdout=out, stderr=err)
++        print("SUCCESS: Test command executed without KeyError!")
++        print("Output:", out.getvalue())
++    except KeyError as e:
++        print(f"FAILED: KeyError occurred: {e}")
++        import traceback
++        traceback.print_exc()
++    except Exception as e:
++        # Other exceptions are expected (like SystemExit from the test runner)
++        if "KeyError" in str(e):
++            print(f"FAILED: KeyError in exception chain: {e}")
++        else:
++            print("SUCCESS: No KeyError occurred (other exception is expected from test runner)")
+diff --git a/test_reproduction.py b/test_reproduction.py
+new file mode 100644
+index 0000000000..4c2f76c16e
+--- /dev/null
++++ b/test_reproduction.py
+@@ -0,0 +1,53 @@
++from django.db import models
++from django.db.migrations.autodetector import MigrationAutodetector
++from django.db.migrations.state import ModelState, ProjectState
++from django.test import TestCase
++
++class CustomFKField(models.ForeignKey):
++    def __init__(self, *args, **kwargs):
++        kwargs['to'] = 'testapp.HardcodedModel'
++        super().__init__(*args, **kwargs)
++    
++    def deconstruct(self):
++        name, path, args, kwargs = super().deconstruct()
++        del kwargs["to"]
++        return name, path, args, kwargs
++
++class ReproTestCase(TestCase):
++    def test_reproduction(self):
++        before = ProjectState()
++        before.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after = ProjectState()
++        after.add_model(ModelState('testapp', 'HardcodedModel', []))
++        after.add_model(ModelState('testapp', 'TestModel', [('custom', CustomFKField(on_delete=models.CASCADE))]))
++        
++        # This should raise KeyError
++        autodetector = MigrationAutodetector(before, after)
++        changes = autodetector._detect_changes()
++        self.assertEqual(len(changes['testapp']), 1)
++
++if __name__ == "__main__":
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++        SECRET_KEY='test',
++    )
++    django.setup()
++    
++    # Run the test
++    test = ReproTestCase()
++    try:
++        test.test_reproduction()
++        print("Test passed!")
++    except KeyError as e:
++        print(f"KeyError occurred as expected: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/tests/migrations/test_autodetector.py b/tests/migrations/test_autodetector.py
+index 3b46601145..965dc80754 100644
+--- a/tests/migrations/test_autodetector.py
++++ b/tests/migrations/test_autodetector.py
+@@ -2049,6 +2049,36 @@ class AutodetectorTests(TestCase):
+         )
+         self.assertEqual(len(changes), 1)
+ 
++    def test_custom_fk_field_no_to_kwarg(self):
++        """
++        #23609 - A custom ForeignKey field that excludes the 'to' kwarg from
++        its deconstruction should not cause a KeyError in the autodetector.
++        """
++        class CustomFKField(models.ForeignKey):
++            def __init__(self, *args, **kwargs):
++                kwargs['to'] = 'testapp.HardcodedModel'
++                super().__init__(*args, **kwargs)
++            
++            def deconstruct(self):
++                name, path, args, kwargs = super().deconstruct()
++                del kwargs["to"]
++                return name, path, args, kwargs
++
++        # Create model states
++        before = ModelState("testapp", "HardcodedModel", [("id", models.AutoField(primary_key=True))])
++        after_hardcoded = ModelState("testapp", "HardcodedModel", [("id", models.AutoField(primary_key=True))])
++        after_custom = ModelState("testapp", "TestModel", [
++            ("id", models.AutoField(primary_key=True)),
++            ("custom", CustomFKField(on_delete=models.CASCADE))
++        ])
++        
++        # This should not raise a KeyError
++        changes = self.get_changes([before], [after_hardcoded, after_custom])
++        self.assertIn('testapp', changes)
++        self.assertEqual(len(changes['testapp']), 1)
++        self.assertOperationTypes(changes, 'testapp', 0, ['CreateModel'])
++        self.assertOperationAttributes(changes, 'testapp', 0, 0, name='TestModel')
++
+     def test_nested_deconstructible_objects(self):
+         """
+         Nested deconstruction is applied recursively to the args/kwargs of

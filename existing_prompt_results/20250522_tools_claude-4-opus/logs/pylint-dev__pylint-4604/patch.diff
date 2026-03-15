@@ -1,0 +1,240 @@
+diff --git a/debug_imports.py b/debug_imports.py
+new file mode 100644
+index 000000000..1439a5131
+--- /dev/null
++++ b/debug_imports.py
+@@ -0,0 +1,17 @@
++import astroid
++
++code = '''import os.path
++import collections.abc
++
++X = ...  # type: os.path.PathLike
++Y = ...  # type: collections.abc.Mapping
++'''
++
++module = astroid.parse(code)
++
++print("Imports in module:")
++for node in module.nodes_of_class(astroid.Import):
++    print(f"Import: {node}")
++    print(f"Names: {node.names}")
++    print(f"Real name: {node.real_name(node.names[0][0])}")
++    print()
+diff --git a/debug_nested_modules.py b/debug_nested_modules.py
+new file mode 100644
+index 000000000..d216fc25e
+--- /dev/null
++++ b/debug_nested_modules.py
+@@ -0,0 +1,18 @@
++import astroid
++
++code = '''import os.path
++import collections.abc
++
++X = ...  # type: os.path.PathLike
++Y = ...  # type: collections.abc.Mapping
++'''
++
++module = astroid.parse(code)
++
++for node in module.nodes_of_class(astroid.Assign):
++    print(f"\nAssignment: {node.as_string()}")
++    print(f"Type annotation: {node.type_annotation}")
++    print(f"Type annotation type: {type(node.type_annotation)}")
++    if hasattr(node.type_annotation, 'expr'):
++        print(f"Expression: {node.type_annotation.expr}")
++        print(f"Expression type: {type(node.type_annotation.expr)}")
+diff --git a/debug_type_comment.py b/debug_type_comment.py
+new file mode 100644
+index 000000000..376b761f1
+--- /dev/null
++++ b/debug_type_comment.py
+@@ -0,0 +1,20 @@
++import astroid
++
++code = '''"""Docstring."""
++
++import abc
++from abc import ABC
++
++X = ...  # type: abc.ABC
++Y = ...  # type: ABC
++'''
++
++module = astroid.parse(code)
++print("Module AST:")
++print(module.repr_tree())
++
++for node in module.nodes_of_class(astroid.Assign):
++    print(f"\nAssignment: {node.as_string()}")
++    print(f"Type annotation: {node.type_annotation}")
++    if hasattr(node, 'type_comment'):
++        print(f"Type comment: {node.type_comment}")
+diff --git a/pylint/checkers/variables.py b/pylint/checkers/variables.py
+index 3ddafd599..bacfdd0d8 100644
+--- a/pylint/checkers/variables.py
++++ b/pylint/checkers/variables.py
+@@ -1826,6 +1826,15 @@ class VariablesChecker(BaseChecker):
+             self._type_annotation_names.append(type_annotation.name)
+             return
+ 
++        # Handle attribute access like abc.ABC or os.path.PathLike
++        if isinstance(type_annotation, astroid.Attribute):
++            # Store all names in the attribute chain
++            self._type_annotation_names.extend(
++                annotation.name
++                for annotation in type_annotation.nodes_of_class(astroid.Name)
++            )
++            return
++
+         if not isinstance(type_annotation, astroid.Subscript):
+             return
+ 
+@@ -2033,6 +2042,11 @@ class VariablesChecker(BaseChecker):
+                 is_type_annotation_import = (
+                     imported_name in self._type_annotation_names
+                     or as_name in self._type_annotation_names
++                    or (
++                        # Check if it's a dotted import where the root module is used
++                        "." in imported_name
++                        and imported_name.split(".")[0] in self._type_annotation_names
++                    )
+                 )
+                 if isinstance(stmt, astroid.Import) or (
+                     isinstance(stmt, astroid.ImportFrom) and not stmt.modname
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 000000000..57619a442
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,26 @@
++"""Test various type comment scenarios."""
++
++import abc
++from abc import ABC
++import typing
++from typing import List, Dict
++
++# Test 1: Module attribute in type comment
++X = ...  # type: abc.ABC
++
++# Test 2: Direct import in type comment  
++Y = ...  # type: ABC
++
++# Test 3: Nested module attribute
++Z = ...  # type: typing.List[str]
++
++# Test 4: Multiple levels of attribute access
++W = ...  # type: typing.Dict[str, abc.ABC]
++
++# Test 5: Direct use of typing module constructs
++V = ...  # type: List[int]
++U = ...  # type: Dict[str, int]
++
++# Test 6: Make sure we actually use some imports directly
++def func(x: ABC) -> abc.ABC:
++    return x
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..c8bab3e3e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,15 @@
++"""Test edge cases for type comments."""
++
++import os.path
++import collections.abc
++from collections import abc as collections_abc
++
++# Test nested module attributes
++X = ...  # type: os.path.PathLike
++Y = ...  # type: collections.abc.Mapping
++
++# Test aliased imports
++Z = ...  # type: collections_abc.Sequence
++
++# Test that we still catch genuinely unused imports
++import unused_module  # This should still trigger unused-import
+diff --git a/test_final_comprehensive.py b/test_final_comprehensive.py
+new file mode 100644
+index 000000000..47e01140b
+--- /dev/null
++++ b/test_final_comprehensive.py
+@@ -0,0 +1,38 @@
++"""Final comprehensive test for type comment imports."""
++
++# Test case from the issue
++import abc
++from abc import ABC
++
++X = ...  # type: abc.ABC
++Y = ...  # type: ABC
++
++# Test nested module imports
++import os.path
++import collections.abc
++
++A = ...  # type: os.path.PathLike
++B = ...  # type: collections.abc.Mapping
++
++# Test with typing module
++import typing
++from typing import List
++
++C = ...  # type: typing.List[str]
++D = ...  # type: List[int]
++E = ...  # type: typing.Dict[str, typing.List[int]]
++
++# Test aliased imports
++import collections.abc as cabc
++from typing import Optional as Opt
++
++F = ...  # type: cabc.Sequence
++G = ...  # type: Opt[str]
++
++# Test mixed usage
++def func(x: ABC) -> abc.ABC:
++    """Use imports directly too."""
++    return x
++
++# This should still be flagged as unused
++import unused_module
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 000000000..0df881939
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,7 @@
++"""Docstring."""
++
++import abc
++from abc import ABC
++
++X = ...  # type: abc.ABC
++Y = ...  # type: ABC
+diff --git a/tests/functional/u/unused/unused_import_type_comment.py b/tests/functional/u/unused/unused_import_type_comment.py
+new file mode 100644
+index 000000000..0851c3bed
+--- /dev/null
++++ b/tests/functional/u/unused/unused_import_type_comment.py
+@@ -0,0 +1,19 @@
++"""Test that imports used in type comments are not flagged as unused."""
++# pylint: disable=missing-docstring, invalid-name
++
++import abc
++from abc import ABC
++import typing
++from typing import List
++
++# Module attribute in type comment - should not trigger unused-import
++X = ...  # type: abc.ABC
++
++# Direct import in type comment - should not trigger unused-import  
++Y = ...  # type: ABC
++
++# Nested module attribute - should not trigger unused-import
++Z = ...  # type: typing.List[str]
++
++# Direct use of typing imports - should not trigger unused-import
++W = ...  # type: List[int]

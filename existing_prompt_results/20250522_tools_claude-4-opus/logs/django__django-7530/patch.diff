@@ -1,0 +1,1004 @@
+diff --git a/django/core/management/commands/makemigrations.py b/django/core/management/commands/makemigrations.py
+index 0b39536f5b..e648880ef0 100644
+--- a/django/core/management/commands/makemigrations.py
++++ b/django/core/management/commands/makemigrations.py
+@@ -105,7 +105,7 @@ class Command(BaseCommand):
+                     # At least one model must be migrated to the database.
+                     router.allow_migrate(connection.alias, app_label, model_name=model._meta.object_name)
+                     for app_label in consistency_check_labels
+-                    for model in apps.get_models(app_label)
++                    for model in apps.get_app_config(app_label).get_models()
+             )):
+                 loader.check_consistent_history(connection)
+ 
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000000..e9b83c89d0
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,69 @@
++"""
++Simple test to show the bug in makemigrations
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++]
++SECRET_KEY = 'test'
++''')
++
++import django
++django.setup()
++
++from django.apps import apps
++from django.db import connections, router, DEFAULT_DB_ALIAS
++
++print("=== Demonstrating the bug ===")
++print("\nThe current implementation calls router.allow_migrate() with wrong app_label/model combinations.")
++print("\nFor example, it will call:")
++print("  router.allow_migrate('default', 'auth', model_name='ContentType')")
++print("  even though ContentType belongs to 'contenttypes' app, not 'auth'!\n")
++
++# Show what the current code does
++consistency_check_labels = set(config.label for config in apps.get_app_configs())
++print("Apps to check:", sorted(consistency_check_labels))
++
++print("\nCurrent buggy implementation generates these calls:")
++count = 0
++for app_label in sorted(consistency_check_labels):
++    for model in apps.get_models(app_label):
++        print("  router.allow_migrate('default', '%s', model_name='%s')" % (app_label, model._meta.object_name))
++        count += 1
++        if count > 10:
++            print("  ... (truncated)")
++            break
++    if count > 10:
++        break
++
++print("\n=== What it SHOULD do ===")
++print("\nThe correct implementation should only call router.allow_migrate() with")
++print("models that actually belong to each app:")
++
++count = 0
++for app_label in sorted(consistency_check_labels):
++    app_config = apps.get_app_config(app_label)
++    for model in app_config.get_models():
++        print("  router.allow_migrate('default', '%s', model_name='%s')" % (app_label, model._meta.object_name))
++        count += 1
++        if count > 10:
++            print("  ... (truncated)")
++            break
++    if count > 10:
++        break
+diff --git a/test_app1/__init__.py b/test_app1/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app1/apps.py b/test_app1/apps.py
+new file mode 100644
+index 0000000000..d79145c1f4
+--- /dev/null
++++ b/test_app1/apps.py
+@@ -0,0 +1,5 @@
++
++from django.apps import AppConfig
++
++class TestApp1Config(AppConfig):
++    name = 'test_app1'
+diff --git a/test_app1/migrations/__init__.py b/test_app1/migrations/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app1/models.py b/test_app1/models.py
+new file mode 100644
+index 0000000000..434fcead22
+--- /dev/null
++++ b/test_app1/models.py
+@@ -0,0 +1,8 @@
++
++from django.db import models
++
++class App1Model(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app1'
+diff --git a/test_app2/__init__.py b/test_app2/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app2/apps.py b/test_app2/apps.py
+new file mode 100644
+index 0000000000..80b47002b8
+--- /dev/null
++++ b/test_app2/apps.py
+@@ -0,0 +1,5 @@
++
++from django.apps import AppConfig
++
++class TestApp2Config(AppConfig):
++    name = 'test_app2'
+diff --git a/test_app2/migrations/__init__.py b/test_app2/migrations/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app2/models.py b/test_app2/models.py
+new file mode 100644
+index 0000000000..05d592579f
+--- /dev/null
++++ b/test_app2/models.py
+@@ -0,0 +1,8 @@
++
++from django.db import models
++
++class App2Model(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app2'
+diff --git a/test_direct_comparison.py b/test_direct_comparison.py
+new file mode 100644
+index 0000000000..b3bec81579
+--- /dev/null
++++ b/test_direct_comparison.py
+@@ -0,0 +1,75 @@
++"""
++Direct comparison test showing the bug fix
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++]
++SECRET_KEY = 'test'
++''')
++
++import django
++django.setup()
++
++from django.apps import apps
++from django.db import connections, router, DEFAULT_DB_ALIAS
++
++print("=== Direct comparison of old vs new implementation ===\n")
++
++# Get apps and models
++consistency_check_labels = set(config.label for config in apps.get_app_configs())
++print("Apps:", sorted(consistency_check_labels))
++print()
++
++# Old buggy implementation
++print("OLD BUGGY IMPLEMENTATION (apps.get_models(app_label)):")
++print("This incorrectly returns ALL models regardless of app_label:\n")
++for app_label in sorted(consistency_check_labels):
++    print("  For app_label='%s':" % app_label)
++    models = apps.get_models(app_label)
++    for model in models[:3]:  # Show first 3
++        print("    - %s.%s" % (model._meta.app_label, model._meta.object_name))
++    if len(models) > 3:
++        print("    ... and %d more" % (len(models) - 3))
++    print()
++
++# New correct implementation  
++print("\nNEW CORRECT IMPLEMENTATION (apps.get_app_config(app_label).get_models()):")
++print("This correctly returns only models belonging to the app:\n")
++for app_label in sorted(consistency_check_labels):
++    print("  For app_label='%s':" % app_label)
++    models = apps.get_app_config(app_label).get_models()
++    for model in models:
++        print("    - %s.%s" % (model._meta.app_label, model._meta.object_name))
++    print()
++
++print("\nSUMMARY:")
++print("The old implementation would have made these INCORRECT router calls:")
++count = 0
++for app_label in sorted(consistency_check_labels):
++    for model in apps.get_models(app_label):
++        if model._meta.app_label != app_label:
++            print("  router.allow_migrate(db, '%s', model_name='%s')  # WRONG! %s belongs to '%s'" % 
++                  (app_label, model._meta.object_name, model._meta.object_name, model._meta.app_label))
++            count += 1
++            if count >= 5:
++                print("  ... and more")
++                break
++    if count >= 5:
++        break
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..ddb62d891d
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,199 @@
++"""
++Test to verify the fix for router.allow_migrate() calls
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++# Create test apps
++os.makedirs('/testbed/test_app1/migrations', exist_ok=True)
++os.makedirs('/testbed/test_app2/migrations', exist_ok=True)
++
++# Create __init__.py files
++open('/testbed/test_app1/__init__.py', 'w').close()
++open('/testbed/test_app1/migrations/__init__.py', 'w').close()
++open('/testbed/test_app2/__init__.py', 'w').close()
++open('/testbed/test_app2/migrations/__init__.py', 'w').close()
++
++# Create models for test_app1
++with open('/testbed/test_app1/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App1Model(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app1'
++''')
++
++# Create models for test_app2
++with open('/testbed/test_app2/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App2Model(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app2'
++''')
++
++# Create apps.py files
++with open('/testbed/test_app1/apps.py', 'w') as f:
++    f.write('''
++from django.apps import AppConfig
++
++class TestApp1Config(AppConfig):
++    name = 'test_app1'
++''')
++
++with open('/testbed/test_app2/apps.py', 'w') as f:
++    f.write('''
++from django.apps import AppConfig
++
++class TestApp2Config(AppConfig):
++    name = 'test_app2'
++''')
++
++# Create a test router that tracks and validates calls
++class TestRouter:
++    def __init__(self):
++        self.calls = []
++        self.errors = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        
++        # Validate that model belongs to app_label
++        if model_name:
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    self.errors.append("Model %s does not belong to app %s!" % (model_name, app_label))
++            except:
++                pass
++        
++        return True
++
++# Save the router to a file so Django can import it
++with open('/testbed/test_router.py', 'w') as f:
++    f.write('''
++class TestRouter:
++    def __init__(self):
++        self.calls = []
++        self.errors = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        
++        # Validate that model belongs to app_label
++        if model_name:
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    self.errors.append("Model %s does not belong to app %s!" % (model_name, app_label))
++            except:
++                pass
++        
++        return True
++''')
++
++# Create test settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3', 
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++    'test_app1',
++    'test_app2',
++]
++DATABASE_ROUTERS = ['test_router.TestRouter']
++SECRET_KEY = 'test'
++''')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++import django
++django.setup()
++
++# Test makemigrations command
++from django.core.management import call_command
++from django.db import utils
++
++# Get the test router instance
++test_router = utils.ConnectionRouter()._routers[0]
++
++print("=== Testing makemigrations with the fix ===")
++try:
++    # Monkey patch to track calls
++    original_allow_migrate = test_router.allow_migrate
++    test_router.calls = []
++    test_router.errors = []
++    
++    def tracking_allow_migrate(db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        test_router.calls.append((db, app_label, model_name))
++        
++        # Validate that model belongs to app_label
++        if model_name:
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    test_router.errors.append("Model %s does not belong to app %s!" % (model_name, app_label))
++            except:
++                pass
++        
++        return original_allow_migrate(db, app_label, **hints)
++    
++    test_router.allow_migrate = tracking_allow_migrate
++    
++    call_command('makemigrations', '--dry-run', verbosity=0)
++except SystemExit:
++    pass
++
++print("\nTotal router.allow_migrate() calls: %d" % len(test_router.calls))
++
++if test_router.errors:
++    print("\nERRORS found (should be empty with the fix):")
++    for error in test_router.errors:
++        print("  - %s" % error)
++else:
++    print("\nNo errors found! The fix is working correctly.")
++    
++# Show some sample calls to verify they're correct
++print("\nSample calls (should show correct app_label/model pairs):")
++for i, (db, app_label, model_name) in enumerate(test_router.calls[:10]):
++    if model_name:
++        print("  router.allow_migrate('%s', '%s', model_name='%s')" % (db, app_label, model_name))
+diff --git a/test_router.py b/test_router.py
+new file mode 100644
+index 0000000000..df92462482
+--- /dev/null
++++ b/test_router.py
+@@ -0,0 +1,26 @@
++
++class TestRouter:
++    def __init__(self):
++        self.calls = []
++        self.errors = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        
++        # Validate that model belongs to app_label
++        if model_name:
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    self.errors.append("Model %s does not belong to app %s!" % (model_name, app_label))
++            except:
++                pass
++        
++        return True
+diff --git a/test_router_bug.py b/test_router_bug.py
+new file mode 100644
+index 0000000000..4a06dbebea
+--- /dev/null
++++ b/test_router_bug.py
+@@ -0,0 +1,139 @@
++"""
++Test to reproduce the router.allow_migrate() issue where makemigrations
++calls it with incorrect (app_label, model) pairs.
++"""
++import os
++import sys
++
++# Add test apps to Python path
++sys.path.insert(0, '/testbed')
++
++# Create test apps
++os.makedirs('/testbed/test_app1', exist_ok=True)
++os.makedirs('/testbed/test_app2', exist_ok=True)
++
++# Create __init__.py files
++open('/testbed/test_app1/__init__.py', 'w').close()
++open('/testbed/test_app2/__init__.py', 'w').close()
++
++# Create models for test_app1
++with open('/testbed/test_app1/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App1Model(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app1'
++''')
++
++# Create models for test_app2
++with open('/testbed/test_app2/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App2Model(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app2'
++''')
++
++# Create a test router that tracks calls
++class TestRouter:
++    def __init__(self):
++        self.calls = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        print("allow_migrate called: db=%s, app_label=%s, model_name=%s" % (db, app_label, model_name))
++        
++        # This simulates a router that expects valid app_label/model_name pairs
++        if model_name:
++            # Check if the model actually belongs to the app_label
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    print("ERROR: Model %s does not belong to app %s!" % (model_name, app_label))
++                    return False
++            except:
++                pass
++        
++        return True
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++    'test_app1',
++    'test_app2',
++]
++DATABASE_ROUTERS = ['test_router_bug.TestRouter']
++SECRET_KEY = 'test'
++''')
++
++import django
++django.setup()
++
++# Run the problematic code from makemigrations
++from django.db import connections, router
++from django.apps import apps
++
++print("\n=== Testing current implementation ===")
++print("This should show the bug where models from all apps are checked against each app")
++
++# Get the router instance
++from django.db import utils
++test_router = utils.router._routers[0]
++
++consistency_check_labels = set(config.label for config in apps.get_app_configs())
++aliases_to_check = ['default']
++
++for alias in sorted(aliases_to_check):
++    connection = connections[alias]
++    # This is the problematic code from makemigrations.py
++    any(
++        router.allow_migrate(connection.alias, app_label, model_name=model._meta.object_name)
++        for app_label in consistency_check_labels
++        for model in apps.get_models(app_label)
++    )
++
++print("\nTotal calls: %d" % len(test_router.calls))
++print("\nInvalid combinations found:")
++for db, app_label, model_name in test_router.calls:
++    if model_name:
++        try:
++            app_config = apps.get_app_config(app_label)
++            model_found = False
++            for model in app_config.get_models():
++                if model._meta.object_name == model_name:
++                    model_found = True
++                    break
++            if not model_found:
++                print("  - app_label=%s, model_name=%s" % (app_label, model_name))
++        except:
++            pass
+diff --git a/test_router_fix.py b/test_router_fix.py
+new file mode 100644
+index 0000000000..234aac7c2b
+--- /dev/null
++++ b/test_router_fix.py
+@@ -0,0 +1,132 @@
++"""
++Test that verifies the router.allow_migrate() fix
++"""
++import os
++import sys
++import tempfile
++import shutil
++
++# Setup Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++sys.path.insert(0, '/testbed')
++
++# Create a temporary directory for our test apps
++test_dir = tempfile.mkdtemp()
++sys.path.insert(0, test_dir)
++
++try:
++    # Create test apps
++    for app_name in ['app1', 'app2']:
++        app_dir = os.path.join(test_dir, app_name)
++        os.makedirs(os.path.join(app_dir, 'migrations'))
++        
++        # __init__.py files
++        open(os.path.join(app_dir, '__init__.py'), 'w').close()
++        open(os.path.join(app_dir, 'migrations', '__init__.py'), 'w').close()
++        
++        # models.py
++        with open(os.path.join(app_dir, 'models.py'), 'w') as f:
++            f.write('''
++from django.db import models
++
++class %sModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = '%s'
++''' % (app_name.title(), app_name))
++
++    # Create a router that validates calls
++    router_path = os.path.join(test_dir, 'test_router.py')
++    with open(router_path, 'w') as f:
++        f.write('''
++class ValidatingRouter:
++    def __init__(self):
++        self.calls = []
++        self.invalid_calls = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        
++        # Validate that model belongs to app_label
++        if model_name:
++            from django.apps import apps
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    self.invalid_calls.append((app_label, model_name))
++            except:
++                pass
++        
++        return True
++
++# Global instance to track calls
++router_instance = ValidatingRouter()
++''')
++
++    # Create settings
++    settings_path = os.path.join(test_dir, 'test_settings.py')
++    with open(settings_path, 'w') as f:
++        f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3', 
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++    'app1',
++    'app2',
++]
++DATABASE_ROUTERS = ['test_router.ValidatingRouter']
++SECRET_KEY = 'test'
++
++# Import router to get instance
++from test_router import router_instance
++''')
++
++    # Now test with Django
++    import django
++    django.setup()
++    
++    from django.core.management import call_command
++    from test_router import router_instance
++    
++    print("=== Testing router.allow_migrate() calls with the fix ===")
++    
++    # Run makemigrations
++    call_command('makemigrations', '--dry-run', verbosity=0)
++    
++    print("\nTotal calls to router.allow_migrate(): %d" % len(router_instance.calls))
++    
++    if router_instance.invalid_calls:
++        print("\nINVALID CALLS DETECTED (bug not fixed!):")
++        for app_label, model_name in router_instance.invalid_calls:
++            print("  - app_label='%s', model_name='%s'" % (app_label, model_name))
++    else:
++        print("\nNo invalid calls detected - the fix is working correctly!")
++        
++    # Show some valid calls
++    print("\nSample valid calls:")
++    shown = 0
++    for db, app_label, model_name in router_instance.calls:
++        if model_name and shown < 5:
++            print("  - router.allow_migrate('%s', '%s', model_name='%s')" % (db, app_label, model_name))
++            shown += 1
++
++finally:
++    # Cleanup
++    shutil.rmtree(test_dir, ignore_errors=True)
+diff --git a/test_router_issue.py b/test_router_issue.py
+new file mode 100644
+index 0000000000..82e7d84a24
+--- /dev/null
++++ b/test_router_issue.py
+@@ -0,0 +1,145 @@
++"""
++Test to reproduce the router.allow_migrate() issue where makemigrations
++calls it with incorrect (app_label, model) pairs.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.apps import apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        },
++        'other': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'test_app1',
++        'test_app2',
++    ],
++    DATABASE_ROUTERS=['test_router_issue.TestRouter'],
++)
++
++# Create test apps
++os.makedirs('/testbed/test_app1', exist_ok=True)
++os.makedirs('/testbed/test_app2', exist_ok=True)
++
++# Create __init__.py files
++open('/testbed/test_app1/__init__.py', 'w').close()
++open('/testbed/test_app2/__init__.py', 'w').close()
++
++# Create models for test_app1
++with open('/testbed/test_app1/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App1Model(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app1'
++''')
++
++# Create models for test_app2
++with open('/testbed/test_app2/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class App2Model(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app2'
++''')
++
++# Add test apps to Python path
++sys.path.insert(0, '/testbed')
++
++# Create a test router that tracks calls
++class TestRouter:
++    def __init__(self):
++        self.calls = []
++    
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name', None)
++        self.calls.append((db, app_label, model_name))
++        print("allow_migrate called: db=%s, app_label=%s, model_name=%s" % (db, app_label, model_name))
++        
++        # This simulates a router that expects valid app_label/model_name pairs
++        if model_name:
++            # Check if the model actually belongs to the app_label
++            try:
++                app_config = apps.get_app_config(app_label)
++                model_found = False
++                for model in app_config.get_models():
++                    if model._meta.object_name == model_name:
++                        model_found = True
++                        break
++                if not model_found:
++                    print("ERROR: Model %s does not belong to app %s!" % (model_name, app_label))
++                    return False
++            except:
++                pass
++        
++        return True
++
++# Initialize Django
++django.setup()
++
++# Run the problematic code from makemigrations
++from django.db import connections, router
++from django.apps import apps
++
++print("\n=== Testing current implementation ===")
++print("This should show the bug where models from all apps are checked against each app")
++
++# Create a new router instance for testing
++test_router = TestRouter()
++# Replace the router temporarily
++old_routers = settings.DATABASE_ROUTERS
++settings.DATABASE_ROUTERS = ['test_router_issue.test_router']
++# Reinitialize the router
++from django.db import utils
++utils.router = utils.ConnectionRouter()
++utils.router._routers = [test_router]
++
++consistency_check_labels = set(config.label for config in apps.get_app_configs())
++aliases_to_check = ['default']
++
++for alias in sorted(aliases_to_check):
++    connection = connections[alias]
++    # This is the problematic code from makemigrations.py
++    any(
++        router.allow_migrate(connection.alias, app_label, model_name=model._meta.object_name)
++        for app_label in consistency_check_labels
++        for model in apps.get_models(app_label)
++    )
++
++print("\nTotal calls: %d" % len(test_router.calls))
++print("\nInvalid combinations found:")
++for db, app_label, model_name in test_router.calls:
++    if model_name:
++        try:
++            app_config = apps.get_app_config(app_label)
++            model_found = False
++            for model in app_config.get_models():
++                if model._meta.object_name == model_name:
++                    model_found = True
++                    break
++            if not model_found:
++                print("  - app_label=%s, model_name=%s" % (app_label, model_name))
++        except:
++            pass
++
++# Restore original routers
++settings.DATABASE_ROUTERS = old_routers
+diff --git a/test_router_validation.py b/test_router_validation.py
+new file mode 100644
+index 0000000000..402d5a559f
+--- /dev/null
++++ b/test_router_validation.py
+@@ -0,0 +1,73 @@
++"""
++Test that validates router.allow_migrate() is called with correct app_label/model pairs
++"""
++import os
++import sys
++import django
++from django.test import TestCase, override_settings
++from django.core.management import call_command
++from django.db import DEFAULT_DB_ALIAS
++
++# Router that validates app_label/model_name consistency
++class ValidatingRouter:
++    def __init__(self):
++        self.invalid_calls = []
++        
++    def allow_migrate(self, db, app_label, **hints):
++        model_name = hints.get('model_name')
++        if model_name:
++            # Validate that the model belongs to the app_label
++            from django.apps import apps
++            app_config = apps.get_app_config(app_label)
++            model_found = any(
++                model._meta.object_name == model_name 
++                for model in app_config.get_models()
++            )
++            if not model_found:
++                self.invalid_calls.append((app_label, model_name))
++        return True
++
++# Configure Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write('''
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++]
++SECRET_KEY = 'test'
++''')
++
++django.setup()
++
++# Test
++print("=== Testing router.allow_migrate() validation ===")
++
++router = ValidatingRouter()
++with override_settings(DATABASE_ROUTERS=[router]):
++    try:
++        # This will trigger consistency checks which call router.allow_migrate()
++        call_command('makemigrations', '--dry-run', verbosity=0)
++    except SystemExit:
++        pass
++
++if router.invalid_calls:
++    print("\nFAILED: Found invalid router.allow_migrate() calls:")
++    for app_label, model_name in router.invalid_calls:
++        print("  - app_label='%s', model_name='%s'" % (app_label, model_name))
++    print("\nThe fix did not work properly!")
++else:
++    print("\nSUCCESS: No invalid router.allow_migrate() calls found!")
++    print("The fix is working correctly - all model_name values belong to their respective app_label.")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..13f36e3167
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,17 @@
++
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++]
++SECRET_KEY = 'test'

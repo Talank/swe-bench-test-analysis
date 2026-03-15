@@ -1,0 +1,252 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index 0fd69059ee..28374272f4 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -1501,7 +1501,7 @@ class DecimalField(Field):
+             return self.context.create_decimal_from_float(value)
+         try:
+             return decimal.Decimal(value)
+-        except decimal.InvalidOperation:
++        except (decimal.InvalidOperation, TypeError, ValueError):
+             raise exceptions.ValidationError(
+                 self.error_messages['invalid'],
+                 code='invalid',
+diff --git a/test_comprehensive_decimal.py b/test_comprehensive_decimal.py
+new file mode 100644
+index 0000000000..a32a771759
+--- /dev/null
++++ b/test_comprehensive_decimal.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Comprehensive test for DecimalField.to_python() fix."""
++
++import decimal
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++)
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Create a test DecimalField
++field = models.DecimalField(max_digits=10, decimal_places=2)
++
++# Test with various edge cases
++test_cases = [
++    # (value, should_succeed, expected_result_or_exception_type)
++    ("123.45", True, decimal.Decimal("123.45")),
++    (123.45, True, decimal.Decimal("123.45")),
++    (decimal.Decimal("123.45"), True, decimal.Decimal("123.45")),
++    (None, True, None),
++    ("", False, ValidationError),  # Empty string
++    ("abc", False, ValidationError),  # Invalid string
++    ({"key": "value"}, False, ValidationError),  # Dict - main issue
++    (["item1", "item2"], False, ValidationError),  # List
++    ({"nested": {"dict": "value"}}, False, ValidationError),  # Nested dict
++    (set([1, 2, 3]), False, ValidationError),  # Set
++    (object(), False, ValidationError),  # Generic object
++    (complex(1, 2), False, ValidationError),  # Complex number
++    (b"bytes", False, ValidationError),  # Bytes
++]
++
++print("Comprehensive test of DecimalField.to_python() fix:")
++print("=" * 60)
++
++all_passed = True
++
++for value, should_succeed, expected in test_cases:
++    print(f"\nTesting: {repr(value)} (type: {type(value).__name__})")
++    
++    try:
++        result = field.to_python(value)
++        
++        if should_succeed:
++            if result == expected:
++                print(f"  [PASS] Success: {result}")
++            else:
++                print(f"  [FAIL] Expected {expected}, got {result}")
++                all_passed = False
++        else:
++            print(f"  [FAIL] Expected {expected.__name__} but got result: {result}")
++            all_passed = False
++            
++    except Exception as e:
++        if not should_succeed and isinstance(e, expected):
++            print(f"  [PASS] Correctly raised {type(e).__name__}")
++        else:
++            print(f"  [FAIL] Unexpected exception {type(e).__name__}: {e}")
++            all_passed = False
++
++print("\n" + "=" * 60)
++if all_passed:
++    print("[PASS] All tests passed!")
++else:
++    print("[FAIL] Some tests failed!")
+diff --git a/test_decimal_dict.py b/test_decimal_dict.py
+new file mode 100644
+index 0000000000..c0e60823c7
+--- /dev/null
++++ b/test_decimal_dict.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test script to reproduce the DecimalField.to_python() TypeError issue with dict values."""
++
++import decimal
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++)
++django.setup()
++
++from django.db import models
++from django.core.exceptions import ValidationError
++
++# Create a test DecimalField
++field = models.DecimalField(max_digits=10, decimal_places=2)
++
++# Test with various values
++test_values = [
++    "123.45",  # Valid string
++    123.45,    # Valid float
++    decimal.Decimal("123.45"),  # Valid decimal
++    None,      # Valid None
++    {"key": "value"},  # Dict - should raise ValidationError, not TypeError
++    ["item1", "item2"],  # List - should raise ValidationError, not TypeError
++    {"nested": {"dict": "value"}},  # Nested dict
++]
++
++print("Testing DecimalField.to_python() with various values:")
++print("-" * 50)
++
++for value in test_values:
++    print(f"\nTesting value: {repr(value)} (type: {type(value).__name__})")
++    try:
++        result = field.to_python(value)
++        print(f"  Success: {result}")
++    except ValidationError as e:
++        print("  ValidationError (expected): %s" % e.messages[0].encode('ascii', 'replace').decode('ascii'))
++    except TypeError as e:
++        print(f"  TypeError (unexpected!): {e}")
++    except Exception as e:
++        print(f"  Other exception: {type(e).__name__}: {e}")
+diff --git a/test_real_world_scenario.py b/test_real_world_scenario.py
+new file mode 100644
+index 0000000000..02f81bb304
+--- /dev/null
++++ b/test_real_world_scenario.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test real-world scenario: saving a model with DecimalField set to dict by mistake."""
++
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    USE_I18N=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ]
++)
++django.setup()
++
++# Create a test model
++class Product(models.Model):
++    name = models.CharField(max_length=100)
++    price = models.DecimalField(max_digits=10, decimal_places=2)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++
++print("Testing real-world scenario: saving model with DecimalField set to dict")
++print("=" * 70)
++
++# Simulate the scenario where a decimal field gets set to a dict by mistake
++product = Product(name="Test Product")
++
++# Accidentally set price to a dict (e.g., from bad API data or form processing)
++product.price = {"amount": 19.99, "currency": "USD"}
++
++print(f"Product name: {product.name}")
++print(f"Product price (mistakenly set to dict): {product.price}")
++print(f"Type of price: {type(product.price)}")
++
++# Try to save - this should raise ValidationError, not TypeError
++try:
++    product.save()
++    print("\n[FAIL] Save succeeded unexpectedly!")
++except django.core.exceptions.ValidationError as e:
++    print(f"\n[PASS] Got expected ValidationError: {type(e).__name__}")
++    print(f"       This makes it easy to track the problem to the field!")
++except TypeError as e:
++    print(f"\n[FAIL] Got TypeError (this was the old behavior): {e}")
++    print(f"       This makes it hard to track which field caused the problem!")
++except Exception as e:
++    print(f"\n[FAIL] Got unexpected exception: {type(e).__name__}: {e}")
++
++# Test with valid value
++print("\n" + "-" * 70)
++print("Testing with valid value:")
++product.price = "19.99"
++try:
++    product.save()
++    print(f"[PASS] Product saved successfully with price: {product.price}")
++except Exception as e:
++    print(f"[FAIL] Unexpected error: {type(e).__name__}: {e}")
+diff --git a/tests/model_fields/test_decimalfield.py b/tests/model_fields/test_decimalfield.py
+index e284005aa0..ab06aaaf2c 100644
+--- a/tests/model_fields/test_decimalfield.py
++++ b/tests/model_fields/test_decimalfield.py
+@@ -87,3 +87,22 @@ class DecimalFieldTests(TestCase):
+         obj = Foo.objects.create(a='bar', d=Decimal('8.320'))
+         obj.refresh_from_db()
+         self.assertEqual(obj.d.compare_total(Decimal('8.320')), Decimal('0'))
++
++    def test_to_python_with_invalid_types(self):
++        """to_python() should raise ValidationError for invalid types like dict and list."""
++        f = models.DecimalField(max_digits=4, decimal_places=2)
++        
++        # Test with dictionary - should raise ValidationError, not TypeError
++        with self.assertRaises(ValidationError) as cm:
++            f.to_python({'key': 'value'})
++        self.assertIn('value must be a decimal number', str(cm.exception))
++        
++        # Test with list - should raise ValidationError, not ValueError
++        with self.assertRaises(ValidationError) as cm:
++            f.to_python(['item1', 'item2'])
++        self.assertIn('value must be a decimal number', str(cm.exception))
++        
++        # Test with nested dictionary
++        with self.assertRaises(ValidationError) as cm:
++            f.to_python({'nested': {'dict': 'value'}})
++        self.assertIn('value must be a decimal number', str(cm.exception))

@@ -1,0 +1,354 @@
+diff --git a/django/contrib/auth/backends.py b/django/contrib/auth/backends.py
+index f4b1722757..a3765ae0f1 100644
+--- a/django/contrib/auth/backends.py
++++ b/django/contrib/auth/backends.py
+@@ -39,6 +39,8 @@ class ModelBackend(BaseBackend):
+     def authenticate(self, request, username=None, password=None, **kwargs):
+         if username is None:
+             username = kwargs.get(UserModel.USERNAME_FIELD)
++        if username is None or password is None:
++            return
+         try:
+             user = UserModel._default_manager.get_by_natural_key(username)
+         except UserModel.DoesNotExist:
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000000..ad4c3016e3
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python
++"""Simple test to demonstrate the issue with ModelBackend.authenticate()"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++import django
++django.setup()
++
++from django.contrib.auth import authenticate
++from django.contrib.auth.models import User
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++# Create a test user
++try:
++    User.objects.create_user('testuser', 'test@example.com', 'testpass')
++except:
++    pass  # User might already exist
++
++print("Testing authenticate() with username=None...")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username=None, password='somepass')
++
++print(f"Result: {result}")
++print(f"Number of queries: {len(queries)}")
++for i, query in enumerate(queries):
++    print(f"\nQuery {i+1}:")
++    print(f"SQL: {query['sql']}")
++    
++print("\n" + "="*80)
++print("Testing authenticate() with username=None and password=None...")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username=None, password=None)
++
++print(f"Result: {result}")
++print(f"Number of queries: {len(queries)}")
++for i, query in enumerate(queries):
++    print(f"\nQuery {i+1}:")
++    print(f"SQL: {query['sql']}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..b355dc1ecf
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python
++"""Test edge cases for ModelBackend.authenticate() fix"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++import django
++django.setup()
++
++from django.contrib.auth import authenticate
++from django.contrib.auth.models import User
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++# Create a test user
++try:
++    user = User.objects.create_user('testuser', 'test@example.com', 'testpass')
++except:
++    user = User.objects.get(username='testuser')
++
++print("Test 1: username=None, password='somepass'")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username=None, password='somepass')
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 2: username=None, password=None")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username=None, password=None)
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 3: username='', password='somepass'")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username='', password='somepass')
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 4: username='testuser', password=None")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username='testuser', password=None)
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 5: username='testuser', password='wrongpass'")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username='testuser', password='wrongpass')
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 6: username='testuser', password='testpass' (correct)")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username='testuser', password='testpass')
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 7: username='nonexistent', password='somepass'")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(username='nonexistent', password='somepass')
++print(f"Result: {result}, Queries: {len(queries)}")
++
++# Test with custom USERNAME_FIELD via kwargs
++print("\nTest 8: Using kwargs with USERNAME_FIELD")
++with CaptureQueriesContext(connection) as queries:
++    # This simulates when username is passed via kwargs instead of positional arg
++    result = authenticate(password='testpass', **{User.USERNAME_FIELD: 'testuser'})
++print(f"Result: {result}, Queries: {len(queries)}")
++
++print("\nTest 9: Neither username nor USERNAME_FIELD in kwargs")
++with CaptureQueriesContext(connection) as queries:
++    result = authenticate(password='testpass')
++print(f"Result: {result}, Queries: {len(queries)}")
+diff --git a/test_none_username_fix.py b/test_none_username_fix.py
+new file mode 100644
+index 0000000000..dc735a280e
+--- /dev/null
++++ b/test_none_username_fix.py
+@@ -0,0 +1,36 @@
++"""
++Test to add to Django's test suite for the None username fix.
++This test should be added to tests/auth_tests/test_auth_backends.py
++"""
++
++def test_authenticate_with_none_username_no_query(self):
++    """
++    ModelBackend.authenticate() shouldn't make a database query when username is None.
++    """
++    with self.assertNumQueries(0):
++        result = authenticate(username=None, password='somepass')
++    self.assertIsNone(result)
++
++def test_authenticate_with_none_password_no_query(self):
++    """
++    ModelBackend.authenticate() shouldn't make a database query when password is None.
++    """
++    with self.assertNumQueries(0):
++        result = authenticate(username='someuser', password=None)
++    self.assertIsNone(result)
++
++def test_authenticate_with_none_username_and_password_no_query(self):
++    """
++    ModelBackend.authenticate() shouldn't make a database query when both username and password are None.
++    """
++    with self.assertNumQueries(0):
++        result = authenticate(username=None, password=None)
++    self.assertIsNone(result)
++
++def test_authenticate_with_username_from_kwargs(self):
++    """
++    ModelBackend.authenticate() should work when username is provided via kwargs.
++    """
++    user = User.objects.create_user('testuser', 'test@example.com', 'testpass')
++    result = authenticate(password='testpass', **{User.USERNAME_FIELD: 'testuser'})
++    self.assertEqual(result, user)
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..677ce8dbf8
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,77 @@
++"""Test to reproduce the issue with ModelBackend.authenticate() making unnecessary queries."""
++import os
++import sys
++import django
++
++# Add the testbed directory to Python path
++sys.path.insert(0, '/testbed')
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++django.setup()
++
++from django.test import TestCase
++from django.contrib.auth import authenticate
++from django.contrib.auth.backends import ModelBackend
++from django.contrib.auth.models import User
++from django.test.utils import override_settings
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++class TestModelBackendNoneUsername(TestCase):
++    def setUp(self):
++        # Create a test user
++        self.user = User.objects.create_user('testuser', 'test@example.com', 'testpass')
++    
++    def test_authenticate_with_none_username_makes_query(self):
++        """Test that authenticate with None username makes an unnecessary database query."""
++        with CaptureQueriesContext(connection) as queries:
++            result = authenticate(username=None, password='somepass')
++        
++        # Print queries for debugging
++        print(f"\nNumber of queries: {len(queries)}")
++        for i, query in enumerate(queries):
++            print(f"Query {i+1}: {query['sql']}")
++        
++        # The issue is that it makes a query even when username is None
++        self.assertIsNone(result)
++        # Currently this will fail because it makes 1 query
++        # After the fix, it should make 0 queries
++        self.assertEqual(len(queries), 1)  # This shows the bug exists
++        
++    def test_authenticate_with_none_username_and_password(self):
++        """Test that authenticate with None username and password makes an unnecessary database query."""
++        with CaptureQueriesContext(connection) as queries:
++            result = authenticate(username=None, password=None)
++        
++        # Print queries for debugging
++        print(f"\nNumber of queries with both None: {len(queries)}")
++        for i, query in enumerate(queries):
++            print(f"Query {i+1}: {query['sql']}")
++        
++        self.assertIsNone(result)
++        # Currently this will fail because it makes 1 query
++        self.assertEqual(len(queries), 1)  # This shows the bug exists
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import setup_test_environment, teardown_test_environment
++    from django.test.runner import DiscoverRunner
++    
++    setup_test_environment()
++    runner = DiscoverRunner(verbosity=2)
++    runner.setup_databases()
++    
++    test = TestModelBackendNoneUsername()
++    test._pre_setup()
++    test.setUp()
++    
++    print("Running test_authenticate_with_none_username_makes_query...")
++    test.test_authenticate_with_none_username_makes_query()
++    
++    print("\nRunning test_authenticate_with_none_username_and_password...")
++    test.test_authenticate_with_none_username_and_password()
++    
++    test._post_teardown()
++    runner.teardown_databases()
++    teardown_test_environment()
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..cb4ca7b2d8
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,23 @@
++SECRET_KEY = 'test-secret-key'
++DEBUG = True
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.auth',
++    'django.contrib.contenttypes',
++    'django.contrib.sessions',
++]
++
++AUTHENTICATION_BACKENDS = [
++    'django.contrib.auth.backends.ModelBackend',
++]
++
++PASSWORD_HASHERS = [
++    'django.contrib.auth.hashers.MD5PasswordHasher',
++]
+diff --git a/test_timing_attack.py b/test_timing_attack.py
+new file mode 100644
+index 0000000000..c9030cd272
+--- /dev/null
++++ b/test_timing_attack.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""Test that timing attack mitigation still works with our fix"""
++import os
++import sys
++import time
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++import django
++django.setup()
++
++from django.contrib.auth import authenticate
++from django.contrib.auth.models import User
++from django.core.management import call_command
++
++# Create tables
++call_command('migrate', verbosity=0)
++
++# Create a test user
++try:
++    user = User.objects.create_user('testuser', 'test@example.com', 'testpass')
++except:
++    user = User.objects.get(username='testuser')
++
++print("Testing timing attack mitigation...")
++
++# Test 1: Non-existent user (should run password hasher)
++start = time.time()
++result = authenticate(username='nonexistent', password='somepass')
++time_nonexistent = time.time() - start
++print(f"Non-existent user: {time_nonexistent:.6f}s, Result: {result}")
++
++# Test 2: Existing user with wrong password
++start = time.time()
++result = authenticate(username='testuser', password='wrongpass')
++time_wrong_password = time.time() - start
++print(f"Wrong password: {time_wrong_password:.6f}s, Result: {result}")
++
++# Test 3: Existing user with correct password
++start = time.time()
++result = authenticate(username='testuser', password='testpass')
++time_correct = time.time() - start
++print(f"Correct password: {time_correct:.6f}s, Result: {result}")
++
++# Test 4: None username (should be very fast with our fix)
++start = time.time()
++result = authenticate(username=None, password='somepass')
++time_none_username = time.time() - start
++print(f"None username: {time_none_username:.6f}s, Result: {result}")
++
++print("\nAnalysis:")
++print(f"Time for None username is much faster: {time_none_username < time_nonexistent/10}")
++print(f"Times for non-existent and wrong password are similar: {abs(time_nonexistent - time_wrong_password) < 0.01}")

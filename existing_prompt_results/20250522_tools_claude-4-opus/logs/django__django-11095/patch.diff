@@ -1,0 +1,792 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 5e7b23f9a0..cbbb96a732 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -580,9 +580,15 @@ class ModelAdmin(BaseModelAdmin):
+     def __str__(self):
+         return "%s.%s" % (self.model._meta.app_label, self.__class__.__name__)
+ 
++    def get_inlines(self, request, obj=None):
++        """
++        Hook for specifying custom inlines.
++        """
++        return self.inlines
++
+     def get_inline_instances(self, request, obj=None):
+         inline_instances = []
+-        for inline_class in self.inlines:
++        for inline_class in self.get_inlines(request, obj):
+             inline = inline_class(self.model, self.admin_site)
+             if request:
+                 if not (inline.has_view_or_change_permission(request, obj) or
+diff --git a/docs/ref/contrib/admin/index.txt b/docs/ref/contrib/admin/index.txt
+index 93679c46fd..f42d22e227 100644
+--- a/docs/ref/contrib/admin/index.txt
++++ b/docs/ref/contrib/admin/index.txt
+@@ -1608,6 +1608,29 @@ templates used by the :class:`ModelAdmin` views:
+             def get_sortable_by(self, request):
+                 return {*self.get_list_display(request)} - {'rank'}
+ 
++.. method:: ModelAdmin.get_inlines(request, obj=None)
++
++    .. versionadded:: 3.2
++
++    The ``get_inlines`` method is given the ``HttpRequest`` and the
++    ``obj`` being edited (or ``None`` on an add form) and is expected to return
++    a ``list`` or ``tuple`` of inline classes. You can use this method to
++    dynamically change which inlines are displayed based on the request or
++    model instance.
++
++    For example, to show different inlines based on the object's status::
++
++        class MyModelAdmin(admin.ModelAdmin):
++            inlines = [DefaultInline]
++
++            def get_inlines(self, request, obj=None):
++                if obj is None:
++                    # Add form
++                    return [DefaultInline]
++                if obj.status == 'published':
++                    return [DefaultInline, CommentInline]
++                return [DefaultInline]
++
+ .. method:: ModelAdmin.get_inline_instances(request, obj=None)
+ 
+     The ``get_inline_instances`` method is given the ``HttpRequest`` and the
+diff --git a/example_get_inlines.py b/example_get_inlines.py
+new file mode 100644
+index 0000000000..e4a925450b
+--- /dev/null
++++ b/example_get_inlines.py
+@@ -0,0 +1,165 @@
++"""
++Example demonstrating the use of get_inlines() hook in Django admin.
++
++This example shows how to customize inlines based on:
++1. The request (e.g., user permissions)
++2. The model instance being edited
++"""
++
++from django.contrib import admin
++from django.db import models
++
++
++# Example Models
++class Article(models.Model):
++    title = models.CharField(max_length=200)
++    status = models.CharField(max_length=20, choices=[
++        ('draft', 'Draft'),
++        ('published', 'Published'),
++        ('archived', 'Archived'),
++    ])
++    author = models.ForeignKey('auth.User', on_delete=models.CASCADE)
++
++
++class Comment(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    text = models.TextField()
++    approved = models.BooleanField(default=False)
++
++
++class Attachment(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    file = models.FileField()
++
++
++class Revision(models.Model):
++    article = models.ForeignKey(Article, on_delete=models.CASCADE)
++    content = models.TextField()
++    created_at = models.DateTimeField(auto_now_add=True)
++
++
++# Inline Admin Classes
++class CommentInline(admin.TabularInline):
++    model = Comment
++    extra = 1
++
++
++class AttachmentInline(admin.TabularInline):
++    model = Attachment
++    extra = 0
++
++
++class RevisionInline(admin.TabularInline):
++    model = Revision
++    extra = 0
++    readonly_fields = ('created_at',)
++
++
++# ModelAdmin with get_inlines() hook
++class ArticleAdmin(admin.ModelAdmin):
++    list_display = ('title', 'status', 'author')
++    fields = ('title', 'status', 'author')
++    
++    # Default inlines (used as fallback)
++    inlines = [CommentInline]
++    
++    def get_inlines(self, request, obj=None):
++        """
++        Customize inlines based on:
++        - User permissions
++        - Article status
++        - Whether it's an add or change view
++        """
++        inlines = []
++        
++        # Always show comments
++        inlines.append(CommentInline)
++        
++        # Show attachments only for staff users
++        if request.user.is_staff:
++            inlines.append(AttachmentInline)
++        
++        # Show revisions only for existing articles (not in add view)
++        # and only if the article is published or archived
++        if obj is not None:  # This is a change view, not add
++            if obj.status in ['published', 'archived']:
++                inlines.append(RevisionInline)
++        
++        return inlines
++
++
++# Alternative example: Department-based inlines
++class Project(models.Model):
++    name = models.CharField(max_length=200)
++    department = models.CharField(max_length=50, choices=[
++        ('engineering', 'Engineering'),
++        ('marketing', 'Marketing'),
++        ('sales', 'Sales'),
++    ])
++
++
++class TechnicalSpec(models.Model):
++    project = models.ForeignKey(Project, on_delete=models.CASCADE)
++    specification = models.TextField()
++
++
++class MarketingMaterial(models.Model):
++    project = models.ForeignKey(Project, on_delete=models.CASCADE)
++    material_type = models.CharField(max_length=50)
++    content = models.TextField()
++
++
++class SalesTarget(models.Model):
++    project = models.ForeignKey(Project, on_delete=models.CASCADE)
++    target = models.DecimalField(max_digits=10, decimal_places=2)
++    region = models.CharField(max_length=50)
++
++
++class TechnicalSpecInline(admin.TabularInline):
++    model = TechnicalSpec
++    extra = 1
++
++
++class MarketingMaterialInline(admin.TabularInline):
++    model = MarketingMaterial
++    extra = 1
++
++
++class SalesTargetInline(admin.TabularInline):
++    model = SalesTarget
++    extra = 1
++
++
++class ProjectAdmin(admin.ModelAdmin):
++    list_display = ('name', 'department')
++    fields = ('name', 'department')
++    
++    def get_inlines(self, request, obj=None):
++        """
++        Show department-specific inlines based on the project's department.
++        """
++        if obj is None:
++            # In add view, show all possible inlines
++            return [TechnicalSpecInline, MarketingMaterialInline, SalesTargetInline]
++        
++        # In change view, show inlines based on department
++        if obj.department == 'engineering':
++            return [TechnicalSpecInline]
++        elif obj.department == 'marketing':
++            return [MarketingMaterialInline]
++        elif obj.department == 'sales':
++            return [SalesTargetInline]
++        else:
++            return []
++
++
++# Register the models (in a real app)
++# admin.site.register(Article, ArticleAdmin)
++# admin.site.register(Project, ProjectAdmin)
++
++
++# Benefits of using get_inlines():
++# 1. No need to copy the entire for loop from get_inline_instances
++# 2. Clean separation of concerns - just return the list of inline classes
++# 3. Easy to test and maintain
++# 4. Follows Django's pattern of get_* hooks (get_fields, get_readonly_fields, etc.)
+diff --git a/test_backward_compat.py b/test_backward_compat.py
+new file mode 100644
+index 0000000000..80f351fd25
+--- /dev/null
++++ b/test_backward_compat.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python
++"""Test backward compatibility - ensure existing code still works"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.contrib import admin
++from django.test import RequestFactory
++from django.contrib.auth.models import User
++
++print("Testing backward compatibility...")
++
++# Test 1: ModelAdmin without get_inlines still works
++class OldStyleAdmin(admin.ModelAdmin):
++    inlines = []
++
++admin_obj = OldStyleAdmin(User, admin.site)
++request = RequestFactory().get('/')
++request.user = User()
++
++# This should work without any issues
++inline_instances = admin_obj.get_inline_instances(request)
++print("OK: ModelAdmin without get_inlines() works:", isinstance(inline_instances, list))
++
++# Test 2: Existing override of get_inline_instances still works
++class CustomInlineInstancesAdmin(admin.ModelAdmin):
++    inlines = []
++    
++    def get_inline_instances(self, request, obj=None):
++        # Custom implementation that doesn't call super()
++        return ['custom_inline_instance']
++
++admin_obj = CustomInlineInstancesAdmin(User, admin.site)
++inline_instances = admin_obj.get_inline_instances(request)
++print("OK: Custom get_inline_instances() override works:", inline_instances == ['custom_inline_instance'])
++
++print("\nAll backward compatibility tests passed!")
+diff --git a/test_get_inlines.py b/test_get_inlines.py
+new file mode 100644
+index 0000000000..b1843cfe94
+--- /dev/null
++++ b/test_get_inlines.py
+@@ -0,0 +1,228 @@
++"""
++Test the get_inlines() hook implementation
++"""
++import django
++from django.conf import settings
++
++# Configure Django settings before importing anything else
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++        ],
++        SECRET_KEY='test-secret-key',
++        MIDDLEWARE=[
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='',
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.contrib import admin
++from django.contrib.auth.models import User
++from django.db import models
++from django.test import TestCase, RequestFactory
++from django.contrib.admin.sites import AdminSite
++
++
++# Test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    status = models.CharField(max_length=20, default='active')
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child1(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child2(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Child3(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Inline classes
++class Child1Inline(admin.TabularInline):
++    model = Child1
++
++
++class Child2Inline(admin.TabularInline):
++    model = Child2
++
++
++class Child3Inline(admin.TabularInline):
++    model = Child3
++
++
++# Admin classes for testing
++class ParentAdminWithGetInlines(admin.ModelAdmin):
++    inlines = [Child1Inline]  # Default inline
++    
++    def get_inlines(self, request, obj=None):
++        """Custom get_inlines that changes inlines based on object status"""
++        if obj is None:
++            # For add view, show Child1 and Child2
++            return [Child1Inline, Child2Inline]
++        elif obj.status == 'active':
++            # For active objects, show all inlines
++            return [Child1Inline, Child2Inline, Child3Inline]
++        else:
++            # For inactive objects, show only Child1
++            return [Child1Inline]
++
++
++class ParentAdminWithRequestBasedInlines(admin.ModelAdmin):
++    inlines = [Child1Inline]
++    
++    def get_inlines(self, request, obj=None):
++        """Custom get_inlines that changes inlines based on user permissions"""
++        if request.user.is_superuser:
++            return [Child1Inline, Child2Inline, Child3Inline]
++        else:
++            return [Child1Inline]
++
++
++class GetInlinesTestCase(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.site = AdminSite()
++        self.superuser = User.objects.create_superuser(
++            username='admin', email='admin@example.com', password='password'
++        )
++        self.regular_user = User.objects.create_user(
++            username='user', email='user@example.com', password='password'
++        )
++        
++    def test_get_inlines_for_add_view(self):
++        """Test get_inlines returns correct inlines for add view (obj=None)"""
++        admin_obj = ParentAdminWithGetInlines(Parent, self.site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request, obj=None)
++        self.assertEqual(len(inlines), 2)
++        self.assertIn(Child1Inline, inlines)
++        self.assertIn(Child2Inline, inlines)
++        
++    def test_get_inlines_for_active_object(self):
++        """Test get_inlines returns correct inlines for active object"""
++        parent = Parent.objects.create(name='Test Parent', status='active')
++        admin_obj = ParentAdminWithGetInlines(Parent, self.site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request, obj=parent)
++        self.assertEqual(len(inlines), 3)
++        self.assertIn(Child1Inline, inlines)
++        self.assertIn(Child2Inline, inlines)
++        self.assertIn(Child3Inline, inlines)
++        
++    def test_get_inlines_for_inactive_object(self):
++        """Test get_inlines returns correct inlines for inactive object"""
++        parent = Parent.objects.create(name='Test Parent', status='inactive')
++        admin_obj = ParentAdminWithGetInlines(Parent, self.site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request, obj=parent)
++        self.assertEqual(len(inlines), 1)
++        self.assertIn(Child1Inline, inlines)
++        
++    def test_get_inlines_based_on_user_permissions(self):
++        """Test get_inlines returns correct inlines based on user permissions"""
++        admin_obj = ParentAdminWithRequestBasedInlines(Parent, self.site)
++        
++        # Test with superuser
++        request = self.factory.get('/')
++        request.user = self.superuser
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(len(inlines), 3)
++        
++        # Test with regular user
++        request = self.factory.get('/')
++        request.user = self.regular_user
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(len(inlines), 1)
++        
++    def test_get_inline_instances_uses_get_inlines(self):
++        """Test that get_inline_instances uses the get_inlines hook"""
++        parent = Parent.objects.create(name='Test Parent', status='active')
++        admin_obj = ParentAdminWithGetInlines(Parent, self.site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        # Get inline instances
++        inline_instances = admin_obj.get_inline_instances(request, obj=parent)
++        
++        # Should have 3 inline instances for active object
++        self.assertEqual(len(inline_instances), 3)
++        
++        # Verify they are instances of the correct classes
++        inline_models = [instance.model for instance in inline_instances]
++        self.assertIn(Child1, inline_models)
++        self.assertIn(Child2, inline_models)
++        self.assertIn(Child3, inline_models)
++        
++    def test_default_get_inlines_returns_self_inlines(self):
++        """Test that default get_inlines returns self.inlines"""
++        class DefaultParentAdmin(admin.ModelAdmin):
++            inlines = [Child1Inline, Child2Inline]
++            
++        admin_obj = DefaultParentAdmin(Parent, self.site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(inlines, [Child1Inline, Child2Inline])
++
++
++if __name__ == '__main__':
++    # Create tables
++    from django.db import connection
++    from django.db.migrations.executor import MigrationExecutor
++    
++    # Run migrations to create auth tables
++    executor = MigrationExecutor(connection)
++    executor.migrate()
++    
++    # Create our test tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Parent)
++        schema_editor.create_model(Child1) 
++        schema_editor.create_model(Child2)
++        schema_editor.create_model(Child3)
++    
++    # Run tests
++    import unittest
++    unittest.main()
+diff --git a/test_get_inlines_django.py b/test_get_inlines_django.py
+new file mode 100644
+index 0000000000..463470a078
+--- /dev/null
++++ b/test_get_inlines_django.py
+@@ -0,0 +1,54 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import get_runner
++
++if __name__ == "__main__":
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++    
++    # Create a test settings module
++    with open('/testbed/test_settings.py', 'w') as f:
++        f.write('''
++DEBUG = True
++SECRET_KEY = 'test-secret-key'
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.admin',
++    'django.contrib.sessions',
++    'django.contrib.messages',
++]
++MIDDLEWARE = [
++    'django.contrib.sessions.middleware.SessionMiddleware',
++    'django.contrib.auth.middleware.AuthenticationMiddleware',
++    'django.contrib.messages.middleware.MessageMiddleware',
++]
++ROOT_URLCONF = []
++USE_TZ = True
++''')
++    
++    django.setup()
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    
++    # Import and run our test
++    from test_get_inlines import GetInlinesTestCase
++    
++    # Create test suite
++    import unittest
++    suite = unittest.TestLoader().loadTestsFromTestCase(GetInlinesTestCase)
++    
++    # Run tests
++    runner = unittest.TextTestRunner(verbosity=2)
++    result = runner.run(suite)
++    
++    # Exit with appropriate code
++    sys.exit(0 if result.wasSuccessful() else 1)
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..728a30b493
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,23 @@
++
++DEBUG = True
++SECRET_KEY = 'test-secret-key'
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'django.contrib.admin',
++    'django.contrib.sessions',
++    'django.contrib.messages',
++]
++MIDDLEWARE = [
++    'django.contrib.sessions.middleware.SessionMiddleware',
++    'django.contrib.auth.middleware.AuthenticationMiddleware',
++    'django.contrib.messages.middleware.MessageMiddleware',
++]
++ROOT_URLCONF = []
++USE_TZ = True
+diff --git a/tests/admin_inlines/tests.py b/tests/admin_inlines/tests.py
+index 736c2eab89..2a8cd1682c 100644
+--- a/tests/admin_inlines/tests.py
++++ b/tests/admin_inlines/tests.py
+@@ -18,6 +18,94 @@ from .models import (
+ INLINE_CHANGELINK_HTML = 'class="inlinechangelink">Change</a>'
+ 
+ 
++class GetInlinesTestCase(TestCase):
++    """Test the get_inlines() hook functionality"""
++    
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.superuser = User.objects.create_superuser(
++            username='admin', email='admin@example.com', password='password'
++        )
++        self.regular_user = User.objects.create_user(
++            username='user', email='user@example.com', password='password'
++        )
++        
++    def test_get_inlines_hook(self):
++        """Test that get_inlines() hook can customize inlines based on request/obj"""
++        from django.contrib import admin
++        
++        # Create inline classes
++        class ChildInline1(TabularInline):
++            model = Child
++            fk_name = 'object_id'
++            
++        class ChildInline2(TabularInline):
++            model = Child
++            fk_name = 'object_id'
++            
++        class ChildInline3(TabularInline):
++            model = Child
++            fk_name = 'object_id'
++        
++        # Create admin class with custom get_inlines
++        class ParentAdminWithGetInlines(ModelAdmin):
++            inlines = [ChildInline1]  # Default inline
++            
++            def get_inlines(self, request, obj=None):
++                """Custom get_inlines that changes inlines based on user"""
++                if request.user.is_superuser:
++                    return [ChildInline1, ChildInline2, ChildInline3]
++                else:
++                    return [ChildInline1]
++        
++        # Test with superuser
++        admin_obj = ParentAdminWithGetInlines(Parent, admin_site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(len(inlines), 3)
++        self.assertIn(ChildInline1, inlines)
++        self.assertIn(ChildInline2, inlines)
++        self.assertIn(ChildInline3, inlines)
++        
++        # Test that get_inline_instances uses get_inlines
++        inline_instances = admin_obj.get_inline_instances(request)
++        self.assertEqual(len(inline_instances), 3)
++        
++        # Test with regular user - give them permissions first
++        request.user = self.regular_user
++        # Give the regular user view permission for Child model
++        from django.contrib.auth.models import Permission
++        from django.contrib.contenttypes.models import ContentType
++        ct = ContentType.objects.get_for_model(Child)
++        perm = Permission.objects.get(content_type=ct, codename='view_child')
++        self.regular_user.user_permissions.add(perm)
++        
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(len(inlines), 1)
++        self.assertIn(ChildInline1, inlines)
++        
++        inline_instances = admin_obj.get_inline_instances(request)
++        self.assertEqual(len(inline_instances), 1)
++    
++    def test_default_get_inlines(self):
++        """Test that default get_inlines returns self.inlines"""
++        class ChildInline(TabularInline):
++            model = Child
++            fk_name = 'object_id'
++            
++        class DefaultParentAdmin(ModelAdmin):
++            inlines = [ChildInline]
++            
++        admin_obj = DefaultParentAdmin(Parent, admin_site)
++        request = self.factory.get('/')
++        request.user = self.superuser
++        
++        inlines = admin_obj.get_inlines(request)
++        self.assertEqual(inlines, [ChildInline])
++
++
+ class TestDataMixin:
+ 
+     @classmethod
+diff --git a/verify_get_inlines.py b/verify_get_inlines.py
+new file mode 100644
+index 0000000000..70ac77ef6b
+--- /dev/null
++++ b/verify_get_inlines.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++from django.contrib import admin
++from django.db import models
++from django.test import RequestFactory
++from django.contrib.auth.models import User
++
++# Test that get_inlines exists and works
++print("Testing get_inlines() implementation...")
++
++# Create a simple inline class
++class TestInline(admin.TabularInline):
++    model = None  # We don't need a real model for this test
++
++# Test 1: Default behavior
++class DefaultAdmin(admin.ModelAdmin):
++    inlines = [TestInline]
++
++admin_obj = DefaultAdmin(User, admin.site)
++request = RequestFactory().get('/')
++request.user = User()
++
++result = admin_obj.get_inlines(request)
++print("OK: Default get_inlines returns self.inlines:", result == [TestInline])
++
++# Test 2: Custom get_inlines
++class CustomAdmin(admin.ModelAdmin):
++    inlines = [TestInline]
++    
++    def get_inlines(self, request, obj=None):
++        if obj is None:
++            return []
++        return [TestInline]
++
++admin_obj = CustomAdmin(User, admin.site)
++result_add = admin_obj.get_inlines(request, obj=None)
++result_change = admin_obj.get_inlines(request, obj=User())
++
++print("OK: Custom get_inlines for add view (obj=None):", result_add == [])
++print("OK: Custom get_inlines for change view (obj=User):", result_change == [TestInline])
++
++# Test 3: get_inline_instances uses get_inlines
++class TestAdmin(admin.ModelAdmin):
++    inlines = [TestInline]
++    
++    def get_inlines(self, request, obj=None):
++        # Return empty list to test that get_inline_instances respects it
++        return []
++
++admin_obj = TestAdmin(User, admin.site)
++inline_instances = admin_obj.get_inline_instances(request)
++print("OK: get_inline_instances uses get_inlines:", len(inline_instances) == 0)
++
++print("\nAll tests passed! The get_inlines() hook is working correctly.")

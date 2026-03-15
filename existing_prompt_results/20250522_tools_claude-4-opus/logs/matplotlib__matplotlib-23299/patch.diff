@@ -1,0 +1,413 @@
+diff --git a/lib/matplotlib/__init__.py b/lib/matplotlib/__init__.py
+index c268a56724..8438398258 100644
+--- a/lib/matplotlib/__init__.py
++++ b/lib/matplotlib/__init__.py
+@@ -682,6 +682,44 @@ class RcParams(MutableMapping, dict):
+         """Get the requested backend, if any, without triggering resolution."""
+         backend = dict.__getitem__(self, "backend")
+         return None if backend is rcsetup._auto_backend_sentinel else backend
++    
++    def _resolve_backend_without_switching(self):
++        """Resolve what backend would be selected without actually switching to it."""
++        backend = dict.__getitem__(self, "backend")
++        if backend is not rcsetup._auto_backend_sentinel:
++            return backend
++            
++        # Determine what backend would be selected
++        import matplotlib.backends
++        from matplotlib import cbook
++        
++        current_framework = cbook._get_running_interactive_framework()
++        mapping = {'qt': 'qtagg',
++                   'gtk3': 'gtk3agg',
++                   'gtk4': 'gtk4agg',
++                   'wx': 'wxagg',
++                   'tk': 'tkagg',
++                   'macosx': 'macosx',
++                   'headless': 'agg'}
++
++        best_guess = mapping.get(current_framework, None)
++        if best_guess is not None:
++            candidates = [best_guess]
++        else:
++            candidates = []
++        candidates += ["macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]
++
++        # Try each candidate
++        import importlib
++        for candidate in candidates:
++            try:
++                importlib.import_module(cbook._backend_module_name(candidate))
++                return candidate
++            except ImportError:
++                continue
++        else:
++            # Agg should always work
++            return "agg"
+ 
+     def __repr__(self):
+         class_name = self.__class__.__name__
+@@ -1175,7 +1213,12 @@ def get_backend():
+     --------
+     matplotlib.use
+     """
+-    return rcParams['backend']
++    # Check if backend needs resolution without triggering a switch
++    backend = rcParams._get_backend_or_none()
++    if backend is None:
++        # Backend is still the sentinel, resolve it without switching
++        return rcParams._resolve_backend_without_switching()
++    return backend
+ 
+ 
+ def interactive(b):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..607025e07a
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,15 @@
++import matplotlib.pyplot as plt
++from matplotlib import get_backend, rc_context
++
++# fig1 = plt.figure()  # <- UNCOMMENT THIS LINE AND IT WILL WORK
++# plt.ion()            # <- ALTERNATIVELY, UNCOMMENT THIS LINE AND IT WILL ALSO WORK
++with rc_context():
++    fig2 = plt.figure()
++before = f'{id(plt._pylab_helpers.Gcf)} {plt._pylab_helpers.Gcf.figs!r}'
++get_backend()
++after = f'{id(plt._pylab_helpers.Gcf)} {plt._pylab_helpers.Gcf.figs!r}'
++
++print("Before:", before)
++print("After:", after)
++
++assert before == after, '\n' + before + '\n' + after
+diff --git a/test_backend_issue.py b/test_backend_issue.py
+new file mode 100644
+index 0000000000..37c22da228
+--- /dev/null
++++ b/test_backend_issue.py
+@@ -0,0 +1,27 @@
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import get_backend, rc_context, rcParams
++from matplotlib import rcsetup
++
++# Test 1: Check if backend is set to sentinel in rc_context
++print("Test 1: Check backend value in rc_context")
++print(f"Initial backend: {rcParams._get_backend_or_none()}")
++print(f"Is sentinel? {dict.__getitem__(rcParams, 'backend') is rcsetup._auto_backend_sentinel}")
++
++with rc_context():
++    print(f"In rc_context backend: {rcParams._get_backend_or_none()}")
++    print(f"Is sentinel? {dict.__getitem__(rcParams, 'backend') is rcsetup._auto_backend_sentinel}")
++    fig = plt.figure()
++    print(f"Created figure, Gcf.figs: {plt._pylab_helpers.Gcf.figs}")
++    
++    # This should trigger the issue
++    backend = get_backend()
++    print(f"After get_backend(), backend: {backend}")
++    print(f"After get_backend(), Gcf.figs: {plt._pylab_helpers.Gcf.figs}")
++
++print("\nTest 2: Check if the issue happens without rc_context")
++fig2 = plt.figure()
++print(f"Created figure, Gcf.figs: {plt._pylab_helpers.Gcf.figs}")
++backend = get_backend()
++print(f"After get_backend(), backend: {backend}")
++print(f"After get_backend(), Gcf.figs: {plt._pylab_helpers.Gcf.figs}")
+diff --git a/test_backend_resolution.py b/test_backend_resolution.py
+new file mode 100644
+index 0000000000..4f1433d545
+--- /dev/null
++++ b/test_backend_resolution.py
+@@ -0,0 +1,38 @@
++import matplotlib
++from matplotlib import rcsetup, cbook
++
++# Let's see if we can determine the backend without switching
++current_framework = cbook._get_running_interactive_framework()
++mapping = {'qt': 'qtagg',
++           'gtk3': 'gtk3agg', 
++           'gtk4': 'gtk4agg',
++           'wx': 'wxagg',
++           'tk': 'tkagg',
++           'macosx': 'macosx',
++           'headless': 'agg'}
++
++best_guess = mapping.get(current_framework, None)
++if best_guess is not None:
++    candidates = [best_guess]
++else:
++    candidates = []
++candidates += ["macosx", "qtagg", "gtk4agg", "gtk3agg", "tkagg", "wxagg"]
++
++print(f"Current framework: {current_framework}")
++print(f"Best guess: {best_guess}")
++print(f"Candidates: {candidates}")
++
++# Try to import each candidate
++for candidate in candidates:
++    try:
++        backend_mod = matplotlib.importlib.import_module(
++            cbook._backend_module_name(candidate))
++        print(f"✓ {candidate} is available")
++        break
++    except ImportError as e:
++        print(f"✗ {candidate} not available: {e}")
++else:
++    print("Falling back to agg")
++    candidate = "agg"
++
++print(f"\nWould select backend: {candidate}")
+diff --git a/test_backend_switching.py b/test_backend_switching.py
+new file mode 100644
+index 0000000000..db01426f89
+--- /dev/null
++++ b/test_backend_switching.py
+@@ -0,0 +1,29 @@
++"""Test that backend switching still works correctly."""
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import use, get_backend
++
++# Test that use() still properly switches backends and clears figures
++print("Test: use() should clear figures when switching backends")
++
++# Create a figure
++fig = plt.figure()
++print(f"Created figure, Gcf.figs: {list(plt._pylab_helpers.Gcf.figs.keys())}")
++
++# Switch backend - this SHOULD clear figures
++old_backend = get_backend()
++print(f"Current backend: {old_backend}")
++
++# Switch to a different backend
++new_backend = 'agg' if old_backend.lower() != 'agg' else 'svg'
++use(new_backend, force=True)
++
++print(f"After switching to {new_backend}, Gcf.figs: {list(plt._pylab_helpers.Gcf.figs.keys())}")
++print(f"New backend: {get_backend()}")
++
++# Figures should be cleared after backend switch
++assert len(plt._pylab_helpers.Gcf.figs) == 0, "Figures were not cleared after backend switch"
++print("✓ Test passed: use() correctly clears figures")
++
++# Switch back
++use(old_backend, force=True)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..6b98a6eeb7
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,49 @@
++"""Test edge cases for the get_backend() fix."""
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import get_backend, rc_context, rcParams, use
++from matplotlib import rcsetup
++
++print("Test 1: Multiple nested rc_contexts")
++with rc_context():
++    fig1 = plt.figure()
++    with rc_context():
++        fig2 = plt.figure()
++        backend = get_backend()
++        assert 1 in plt._pylab_helpers.Gcf.figs
++        assert 2 in plt._pylab_helpers.Gcf.figs
++print("✓ Test 1 passed")
++
++plt.close('all')
++
++print("\nTest 2: get_backend() called multiple times")
++with rc_context():
++    fig = plt.figure()
++    for i in range(5):
++        backend = get_backend()
++        assert 1 in plt._pylab_helpers.Gcf.figs, f"Figure cleared on iteration {i}"
++print("✓ Test 2 passed")
++
++plt.close('all')
++
++print("\nTest 3: Mixing rc_context with explicit backend setting")
++original_backend = get_backend()
++with rc_context({'backend': 'agg'}):
++    fig = plt.figure()
++    backend = get_backend()
++    assert backend == 'agg'
++    assert 1 in plt._pylab_helpers.Gcf.figs
++print("✓ Test 3 passed")
++
++plt.close('all')
++
++print("\nTest 4: Backend is already set before rc_context")
++# Ensure backend is initialized
++get_backend()
++with rc_context():
++    fig = plt.figure()
++    backend = get_backend()
++    assert 1 in plt._pylab_helpers.Gcf.figs
++print("✓ Test 4 passed")
++
++print("\nAll edge case tests passed!")
+diff --git a/test_fix_comprehensive.py b/test_fix_comprehensive.py
+new file mode 100644
+index 0000000000..f5d1dd96e4
+--- /dev/null
++++ b/test_fix_comprehensive.py
+@@ -0,0 +1,80 @@
++import matplotlib.pyplot as plt
++from matplotlib import get_backend, rc_context
++
++print("Test 1: Original failing case")
++with rc_context():
++    fig2 = plt.figure()
++before = f'{id(plt._pylab_helpers.Gcf)} {plt._pylab_helpers.Gcf.figs!r}'
++backend = get_backend()
++after = f'{id(plt._pylab_helpers.Gcf)} {plt._pylab_helpers.Gcf.figs!r}'
++print(f"Backend: {backend}")
++print(f"Before: {before}")
++print(f"After: {after}")
++assert before == after, 'Test 1 failed: figures were cleared'
++print("✓ Test 1 passed\n")
++
++# Clean up
++plt.close('all')
++
++print("Test 2: With figure created before rc_context")
++fig1 = plt.figure()
++with rc_context():
++    fig2 = plt.figure()
++before = f'{plt._pylab_helpers.Gcf.figs!r}'
++backend = get_backend()
++after = f'{plt._pylab_helpers.Gcf.figs!r}'
++print(f"Backend: {backend}")
++print(f"Before: {before}")
++print(f"After: {after}")
++assert before == after, 'Test 2 failed: figures were cleared'
++print("✓ Test 2 passed\n")
++
++# Clean up
++plt.close('all')
++
++print("Test 3: With plt.ion()")
++plt.ion()
++with rc_context():
++    fig2 = plt.figure()
++before = f'{plt._pylab_helpers.Gcf.figs!r}'
++backend = get_backend()
++after = f'{plt._pylab_helpers.Gcf.figs!r}'
++print(f"Backend: {backend}")
++print(f"Before: {before}")
++print(f"After: {after}")
++assert before == after, 'Test 3 failed: figures were cleared'
++print("✓ Test 3 passed\n")
++
++# Clean up
++plt.close('all')
++
++print("Test 4: Multiple calls to get_backend()")
++with rc_context():
++    fig = plt.figure()
++    before = f'{plt._pylab_helpers.Gcf.figs!r}'
++    backend1 = get_backend()
++    middle = f'{plt._pylab_helpers.Gcf.figs!r}'
++    backend2 = get_backend()
++    after = f'{plt._pylab_helpers.Gcf.figs!r}'
++    
++print(f"Backend1: {backend1}, Backend2: {backend2}")
++print(f"Before: {before}")
++print(f"Middle: {middle}")
++print(f"After: {after}")
++assert before == middle == after, 'Test 4 failed: figures were cleared'
++assert backend1 == backend2, 'Test 4 failed: backend changed'
++print("✓ Test 4 passed\n")
++
++# Clean up
++plt.close('all')
++
++print("Test 5: plt.close() should still work")
++with rc_context():
++    fig = plt.figure()
++    fig_num = fig.number
++    assert fig_num in plt._pylab_helpers.Gcf.figs, "Figure not in Gcf.figs"
++    plt.close(fig)
++    assert fig_num not in plt._pylab_helpers.Gcf.figs, "Figure still in Gcf.figs after close"
++print("✓ Test 5 passed\n")
++
++print("All tests passed!")
+diff --git a/test_get_backend_gcf.py b/test_get_backend_gcf.py
+new file mode 100644
+index 0000000000..a8ab2c3269
+--- /dev/null
++++ b/test_get_backend_gcf.py
+@@ -0,0 +1,70 @@
++"""Test for the get_backend() Gcf.figs clearing issue."""
++import matplotlib
++import matplotlib.pyplot as plt
++from matplotlib import get_backend, rc_context
++import pytest
++
++
++def test_get_backend_does_not_clear_figures():
++    """Test that get_backend() doesn't clear figures from Gcf.figs."""
++    # Clear any existing figures
++    plt.close('all')
++    
++    # Test 1: Figure created in rc_context
++    with rc_context():
++        fig = plt.figure()
++        fig_num = fig.number
++        assert fig_num in plt._pylab_helpers.Gcf.figs
++        
++        # This should not clear the figure
++        backend = get_backend()
++        assert fig_num in plt._pylab_helpers.Gcf.figs, "Figure was cleared by get_backend()"
++        
++    plt.close('all')
++    
++    # Test 2: Multiple figures, one in rc_context
++    fig1 = plt.figure()
++    fig1_num = fig1.number
++    
++    with rc_context():
++        fig2 = plt.figure()
++        fig2_num = fig2.number
++        
++        assert fig1_num in plt._pylab_helpers.Gcf.figs
++        assert fig2_num in plt._pylab_helpers.Gcf.figs
++        
++        backend = get_backend()
++        
++        assert fig1_num in plt._pylab_helpers.Gcf.figs, "Figure 1 was cleared by get_backend()"
++        assert fig2_num in plt._pylab_helpers.Gcf.figs, "Figure 2 was cleared by get_backend()"
++    
++    plt.close('all')
++
++
++def test_get_backend_returns_correct_backend():
++    """Test that get_backend() returns the correct backend name."""
++    backend = get_backend()
++    assert isinstance(backend, str)
++    assert backend.lower() in ['agg', 'qtagg', 'gtk3agg', 'gtk4agg', 'tkagg', 'wxagg', 'macosx']
++
++
++def test_plt_close_still_works():
++    """Test that plt.close() still works correctly after our fix."""
++    with rc_context():
++        fig = plt.figure()
++        fig_num = fig.number
++        
++        # Get backend to ensure it's initialized
++        get_backend()
++        
++        # Close should still work
++        assert fig_num in plt._pylab_helpers.Gcf.figs
++        plt.close(fig)
++        assert fig_num not in plt._pylab_helpers.Gcf.figs
++
++
++if __name__ == "__main__":
++    test_get_backend_does_not_clear_figures()
++    test_get_backend_returns_correct_backend()
++    test_plt_close_still_works()
++    print("All tests passed!")

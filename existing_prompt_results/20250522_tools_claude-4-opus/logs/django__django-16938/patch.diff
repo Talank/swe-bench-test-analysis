@@ -1,0 +1,886 @@
+diff --git a/django/core/serializers/python.py b/django/core/serializers/python.py
+index 36048601af..4ad563ba43 100644
+--- a/django/core/serializers/python.py
++++ b/django/core/serializers/python.py
+@@ -79,7 +79,7 @@ class Serializer(base.Serializer):
+                     return self._value_from_field(value, value._meta.pk)
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).select_related(None).only("pk").iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/test_both_managers.py b/test_both_managers.py
+new file mode 100644
+index 0000000000..c6509e43ad
+--- /dev/null
++++ b/test_both_managers.py
+@@ -0,0 +1,123 @@
++"""
++Test the workaround mentioned in the problem statement
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_both_managers.sqlite3',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp2',
++    ],
++    USE_TZ=False,
++)
++
++# Create test app directory
++os.makedirs('/testbed/testapp2', exist_ok=True)
++
++# Create __init__.py
++with open('/testbed/testapp2/__init__.py', 'w') as f:
++    f.write('')
++
++# Create models.py
++with open('/testbed/testapp2/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++from django.db.models import Manager
++
++class TestTagManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++class TestTagWithDefault(models.Model):
++    # This is the workaround mentioned in the problem statement
++    default = Manager()  # Custom default manager without select_related
++    objects = TestTagManager()  # Custom manager with select_related
++    
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class TestTagWithoutDefault(models.Model):
++    # This should now work with our fix
++    objects = TestTagManager()  # Only custom manager with select_related
++    
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags_with_default = models.ManyToManyField(TestTagWithDefault, blank=True)
++    tags_without_default = models.ManyToManyField(TestTagWithoutDefault, blank=True)
++''')
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Run test
++from django.core import serializers
++from testapp2.models import *
++
++print("Testing both scenarios...")
++
++# Create test data
++tag_master = TestTagMaster.objects.create(name="master")
++
++# Test with default manager (the workaround)
++tag_with_default = TestTagWithDefault.objects.create(name="tag_with_default", master=tag_master)
++test1 = Test.objects.create(name="test1")
++test1.tags_with_default.add(tag_with_default)
++
++try:
++    result = serializers.serialize("json", [test1])
++    print("✓ Serialization with default manager workaround works")
++except Exception as e:
++    print(f"✗ Serialization with default manager failed: {e}")
++
++# Test without default manager (should work with our fix)
++tag_without_default = TestTagWithoutDefault.objects.create(name="tag_without_default", master=tag_master)
++test2 = Test.objects.create(name="test2")
++test2.tags_without_default.add(tag_without_default)
++
++try:
++    result = serializers.serialize("json", [test2])
++    print("✓ Serialization without default manager works (our fix)")
++except Exception as e:
++    print(f"✗ Serialization without default manager failed: {e}")
++
++# Test both together
++test3 = Test.objects.create(name="test3")
++test3.tags_with_default.add(tag_with_default)
++test3.tags_without_default.add(tag_without_default)
++
++try:
++    result = serializers.serialize("json", [test3])
++    print("✓ Serialization with both types of m2m fields works")
++    import json
++    data = json.loads(result)
++    print(f"  - tags_with_default: {data[0]['fields']['tags_with_default']}")
++    print(f"  - tags_without_default: {data[0]['fields']['tags_without_default']}")
++except Exception as e:
++    print(f"✗ Serialization with both failed: {e}")
++
++# Clean up
++os.remove('/tmp/test_both_managers.sqlite3')
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..473fd045b8
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,180 @@
++"""
++Test edge cases for the m2m serialization fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_edge_cases.sqlite3',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp',
++    ],
++    USE_TZ=False,
++)
++
++# Create test app directory
++os.makedirs('/testbed/testapp', exist_ok=True)
++
++# Create __init__.py
++with open('/testbed/testapp/__init__.py', 'w') as f:
++    f.write('')
++
++# Create models.py with various edge cases
++with open('/testbed/testapp/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++from django.db.models import Manager
++
++# Case 1: Multiple select_related
++class MultiSelectRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master", "secondary")
++        return qs
++
++class Master(models.Model):
++    name = models.CharField(max_length=120)
++
++class Secondary(models.Model):
++    name = models.CharField(max_length=120)
++
++class MultiSelectRelatedModel(models.Model):
++    objects = MultiSelectRelatedManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(Master, on_delete=models.SET_NULL, null=True)
++    secondary = models.ForeignKey(Secondary, on_delete=models.SET_NULL, null=True)
++
++class TestMultiSelectRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(MultiSelectRelatedModel, blank=True)
++
++# Case 2: Nested select_related
++class NestedSelectRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master__parent")
++        return qs
++
++class Parent(models.Model):
++    name = models.CharField(max_length=120)
++
++class MasterWithParent(models.Model):
++    name = models.CharField(max_length=120)
++    parent = models.ForeignKey(Parent, on_delete=models.SET_NULL, null=True)
++
++class NestedSelectRelatedModel(models.Model):
++    objects = NestedSelectRelatedManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(MasterWithParent, on_delete=models.SET_NULL, null=True)
++
++class TestNestedSelectRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(NestedSelectRelatedModel, blank=True)
++
++# Case 3: Manager with prefetch_related (should work fine)
++class PrefetchRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.prefetch_related("related_items")
++        return qs
++
++class RelatedItem(models.Model):
++    name = models.CharField(max_length=120)
++
++class PrefetchRelatedModel(models.Model):
++    objects = PrefetchRelatedManager()
++    name = models.CharField(max_length=120)
++    related_items = models.ManyToManyField(RelatedItem, blank=True)
++
++class TestPrefetchRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(PrefetchRelatedModel, blank=True)
++''')
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Run tests
++from django.core import serializers
++from testapp.models import *
++
++print("Testing edge cases...")
++
++# Test 1: Multiple select_related
++try:
++    print("\n1. Testing multiple select_related...")
++    master = Master.objects.create(name="master")
++    secondary = Secondary.objects.create(name="secondary")
++    multi_obj = MultiSelectRelatedModel.objects.create(
++        name="multi", master=master, secondary=secondary
++    )
++    test1 = TestMultiSelectRelated.objects.create(name="test1")
++    test1.tags.add(multi_obj)
++    
++    result = serializers.serialize("json", [test1])
++    print("✓ Success with multiple select_related")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++# Test 2: Nested select_related
++try:
++    print("\n2. Testing nested select_related...")
++    parent = Parent.objects.create(name="parent")
++    master_parent = MasterWithParent.objects.create(name="master", parent=parent)
++    nested_obj = NestedSelectRelatedModel.objects.create(
++        name="nested", master=master_parent
++    )
++    test2 = TestNestedSelectRelated.objects.create(name="test2")
++    test2.tags.add(nested_obj)
++    
++    result = serializers.serialize("json", [test2])
++    print("✓ Success with nested select_related")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++# Test 3: Prefetch_related (should work without issues)
++try:
++    print("\n3. Testing prefetch_related...")
++    item1 = RelatedItem.objects.create(name="item1")
++    item2 = RelatedItem.objects.create(name="item2")
++    prefetch_obj = PrefetchRelatedModel.objects.create(name="prefetch")
++    prefetch_obj.related_items.add(item1, item2)
++    
++    test3 = TestPrefetchRelated.objects.create(name="test3")
++    test3.tags.add(prefetch_obj)
++    
++    result = serializers.serialize("json", [test3])
++    print("✓ Success with prefetch_related")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++# Test 4: Empty m2m relation
++try:
++    print("\n4. Testing empty m2m relation...")
++    test4 = TestMultiSelectRelated.objects.create(name="test4")
++    # Don't add any tags
++    
++    result = serializers.serialize("json", [test4])
++    print("✓ Success with empty m2m relation")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++print("\nAll edge case tests completed!")
++
++# Clean up
++os.remove('/tmp/test_edge_cases.sqlite3')
+diff --git a/test_m2m_serialization.py b/test_m2m_serialization.py
+new file mode 100644
+index 0000000000..774e5ba6e7
+--- /dev/null
++++ b/test_m2m_serialization.py
+@@ -0,0 +1,128 @@
++"""
++Test case for m2m serialization with custom managers using select_related
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models import Manager
++from django.core import serializers
++
++
++class CustomManagerWithSelectRelated(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        # This should not cause issues during serialization
++        qs = qs.select_related("related_model")
++        return qs
++
++
++class RelatedModel(models.Model):
++    name = models.CharField(max_length=120)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class ModelWithCustomManager(models.Model):
++    objects = CustomManagerWithSelectRelated()
++    name = models.CharField(max_length=120)
++    related_model = models.ForeignKey(RelatedModel, on_delete=models.SET_NULL, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class MainModel(models.Model):
++    name = models.CharField(max_length=120)
++    m2m_field = models.ManyToManyField(ModelWithCustomManager, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(RelatedModel)
++    schema_editor.create_model(ModelWithCustomManager)
++    schema_editor.create_model(MainModel)
++
++
++def test_m2m_serialization_with_select_related():
++    """Test that m2m serialization works with custom managers that use select_related"""
++    # Create test data
++    related = RelatedModel.objects.create(name="related")
++    obj_with_custom_manager = ModelWithCustomManager.objects.create(
++        name="custom_manager_obj", 
++        related_model=related
++    )
++    main_obj = MainModel.objects.create(name="main")
++    main_obj.m2m_field.add(obj_with_custom_manager)
++    
++    # This should not raise FieldError
++    result = serializers.serialize("json", [main_obj])
++    
++    # Verify the result
++    assert '"m2m_field": [1]' in result
++    print("Test passed: m2m serialization works with custom managers using select_related")
++    return True
++
++
++def test_m2m_serialization_preserves_data():
++    """Test that serialization preserves m2m relationships correctly"""
++    # Create multiple related objects
++    related1 = RelatedModel.objects.create(name="related1")
++    related2 = RelatedModel.objects.create(name="related2")
++    
++    obj1 = ModelWithCustomManager.objects.create(name="obj1", related_model=related1)
++    obj2 = ModelWithCustomManager.objects.create(name="obj2", related_model=related2)
++    
++    main_obj = MainModel.objects.create(name="main")
++    main_obj.m2m_field.add(obj1, obj2)
++    
++    # Serialize
++    result = serializers.serialize("json", [main_obj])
++    
++    # Deserialize and check
++    import json
++    data = json.loads(result)
++    m2m_ids = data[0]['fields']['m2m_field']
++    
++    assert len(m2m_ids) == 2
++    assert obj1.pk in m2m_ids
++    assert obj2.pk in m2m_ids
++    print("Test passed: m2m relationships are preserved correctly")
++    return True
++
++
++if __name__ == "__main__":
++    try:
++        test_m2m_serialization_with_select_related()
++        test_m2m_serialization_preserves_data()
++        print("\nAll tests passed!")
++    except Exception as e:
++        print(f"Test failed: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_reproduction.py b/test_reproduction.py
+new file mode 100644
+index 0000000000..938ccb335a
+--- /dev/null
++++ b/test_reproduction.py
+@@ -0,0 +1,86 @@
++"""
++Test script to reproduce the serialization issue with m2m relations 
++that have custom managers using select_related.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define models
++from django.db import models
++from django.db.models import Manager
++from django.core import serializers
++
++class TestTagManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")  # follow master when retrieving object by default
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class TestTag(models.Model):
++    # default = Manager()  # solution is to define custom default manager, which is used by RelatedManager
++    objects = TestTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(TestTag, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    try:
++        schema_editor.create_model(TestTagMaster)
++        schema_editor.create_model(TestTag)
++        schema_editor.create_model(Test)
++    except Exception:
++        pass  # Tables might already exist
++
++# Run test
++try:
++    tag_master = TestTagMaster.objects.create(name="master")
++    tag = TestTag.objects.create(name="tag", master=tag_master)
++    test = Test.objects.create(name="test")
++    test.tags.add(tag)
++    test.save()
++    
++    print("Attempting to serialize...")
++    result = serializers.serialize("json", [test])
++    print("Success! Serialized result:")
++    print(result)
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_reproduction2.py b/test_reproduction2.py
+new file mode 100644
+index 0000000000..8ec24c817d
+--- /dev/null
++++ b/test_reproduction2.py
+@@ -0,0 +1,93 @@
++"""
++Test script to reproduce the serialization issue with m2m relations 
++that have custom managers using select_related.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': '/tmp/test_db.sqlite3',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp',
++    ],
++    USE_TZ=False,
++)
++
++# Create test app directory
++os.makedirs('/testbed/testapp', exist_ok=True)
++
++# Create __init__.py
++with open('/testbed/testapp/__init__.py', 'w') as f:
++    f.write('')
++
++# Create models.py
++with open('/testbed/testapp/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++from django.db.models import Manager
++
++class TestTagManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")  # follow master when retrieving object by default
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++class TestTag(models.Model):
++    # default = Manager()  # solution is to define custom default manager, which is used by RelatedManager
++    objects = TestTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(TestTag, blank=True)
++''')
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', run_syncdb=True, verbosity=0)
++
++# Run test
++from django.core import serializers
++from testapp.models import TestTagMaster, TestTag, Test
++
++try:
++    # Clean up any existing data
++    Test.objects.all().delete()
++    TestTag.objects.all().delete()
++    TestTagMaster.objects.all().delete()
++    
++    tag_master = TestTagMaster.objects.create(name="master")
++    tag = TestTag.objects.create(name="tag", master=tag_master)
++    test = Test.objects.create(name="test")
++    test.tags.add(tag)
++    test.save()
++    
++    print("Attempting to serialize...")
++    result = serializers.serialize("json", [test])
++    print("Success! Serialized result:")
++    print(result)
++except Exception as e:
++    print(f"Error occurred: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Clean up
++os.remove('/tmp/test_db.sqlite3')
+diff --git a/testapp/__init__.py b/testapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testapp/models.py b/testapp/models.py
+new file mode 100644
+index 0000000000..93360641eb
+--- /dev/null
++++ b/testapp/models.py
+@@ -0,0 +1,68 @@
++
++from django.db import models
++from django.db.models import Manager
++
++# Case 1: Multiple select_related
++class MultiSelectRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master", "secondary")
++        return qs
++
++class Master(models.Model):
++    name = models.CharField(max_length=120)
++
++class Secondary(models.Model):
++    name = models.CharField(max_length=120)
++
++class MultiSelectRelatedModel(models.Model):
++    objects = MultiSelectRelatedManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(Master, on_delete=models.SET_NULL, null=True)
++    secondary = models.ForeignKey(Secondary, on_delete=models.SET_NULL, null=True)
++
++class TestMultiSelectRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(MultiSelectRelatedModel, blank=True)
++
++# Case 2: Nested select_related
++class NestedSelectRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master__parent")
++        return qs
++
++class Parent(models.Model):
++    name = models.CharField(max_length=120)
++
++class MasterWithParent(models.Model):
++    name = models.CharField(max_length=120)
++    parent = models.ForeignKey(Parent, on_delete=models.SET_NULL, null=True)
++
++class NestedSelectRelatedModel(models.Model):
++    objects = NestedSelectRelatedManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(MasterWithParent, on_delete=models.SET_NULL, null=True)
++
++class TestNestedSelectRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(NestedSelectRelatedModel, blank=True)
++
++# Case 3: Manager with prefetch_related (should work fine)
++class PrefetchRelatedManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.prefetch_related("related_items")
++        return qs
++
++class RelatedItem(models.Model):
++    name = models.CharField(max_length=120)
++
++class PrefetchRelatedModel(models.Model):
++    objects = PrefetchRelatedManager()
++    name = models.CharField(max_length=120)
++    related_items = models.ManyToManyField(RelatedItem, blank=True)
++
++class TestPrefetchRelated(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(PrefetchRelatedModel, blank=True)
+diff --git a/testapp2/__init__.py b/testapp2/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/testapp2/models.py b/testapp2/models.py
+new file mode 100644
+index 0000000000..11847a10b3
+--- /dev/null
++++ b/testapp2/models.py
+@@ -0,0 +1,32 @@
++
++from django.db import models
++from django.db.models import Manager
++
++class TestTagManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++class TestTagWithDefault(models.Model):
++    # This is the workaround mentioned in the problem statement
++    default = Manager()  # Custom default manager without select_related
++    objects = TestTagManager()  # Custom manager with select_related
++    
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class TestTagWithoutDefault(models.Model):
++    # This should now work with our fix
++    objects = TestTagManager()  # Only custom manager with select_related
++    
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags_with_default = models.ManyToManyField(TestTagWithDefault, blank=True)
++    tags_without_default = models.ManyToManyField(TestTagWithoutDefault, blank=True)
+diff --git a/tests/serializers/test_m2m_custom_manager.py b/tests/serializers/test_m2m_custom_manager.py
+new file mode 100644
+index 0000000000..e9f3ddc454
+--- /dev/null
++++ b/tests/serializers/test_m2m_custom_manager.py
+@@ -0,0 +1,109 @@
++"""
++Test serialization of m2m fields with custom managers using select_related
++"""
++from django.core import serializers
++from django.db import models
++from django.test import TestCase
++
++
++class RelatedModel(models.Model):
++    name = models.CharField(max_length=120)
++    
++    class Meta:
++        app_label = 'serializers'
++
++
++class CustomManagerWithSelectRelated(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        # This previously caused FieldError during serialization
++        qs = qs.select_related("related_model")
++        return qs
++
++
++class ModelWithCustomManager(models.Model):
++    objects = CustomManagerWithSelectRelated()
++    name = models.CharField(max_length=120)
++    related_model = models.ForeignKey(RelatedModel, on_delete=models.SET_NULL, null=True)
++    
++    class Meta:
++        app_label = 'serializers'
++
++
++class MainModel(models.Model):
++    name = models.CharField(max_length=120)
++    m2m_field = models.ManyToManyField(ModelWithCustomManager, blank=True)
++    
++    class Meta:
++        app_label = 'serializers'
++
++
++class M2MCustomManagerSerializationTests(TestCase):
++    def test_m2m_serialization_with_select_related_custom_manager(self):
++        """
++        Test that m2m serialization works when the related model has a custom
++        manager that uses select_related. This was causing FieldError before the fix.
++        """
++        # Create test data
++        related = RelatedModel.objects.create(name="related")
++        obj_with_custom_manager = ModelWithCustomManager.objects.create(
++            name="custom_manager_obj", 
++            related_model=related
++        )
++        main_obj = MainModel.objects.create(name="main")
++        main_obj.m2m_field.add(obj_with_custom_manager)
++        
++        # This should not raise FieldError
++        result = serializers.serialize("json", [main_obj])
++        
++        # Verify the result contains the m2m relationship
++        self.assertIn('"m2m_field": [%d]' % obj_with_custom_manager.pk, result)
++        
++    def test_m2m_serialization_preserves_multiple_relations(self):
++        """
++        Test that serialization correctly handles multiple m2m relations
++        even with custom managers using select_related.
++        """
++        # Create multiple related objects
++        related1 = RelatedModel.objects.create(name="related1")
++        related2 = RelatedModel.objects.create(name="related2")
++        
++        obj1 = ModelWithCustomManager.objects.create(name="obj1", related_model=related1)
++        obj2 = ModelWithCustomManager.objects.create(name="obj2", related_model=related2)
++        
++        main_obj = MainModel.objects.create(name="main")
++        main_obj.m2m_field.add(obj1, obj2)
++        
++        # Serialize
++        result = serializers.serialize("json", [main_obj])
++        
++        # Deserialize and check
++        import json
++        data = json.loads(result)
++        m2m_ids = data[0]['fields']['m2m_field']
++        
++        self.assertEqual(len(m2m_ids), 2)
++        self.assertIn(obj1.pk, m2m_ids)
++        self.assertIn(obj2.pk, m2m_ids)
++        
++    def test_m2m_serialization_with_prefetch_related(self):
++        """
++        Test that serialization works correctly when objects are prefetched.
++        """
++        # Create test data
++        related = RelatedModel.objects.create(name="related")
++        obj_with_custom_manager = ModelWithCustomManager.objects.create(
++            name="custom_manager_obj", 
++            related_model=related
++        )
++        main_obj = MainModel.objects.create(name="main")
++        main_obj.m2m_field.add(obj_with_custom_manager)
++        
++        # Prefetch the m2m relation
++        main_obj_prefetched = MainModel.objects.prefetch_related('m2m_field').get(pk=main_obj.pk)
++        
++        # This should work with prefetched data
++        result = serializers.serialize("json", [main_obj_prefetched])
++        
++        # Verify the result
++        self.assertIn('"m2m_field": [%d]' % obj_with_custom_manager.pk, result)

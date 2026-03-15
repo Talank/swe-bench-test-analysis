@@ -1,0 +1,294 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..6c83bef6c1
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,48 @@
++#!/usr/bin/env python
++"""Reproduction script for the clear_denoms() issue"""
++
++from sympy import symbols, Poly, sympify, sqrt
++
++def test_clear_denoms_issue():
++    print("Testing clear_denoms() issue...")
++    
++    x = symbols("x")
++    
++    # Create the problematic polynomial
++    expr = sympify("-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) - 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))")
++    
++    f = Poly(expr, x)
++    print(f"Original poly: {f}")
++    
++    # Call clear_denoms
++    coeff, bad_poly = f.clear_denoms()
++    print(f"\nAfter clear_denoms:")
++    print(f"coeff: {coeff}")
++    print(f"bad_poly: {bad_poly}")
++    print(f"bad_poly.rep: {bad_poly.rep}")
++    print(f"bad_poly.is_zero: {bad_poly.is_zero}")
++    print(f"bad_poly.as_expr(): {bad_poly.as_expr()}")
++    print(f"bad_poly.as_expr().is_zero: {bad_poly.as_expr().is_zero}")
++    
++    # Compare with a proper zero poly
++    zero_poly = Poly(0, x, domain="EX")
++    print(f"\nProper zero poly: {zero_poly}")
++    print(f"zero_poly.rep: {zero_poly.rep}")
++    print(f"zero_poly.is_zero: {zero_poly.is_zero}")
++    
++    # Test methods that fail
++    print("\nTesting methods that fail on bad_poly:")
++    try:
++        result = bad_poly.terms_gcd()
++        print(f"bad_poly.terms_gcd(): {result}")
++    except Exception as e:
++        print(f"bad_poly.terms_gcd() failed: {type(e).__name__}: {e}")
++    
++    try:
++        result = zero_poly.terms_gcd()
++        print(f"zero_poly.terms_gcd(): {result}")
++    except Exception as e:
++        print(f"zero_poly.terms_gcd() failed: {type(e).__name__}: {e}")
++
++if __name__ == "__main__":
++    test_clear_denoms_issue()
+diff --git a/sympy/polys/densetools.py b/sympy/polys/densetools.py
+index f057824642..9972113976 100644
+--- a/sympy/polys/densetools.py
++++ b/sympy/polys/densetools.py
+@@ -1198,6 +1198,9 @@ def dup_clear_denoms(f, K0, K1=None, convert=False):
+     if not K1.is_one(common):
+         f = dup_mul_ground(f, common, K0)
+ 
++    # Strip the result to ensure proper representation
++    f = dup_strip(f)
++
+     if not convert:
+         return common, f
+     else:
+@@ -1252,6 +1255,9 @@ def dmp_clear_denoms(f, u, K0, K1=None, convert=False):
+     if not K1.is_one(common):
+         f = dmp_mul_ground(f, common, u, K0)
+ 
++    # Strip the result to ensure proper representation
++    f = dmp_strip(f, u)
++
+     if not convert:
+         return common, f
+     else:
+diff --git a/sympy/polys/tests/test_densetools.py b/sympy/polys/tests/test_densetools.py
+index ca78e1b0e1..14ca07dab0 100644
+--- a/sympy/polys/tests/test_densetools.py
++++ b/sympy/polys/tests/test_densetools.py
+@@ -634,6 +634,10 @@ def test_dup_clear_denoms():
+ 
+     assert dup_clear_denoms([EX(7)], EX) == (EX(1), [EX(7)])
+     assert dup_clear_denoms([EX(sin(x)/x), EX(0)], EX) == (EX(x), [EX(sin(x)), EX(0)])
++    
++    # Test that zero polynomials are properly stripped
++    assert dup_clear_denoms([QQ(0), QQ(0)], QQ) == (ZZ(1), [])
++    assert dup_clear_denoms([EX(0)], EX) == (EX(1), [])
+ 
+ 
+ def test_dmp_clear_denoms():
+@@ -664,3 +668,8 @@ def test_dmp_clear_denoms():
+         [[EX(S(3)/2)], [EX(S(9)/4)]], 1, EX) == (EX(4), [[EX(6)], [EX(9)]])
+     assert dmp_clear_denoms([[EX(7)]], 1, EX) == (EX(1), [[EX(7)]])
+     assert dmp_clear_denoms([[EX(sin(x)/x), EX(0)]], 1, EX) == (EX(x), [[EX(sin(x)), EX(0)]])
++    
++    # Test that zero polynomials are properly stripped in multivariate case
++    # Note: [[0]] is not a zero polynomial, it's a constant polynomial with value 0
++    # The zero polynomial in 2 variables is [[]]
++    assert dmp_clear_denoms([[]], 1, QQ) == (ZZ(1), [[]])
+diff --git a/test_clear_denoms_comprehensive.py b/test_clear_denoms_comprehensive.py
+new file mode 100644
+index 0000000000..b2be12f725
+--- /dev/null
++++ b/test_clear_denoms_comprehensive.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""Comprehensive test for the clear_denoms() fix"""
++
++from sympy import symbols, Poly, sympify, sqrt, S
++from sympy.polys.polyclasses import DMP
++from sympy.polys.domains import EX, QQ, ZZ
++
++def test_clear_denoms_strips_zero():
++    """Test that clear_denoms properly strips zero polynomials."""
++    x = symbols("x")
++    
++    # Test case 1: Univariate zero polynomial from complex expression
++    expr = sympify("-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) - 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))")
++    
++    f = Poly(expr, x)
++    coeff, result = f.clear_denoms()
++    
++    # Check that the result is properly stripped
++    assert result.rep.rep == [], f"Expected empty list, got {result.rep.rep}"
++    assert result.is_zero is True
++    assert result.as_expr().is_zero is True
++    
++    # Check that methods work correctly
++    gcd_result = result.terms_gcd()
++    assert gcd_result == ((0,), Poly(0, x, domain='EX'))
++    
++    # Check primitive works without ZeroDivisionError
++    cont, prim = result.primitive()
++    assert cont == 0
++    assert prim == Poly(0, x, domain='EX')
++    
++    # Test case 2: Simple rational zero that becomes stripped
++    # Create a polynomial that is effectively zero but has a denominator
++    f2 = Poly(S(0)/3, x, domain='QQ')
++    coeff2, result2 = f2.clear_denoms()
++    assert result2.is_zero is True
++    assert result2.rep.rep == []
++    
++    # Test case 3: Polynomial that simplifies to zero after clearing denoms
++    # This tests the stripping in dup_clear_denoms
++    from sympy.polys.densetools import dup_clear_denoms
++    from sympy.polys.domains import QQ, ZZ
++    
++    # A polynomial [0/1, 0/2] should become [] after clearing denoms and stripping
++    poly_coeffs = [QQ(0, 1), QQ(0, 2)]
++    coeff, result = dup_clear_denoms(poly_coeffs, QQ)
++    assert result == [], f"Expected [], got {result}"
++    assert coeff == ZZ(1)
++    
++    print("All comprehensive tests passed!")
++
++if __name__ == "__main__":
++    test_clear_denoms_strips_zero()
+diff --git a/test_clear_denoms_fix.py b/test_clear_denoms_fix.py
+new file mode 100644
+index 0000000000..e1ff0c5947
+--- /dev/null
++++ b/test_clear_denoms_fix.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test for the clear_denoms() fix"""
++
++from sympy import symbols, Poly, sympify, sqrt, S
++from sympy.polys.polyclasses import DMP
++from sympy.polys.domains import EX
++
++def test_clear_denoms_zero_poly_strip():
++    """Test that clear_denoms properly strips zero polynomials."""
++    x = symbols("x")
++    
++    # Test case 1: The problematic polynomial from the issue
++    expr = sympify("-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) - 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))")
++    
++    f = Poly(expr, x)
++    coeff, result = f.clear_denoms()
++    
++    # Check that the result is properly stripped
++    assert result.rep.rep == [], f"Expected empty list, got {result.rep.rep}"
++    assert result.is_zero is True
++    assert result.as_expr().is_zero is True
++    
++    # Check that methods work correctly
++    gcd_result = result.terms_gcd()
++    assert gcd_result == ((0,), Poly(0, x, domain='EX'))
++    
++    # Test case 2: Simple zero polynomial with rational coefficients
++    f2 = Poly(S(0)/3, x, domain='QQ')
++    coeff2, result2 = f2.clear_denoms()
++    assert result2.is_zero is True
++    assert result2.rep.rep == []
++    
++    # Test case 3: Non-zero polynomial (should not be affected)
++    f3 = Poly(x/2 + S(1)/3, x, domain='QQ')
++    coeff3, result3 = f3.clear_denoms()
++    assert coeff3 == 6
++    assert result3 == Poly(3*x + 2, x, domain='QQ')
++    assert not result3.is_zero
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_clear_denoms_zero_poly_strip()
+diff --git a/test_issue_17990.py b/test_issue_17990.py
+new file mode 100644
+index 0000000000..9ff5014bf9
+--- /dev/null
++++ b/test_issue_17990.py
+@@ -0,0 +1,29 @@
++#!/usr/bin/env python
++"""Test that the fix resolves issue #17990"""
++
++from sympy import symbols, Poly, sympify, sqrt
++
++def test_issue_17990():
++    """Test that primitive() no longer raises ZeroDivisionError on zero polys from clear_denoms."""
++    x = symbols("x")
++    
++    # Create the problematic polynomial
++    expr = sympify("-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) - 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))")
++    
++    f = Poly(expr, x)
++    coeff, poly = f.clear_denoms()
++    
++    # This should not raise ZeroDivisionError anymore
++    try:
++        cont, prim = poly.primitive()
++        print(f"primitive() succeeded: cont={cont}, prim={prim}")
++        assert cont == 0
++        assert prim == Poly(0, x, domain='EX')
++    except ZeroDivisionError as e:
++        print(f"primitive() failed with ZeroDivisionError: {e}")
++        raise
++    
++    print("Test passed!")
++
++if __name__ == "__main__":
++    test_issue_17990()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..720984444a
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test the exact scenario from the problem statement"""
++
++from sympy import symbols, Poly, sympify, sqrt
++
++def test_problem_statement():
++    """Test the exact code from the problem statement works correctly."""
++    x = symbols("x")
++    f = Poly(sympify("-117968192370600*18**(1/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) - 15720318185*2**(2/3)*3**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 15720318185*12**(1/3)*(24201 + 253*sqrt(9165))**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3)) + 117968192370600*2**(1/3)*3**(2/3)/(217603955769048*(24201 + 253*sqrt(9165))**(1/3) + 2273005839412*sqrt(9165)*(24201 + 253*sqrt(9165))**(1/3))"), x)
++    coeff, bad_poly = f.clear_denoms()
++    
++    print(f"coeff: {coeff}")
++    print(f"bad_poly: {bad_poly}")
++    
++    # The result should print like the zero polynomial and behave consistently
++    assert str(bad_poly) == "Poly(0, x, domain='EX')"
++    assert bad_poly.is_zero is True
++    assert bad_poly.as_expr() == 0
++    assert bad_poly.as_expr().is_zero is True
++    
++    # Check the DMP representation is correct
++    assert bad_poly.rep.rep == [], f"Expected [], got {bad_poly.rep.rep}"
++    
++    # terms_gcd should work without IndexError
++    result = bad_poly.terms_gcd()
++    assert result == ((0,), Poly(0, x, domain='EX'))
++    print(f"bad_poly.terms_gcd(): {result}")
++    
++    # Compare with proper zero poly
++    zero_poly = Poly(0, x, domain="EX")
++    assert bad_poly.rep.rep == zero_poly.rep.rep
++    assert bad_poly.is_zero == zero_poly.is_zero
++    
++    # primitive should work without ZeroDivisionError
++    cont, prim = bad_poly.primitive()
++    assert cont == 0
++    assert prim == Poly(0, x, domain='EX')
++    print(f"bad_poly.primitive(): ({cont}, {prim})")
++    
++    print("\nAll tests from problem statement passed!")
++
++if __name__ == "__main__":
++    test_problem_statement()

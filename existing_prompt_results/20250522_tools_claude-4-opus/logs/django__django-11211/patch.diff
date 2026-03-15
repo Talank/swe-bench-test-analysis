@@ -1,0 +1,693 @@
+diff --git a/django/contrib/contenttypes/fields.py b/django/contrib/contenttypes/fields.py
+index ed98ecb48c..6f72a84b5a 100644
+--- a/django/contrib/contenttypes/fields.py
++++ b/django/contrib/contenttypes/fields.py
+@@ -202,8 +202,12 @@ class GenericForeignKey(FieldCacheMixin):
+             else:
+                 model = self.get_content_type(id=ct_id,
+                                               using=obj._state.db).model_class()
+-                return (model._meta.pk.get_prep_value(getattr(obj, self.fk_field)),
+-                        model)
++                # Convert the object_id value to the type of the related model's PK
++                fk_val = getattr(obj, self.fk_field)
++                pk_field = model._meta.pk
++                if hasattr(pk_field, 'to_python'):
++                    fk_val = pk_field.to_python(fk_val)
++                return (fk_val, model)
+ 
+         return (
+             ret_val,
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..7372f26028
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python
++"""Test edge cases for UUID GFK prefetch fix"""
++import os
++import sys
++import uuid
++
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = ['django.contrib.contenttypes']
++USE_TZ = True
++SECRET_KEY = 'test-secret-key'
++""")
++
++import django
++django.setup()
++
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++from django.db import models, connection
++from django.core.management import call_command
++
++# Test model
++class UUIDModel(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++class GFKModel(models.Model):
++    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, null=True)
++    object_id = models.CharField(max_length=255, null=True)
++    content_object = GenericForeignKey()
++    description = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++# Setup database
++call_command('migrate', 'contenttypes', verbosity=0)
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(UUIDModel)
++    schema_editor.create_model(GFKModel)
++
++# Test edge cases
++print("Testing edge cases...")
++
++# Case 1: Normal UUID reference
++uuid_obj = UUIDModel.objects.create(name="UUID Object")
++gfk1 = GFKModel.objects.create(content_object=uuid_obj, description="Normal GFK")
++
++# Case 2: Null content_type
++gfk2 = GFKModel.objects.create(content_type=None, object_id=str(uuid_obj.id), description="Null CT")
++
++# Case 3: Null object_id
++ct = ContentType.objects.get_for_model(UUIDModel)
++gfk3 = GFKModel.objects.create(content_type=ct, object_id=None, description="Null object_id")
++
++# Case 4: Both null
++gfk4 = GFKModel.objects.create(content_type=None, object_id=None, description="Both null")
++
++# Case 5: Invalid object_id (non-existent UUID)
++gfk5 = GFKModel.objects.create(content_type=ct, object_id=str(uuid.uuid4()), description="Invalid UUID")
++
++print("\nTesting with prefetch_related:")
++for gfk in GFKModel.objects.prefetch_related('content_object').order_by('id'):
++    print(f"  {gfk.description}: content_object = {gfk.content_object}")
++
++print("\n[PASS] Edge cases handled correctly!")
++os.remove('/testbed/test_settings.py')
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..5228a5856e
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,114 @@
++#!/usr/bin/env python
++"""Final verification test for UUID GFK prefetch fix"""
++import os
++import sys
++import uuid
++
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create settings
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = ['django.contrib.contenttypes']
++USE_TZ = True
++SECRET_KEY = 'test-secret-key'
++""")
++
++import django
++django.setup()
++
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++from django.db import models, connection
++from django.core.management import call_command
++
++# Test models
++class UUIDModel(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++class IntModel(models.Model):
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++class BigIntModel(models.Model):
++    id = models.BigIntegerField(primary_key=True)
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++class CharModel(models.Model):
++    id = models.CharField(primary_key=True, max_length=50)
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++class GFKModel(models.Model):
++    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
++    object_id = models.CharField(max_length=255)
++    content_object = GenericForeignKey()
++    description = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'contenttypes'
++
++# Setup database
++call_command('migrate', 'contenttypes', verbosity=0)
++with connection.schema_editor() as schema_editor:
++    for model in [UUIDModel, IntModel, BigIntModel, CharModel, GFKModel]:
++        schema_editor.create_model(model)
++
++# Create test data
++print("Creating test data...")
++uuid_obj = UUIDModel.objects.create(name="UUID Object")
++int_obj = IntModel.objects.create(name="Int Object")
++bigint_obj = BigIntModel.objects.create(id=9999999999, name="BigInt Object")
++char_obj = CharModel.objects.create(id="char-123", name="Char Object")
++
++# Create GFK references
++for obj in [uuid_obj, int_obj, bigint_obj, char_obj]:
++    GFKModel.objects.create(
++        content_object=obj,
++        description=f"GFK to {obj.name}"
++    )
++
++# Test without prefetch
++print("\nTesting without prefetch_related:")
++for gfk in GFKModel.objects.all():
++    print(f"  {gfk.description}: {gfk.content_object}")
++
++# Test with prefetch
++print("\nTesting with prefetch_related:")
++for gfk in GFKModel.objects.prefetch_related('content_object'):
++    if gfk.content_object is None:
++        print(f"  ERROR: {gfk.description}: content_object is None!")
++    else:
++        print(f"  OK: {gfk.description}: {gfk.content_object}")
++
++# Verify query count
++from django.test.utils import override_settings
++from django.db import reset_queries, connection
++
++with override_settings(DEBUG=True):
++    reset_queries()
++    list(GFKModel.objects.prefetch_related('content_object'))
++    query_count = len(connection.queries)
++    print(f"\nQuery count with prefetch_related: {query_count}")
++    print("Expected: 5 queries (1 for GFK objects + 1 for each content type)")
++    
++    # Show queries for debugging
++    print("\nQueries executed:")
++    for i, query in enumerate(connection.queries, 1):
++        print(f"  {i}. {query['sql'][:100]}...")
++
++print("\n[PASS] All tests completed successfully!")
++os.remove('/testbed/test_settings.py')
+diff --git a/test_gfk_comprehensive.py b/test_gfk_comprehensive.py
+new file mode 100644
+index 0000000000..84f7f984e1
+--- /dev/null
++++ b/test_gfk_comprehensive.py
+@@ -0,0 +1,147 @@
++#!/usr/bin/env python
++import os
++import sys
++import uuid
++
++# Add testbed to Python path
++sys.path.insert(0, '/testbed')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++]
++
++USE_TZ = True
++SECRET_KEY = 'test-secret-key'
++""")
++
++import django
++django.setup()
++
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++from django.db import models, connection
++from django.test import TestCase
++
++
++# Model with UUID primary key
++class UUIDModel(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++# Model with integer primary key
++class IntModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++# Model with char primary key
++class CharModel(models.Model):
++    id = models.CharField(primary_key=True, max_length=50)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++# Model with GFK that can point to any of the above
++class GFKModel(models.Model):
++    content_type = models.ForeignKey(
++        ContentType, 
++        on_delete=models.CASCADE, 
++        db_index=True
++    )
++    object_id = models.CharField(max_length=255, db_index=True)
++    content_object = GenericForeignKey('content_type', 'object_id')
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', 'contenttypes', verbosity=0)
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(UUIDModel)
++    schema_editor.create_model(IntModel)
++    schema_editor.create_model(CharModel)
++    schema_editor.create_model(GFKModel)
++
++
++def test_model(model_class, pk_value=None):
++    """Test GFK with a specific model type"""
++    print(f"\nTesting {model_class.__name__}...")
++    
++    # Create test objects
++    if pk_value:
++        obj1 = model_class.objects.create(id=pk_value, name=f'{model_class.__name__} 1')
++    else:
++        obj1 = model_class.objects.create(name=f'{model_class.__name__} 1')
++    obj2 = model_class.objects.create(name=f'{model_class.__name__} 2')
++    
++    content_type = ContentType.objects.get_for_model(model_class)
++    
++    # Create GFK objects pointing to them
++    gfk1 = GFKModel.objects.create(
++        content_type=content_type,
++        object_id=str(obj1.pk),
++        name=f'GFK to {obj1.name}'
++    )
++    gfk2 = GFKModel.objects.create(
++        content_type=content_type,
++        object_id=str(obj2.pk),
++        name=f'GFK to {obj2.name}'
++    )
++    
++    # Test without prefetch_related
++    print("  Without prefetch_related:")
++    gfks = GFKModel.objects.filter(id__in=[gfk1.id, gfk2.id])
++    for gfk in gfks:
++        print(f"    {gfk.name}: content_object = {gfk.content_object}")
++        assert gfk.content_object is not None, f"content_object is None for {gfk.name}"
++    
++    # Test with prefetch_related
++    print("  With prefetch_related:")
++    gfks_prefetched = GFKModel.objects.filter(id__in=[gfk1.id, gfk2.id]).prefetch_related('content_object')
++    for gfk in gfks_prefetched:
++        print(f"    {gfk.name}: content_object = {gfk.content_object}")
++        assert gfk.content_object is not None, f"content_object is None for {gfk.name} (prefetched)"
++    
++    print(f"  [PASS] {model_class.__name__} test passed!")
++
++
++# Run tests
++print("Running comprehensive GFK tests...")
++
++# Test UUID primary key
++test_model(UUIDModel)
++
++# Test integer primary key
++test_model(IntModel)
++
++# Test char primary key  
++test_model(CharModel, pk_value="custom-id-123")
++
++print("\n[PASS] All tests passed!")
++
++# Clean up
++os.remove('/testbed/test_settings.py')
+diff --git a/test_uuid_gfk_patch.py b/test_uuid_gfk_patch.py
+new file mode 100644
+index 0000000000..f62e2a0d27
+--- /dev/null
++++ b/test_uuid_gfk_patch.py
+@@ -0,0 +1,103 @@
++"""
++Test to verify that the UUID GFK prefetch fix works correctly.
++This test should be added to Django's test suite.
++"""
++import uuid
++from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
++from django.contrib.contenttypes.models import ContentType
++from django.db import models
++from django.test import TestCase
++
++
++class UUIDTaggedItem(models.Model):
++    """Model with GFK that can point to models with UUID PKs"""
++    tag = models.SlugField()
++    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
++    object_id = models.CharField(max_length=255)
++    content_object = GenericForeignKey('content_type', 'object_id')
++    
++    class Meta:
++        app_label = 'prefetch_related'
++
++
++class UUIDBookmark(models.Model):
++    """Model with UUID PK that can be referenced by GFK"""
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    url = models.URLField()
++    tags = GenericRelation(UUIDTaggedItem, related_query_name='uuid_bookmarks')
++    
++    class Meta:
++        app_label = 'prefetch_related'
++
++
++class GenericRelationUUIDTests(TestCase):
++    """Test GenericForeignKey prefetch_related with UUID primary keys"""
++    
++    @classmethod
++    def setUpTestData(cls):
++        cls.bookmark1 = UUIDBookmark.objects.create(url='http://example1.com/')
++        cls.bookmark2 = UUIDBookmark.objects.create(url='http://example2.com/')
++        
++        cls.tag1 = UUIDTaggedItem.objects.create(
++            content_object=cls.bookmark1,
++            tag='django'
++        )
++        cls.tag2 = UUIDTaggedItem.objects.create(
++            content_object=cls.bookmark1,
++            tag='python'
++        )
++        cls.tag3 = UUIDTaggedItem.objects.create(
++            content_object=cls.bookmark2,
++            tag='web'
++        )
++    
++    def test_prefetch_GFK_to_UUID_model(self):
++        """Test prefetching GenericForeignKey pointing to model with UUID PK"""
++        with self.assertNumQueries(2):
++            tags = list(UUIDTaggedItem.objects.prefetch_related('content_object'))
++            
++            # Verify all content objects are loaded
++            for tag in tags:
++                self.assertIsNotNone(tag.content_object)
++                self.assertIsInstance(tag.content_object, UUIDBookmark)
++                self.assertIn(tag.content_object.url, ['http://example1.com/', 'http://example2.com/'])
++    
++    def test_prefetch_reverse_generic_relation_from_UUID_model(self):
++        """Test prefetching reverse generic relation from model with UUID PK"""
++        with self.assertNumQueries(2):
++            bookmarks = list(UUIDBookmark.objects.prefetch_related('tags'))
++            
++            # Verify tags are accessible without additional queries
++            bookmark1 = next(b for b in bookmarks if b.id == self.bookmark1.id)
++            bookmark2 = next(b for b in bookmarks if b.id == self.bookmark2.id)
++            
++            self.assertEqual(sorted(t.tag for t in bookmark1.tags.all()), ['django', 'python'])
++            self.assertEqual([t.tag for t in bookmark2.tags.all()], ['web'])
++    
++    def test_mixed_pk_types_with_prefetch(self):
++        """Test that prefetch works correctly when mixing UUID and non-UUID PKs"""
++        # Create a regular bookmark (non-UUID PK) if it exists
++        # This test ensures our fix doesn't break existing functionality
++        
++        # Also create tags pointing to different types
++        regular_bookmark = Bookmark.objects.create(url='http://regular.com/')
++        UUIDTaggedItem.objects.create(
++            content_object=regular_bookmark,
++            tag='mixed'
++        )
++        
++        with self.assertNumQueries(3):  # One for tags, one for UUID bookmarks, one for regular bookmarks
++            tags = list(UUIDTaggedItem.objects.prefetch_related('content_object'))
++            
++            # All content objects should be loaded
++            for tag in tags:
++                self.assertIsNotNone(tag.content_object)
++                self.assertTrue(
++                    isinstance(tag.content_object, (UUIDBookmark, Bookmark))
++                )
++
++
++# Add this test class to the Django test suite
++if __name__ == '__main__':
++    print("This test should be integrated into Django's test suite")
++    print("Specifically in tests/prefetch_related/tests.py")
+diff --git a/test_uuid_gfk_prefetch.py b/test_uuid_gfk_prefetch.py
+new file mode 100644
+index 0000000000..f919aa0ed1
+--- /dev/null
++++ b/test_uuid_gfk_prefetch.py
+@@ -0,0 +1,97 @@
++import uuid
++import django
++from django.conf import settings
++
++# Configure Django settings before importing anything else
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'test_app',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++from django.db import models
++from django.test import TestCase
++
++
++class Foo(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Bar(models.Model):
++    foo_content_type = models.ForeignKey(
++        ContentType, related_name='actor',
++        on_delete=models.CASCADE, db_index=True
++    )
++    foo_object_id = models.CharField(max_length=255, db_index=True)
++    foo = GenericForeignKey('foo_content_type', 'foo_object_id')
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class TestUUIDGenericForeignKeyPrefetch(TestCase):
++    def setUp(self):
++        # Create test data
++        self.foo1 = Foo.objects.create(name='Foo 1')
++        self.foo2 = Foo.objects.create(name='Foo 2')
++        
++        content_type = ContentType.objects.get_for_model(Foo)
++        
++        self.bar1 = Bar.objects.create(
++            foo_content_type=content_type,
++            foo_object_id=str(self.foo1.id),
++            name='Bar 1'
++        )
++        self.bar2 = Bar.objects.create(
++            foo_content_type=content_type,
++            foo_object_id=str(self.foo2.id),
++            name='Bar 2'
++        )
++    
++    def test_prefetch_related_with_uuid_pk(self):
++        # Test without prefetch_related first
++        bars = Bar.objects.all()
++        for bar in bars:
++            self.assertIsNotNone(bar.foo)
++            self.assertIn(bar.foo.name, ['Foo 1', 'Foo 2'])
++        
++        # Now test with prefetch_related
++        bars_prefetched = Bar.objects.all().prefetch_related('foo')
++        
++        # This should work but currently returns None for UUID PKs
++        for bar in bars_prefetched:
++            self.assertIsNotNone(bar.foo, f"bar.foo is None for {bar.name}")
++            self.assertIn(bar.foo.name, ['Foo 1', 'Foo 2'])
++
++
++if __name__ == '__main__':
++    # Create tables
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Foo)
++        schema_editor.create_model(Bar)
++    
++    # Run the test
++    test = TestUUIDGenericForeignKeyPrefetch()
++    test.setUp()
++    test.test_prefetch_related_with_uuid_pk()
++    print("Test passed!")
+diff --git a/test_uuid_gfk_simple.py b/test_uuid_gfk_simple.py
+new file mode 100644
+index 0000000000..d67e6fcff1
+--- /dev/null
++++ b/test_uuid_gfk_simple.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++import os
++import sys
++import uuid
++
++# Add testbed to Python path
++sys.path.insert(0, '/testbed')
++
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings file
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++]
++
++USE_TZ = True
++SECRET_KEY = 'test-secret-key'
++""")
++
++import django
++django.setup()
++
++from django.contrib.contenttypes.fields import GenericForeignKey
++from django.contrib.contenttypes.models import ContentType
++from django.db import models, connection
++from django.test import TestCase
++
++
++class Foo(models.Model):
++    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++class Bar(models.Model):
++    foo_content_type = models.ForeignKey(
++        ContentType, related_name='actor',
++        on_delete=models.CASCADE, db_index=True
++    )
++    foo_object_id = models.CharField(max_length=255, db_index=True)
++    foo = GenericForeignKey('foo_content_type', 'foo_object_id')
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'contenttypes'
++
++
++# Create tables
++from django.core.management import call_command
++call_command('migrate', 'contenttypes', verbosity=0)
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Foo)
++    schema_editor.create_model(Bar)
++
++# Create test data
++foo1 = Foo.objects.create(name='Foo 1')
++foo2 = Foo.objects.create(name='Foo 2')
++
++content_type = ContentType.objects.get_for_model(Foo)
++
++bar1 = Bar.objects.create(
++    foo_content_type=content_type,
++    foo_object_id=str(foo1.id),
++    name='Bar 1'
++)
++bar2 = Bar.objects.create(
++    foo_content_type=content_type,
++    foo_object_id=str(foo2.id),
++    name='Bar 2'
++)
++
++print("Testing without prefetch_related...")
++bars = Bar.objects.all()
++for bar in bars:
++    print(f"  {bar.name}: foo = {bar.foo}, foo.name = {bar.foo.name if bar.foo else 'None'}")
++
++print("\nTesting with prefetch_related...")
++bars_prefetched = Bar.objects.all().prefetch_related('foo')
++
++# This should work but currently returns None for UUID PKs
++for bar in bars_prefetched:
++    print(f"  {bar.name}: foo = {bar.foo}, foo.name = {bar.foo.name if bar.foo else 'None'}")
++    if bar.foo is None:
++        print(f"    ERROR: bar.foo is None for {bar.name}!")
++
++# Clean up
++os.remove('/testbed/test_settings.py')

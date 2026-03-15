@@ -1,0 +1,400 @@
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index f8d848e926..f2f9797d88 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -670,7 +670,7 @@ class QuerySet:
+                 when_statements = []
+                 for obj in batch_objs:
+                     attr = getattr(obj, field.attname)
+-                    if not isinstance(attr, Expression):
++                    if not hasattr(attr, 'resolve_expression'):
+                         attr = Value(attr, output_field=field)
+                     when_statements.append(When(pk=obj.pk, then=attr))
+                 case_statement = Case(*when_statements, output_field=field)
+diff --git a/test_bulk_update_comprehensive.py b/test_bulk_update_comprehensive.py
+new file mode 100644
+index 0000000000..b6fc153f20
+--- /dev/null
++++ b/test_bulk_update_comprehensive.py
+@@ -0,0 +1,102 @@
++"""Comprehensive test for bulk_update() with various expression types."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++# Create test models
++from django.db import models
++from django.db.models import F, Value, Case, When, Q
++from django.db.models.functions import Upper, Lower, Concat
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    other_name = models.CharField(max_length=100)
++    c8 = models.CharField(max_length=100)
++    number = models.IntegerField(default=0)
++    other_number = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++print("Testing bulk_update with various expression types:\n")
++
++# Test 1: Plain F expression
++print("1. Testing plain F expression:")
++obj1 = TestModel.objects.create(name='test1', other_name='other1', c8='initial1', number=10, other_number=20)
++obj1.c8 = F('name')
++TestModel.objects.bulk_update([obj1], ['c8'])
++obj1.refresh_from_db()
++print(f"   Result: c8='{obj1.c8}' (expected: '{obj1.name}') - {'PASS' if obj1.c8 == obj1.name else 'FAIL'}")
++
++# Test 2: F expression with arithmetic
++print("\n2. Testing F expression with arithmetic:")
++obj2 = TestModel.objects.create(name='test2', other_name='other2', c8='initial2', number=10, other_number=20)
++obj2.number = F('other_number') + 5
++TestModel.objects.bulk_update([obj2], ['number'])
++obj2.refresh_from_db()
++print(f"   Result: number={obj2.number} (expected: 25) - {'PASS' if obj2.number == 25 else 'FAIL'}")
++
++# Test 3: Regular value (non-expression)
++print("\n3. Testing regular value:")
++obj3 = TestModel.objects.create(name='test3', other_name='other3', c8='initial3')
++obj3.c8 = 'regular_value'
++TestModel.objects.bulk_update([obj3], ['c8'])
++obj3.refresh_from_db()
++print(f"   Result: c8='{obj3.c8}' (expected: 'regular_value') - {'PASS' if obj3.c8 == 'regular_value' else 'FAIL'}")
++
++# Test 4: Multiple objects with F expressions
++print("\n4. Testing multiple objects with F expressions:")
++obj4a = TestModel.objects.create(name='test4a', other_name='other4a', c8='initial4a')
++obj4b = TestModel.objects.create(name='test4b', other_name='other4b', c8='initial4b')
++obj4a.c8 = F('name')
++obj4b.c8 = F('other_name')
++TestModel.objects.bulk_update([obj4a, obj4b], ['c8'])
++obj4a.refresh_from_db()
++obj4b.refresh_from_db()
++print(f"   Result obj4a: c8='{obj4a.c8}' (expected: '{obj4a.name}') - {'PASS' if obj4a.c8 == obj4a.name else 'FAIL'}")
++print(f"   Result obj4b: c8='{obj4b.c8}' (expected: '{obj4b.other_name}') - {'PASS' if obj4b.c8 == obj4b.other_name else 'FAIL'}")
++
++# Test 5: Mixed expressions and values
++print("\n5. Testing mixed expressions and values:")
++obj5a = TestModel.objects.create(name='test5a', other_name='other5a', c8='initial5a')
++obj5b = TestModel.objects.create(name='test5b', other_name='other5b', c8='initial5b')
++obj5a.c8 = F('name')
++obj5b.c8 = 'static_value'
++TestModel.objects.bulk_update([obj5a, obj5b], ['c8'])
++obj5a.refresh_from_db()
++obj5b.refresh_from_db()
++print(f"   Result obj5a: c8='{obj5a.c8}' (expected: '{obj5a.name}') - {'PASS' if obj5a.c8 == obj5a.name else 'FAIL'}")
++print(f"   Result obj5b: c8='{obj5b.c8}' (expected: 'static_value') - {'PASS' if obj5b.c8 == 'static_value' else 'FAIL'}")
++
++# Test 6: Function expressions
++print("\n6. Testing function expressions:")
++obj6 = TestModel.objects.create(name='lowercase', other_name='other6', c8='initial6')
++obj6.c8 = Upper(F('name'))
++TestModel.objects.bulk_update([obj6], ['c8'])
++obj6.refresh_from_db()
++print(f"   Result: c8='{obj6.c8}' (expected: 'LOWERCASE') - {'PASS' if obj6.c8 == 'LOWERCASE' else 'FAIL'}")
++
++print("\nAll tests completed!")
+diff --git a/test_bulk_update_f.py b/test_bulk_update_f.py
+new file mode 100644
+index 0000000000..810935e117
+--- /dev/null
++++ b/test_bulk_update_f.py
+@@ -0,0 +1,63 @@
++"""Test script to reproduce the bulk_update() issue with F() expressions."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++# Create a test model
++from django.db import models
++from django.db.models import F
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    c8 = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Create test data
++obj = TestModel.objects.create(name='test_name', c8='initial_value')
++print(f"Created object with id={obj.id}, name='{obj.name}', c8='{obj.c8}'")
++
++# Test bulk_update with F expression
++obj.c8 = F('name')
++print(f"\nAssigned F('name') to c8 field")
++
++# Perform bulk_update
++rows_updated = TestModel.objects.bulk_update([obj], ['c8'])
++print(f"Rows updated: {rows_updated}")
++
++# Check the result
++obj.refresh_from_db()
++print(f"\nAfter bulk_update:")
++print(f"  obj.c8 = '{obj.c8}'")
++print(f"  Expected: '{obj.name}'")
++print(f"  Success: {obj.c8 == obj.name}")
++
++# Show the SQL query
++from django.db import connection
++if connection.queries:
++    print(f"\nSQL Query executed:")
++    print(connection.queries[-2]['sql'])
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..9d75a1dc71
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,105 @@
++"""Test edge cases for bulk_update() with resolve_expression attribute."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++# Create a test model
++from django.db import models
++from django.db.models import F, Value, Expression
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    c8 = models.CharField(max_length=100, null=True, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create a custom class with resolve_expression
++class FakeExpression:
++    def __init__(self, value):
++        self.value = value
++    
++    def resolve_expression(self, *args, **kwargs):
++        # Return a Value expression when resolved (like a real expression would)
++        from django.db.models import Value
++        return Value(self.value)
++    
++    def __str__(self):
++        return str(self.value)
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++print("Testing edge cases:\n")
++
++# Test 1: Make sure normal strings still work
++print("1. Testing normal string values:")
++obj1 = TestModel.objects.create(name='test1', c8='initial1')
++obj1.c8 = 'new_value'
++TestModel.objects.bulk_update([obj1], ['c8'])
++obj1.refresh_from_db()
++print(f"   Result: c8='{obj1.c8}' (expected: 'new_value') - {'PASS' if obj1.c8 == 'new_value' else 'FAIL'}")
++
++# Test 2: Test with None value
++print("\n2. Testing None value:")
++obj2 = TestModel.objects.create(name='test2', c8='initial2')
++obj2.c8 = None
++TestModel.objects.bulk_update([obj2], ['c8'])
++obj2.refresh_from_db()
++print(f"   Result: c8={obj2.c8} (expected: None) - {'PASS' if obj2.c8 is None else 'FAIL'}")
++
++# Test 3: Test with numeric values (will be converted to string)
++print("\n3. Testing numeric value:")
++obj3 = TestModel.objects.create(name='test3', c8='initial3')
++obj3.c8 = 123
++TestModel.objects.bulk_update([obj3], ['c8'])
++obj3.refresh_from_db()
++print(f"   Result: c8='{obj3.c8}' (expected: '123') - {'PASS' if obj3.c8 == '123' else 'FAIL'}")
++
++# Test 4: Test with actual Expression subclass
++print("\n4. Testing Value expression:")
++obj4 = TestModel.objects.create(name='test4', c8='initial4')
++obj4.c8 = Value('value_expr')
++TestModel.objects.bulk_update([obj4], ['c8'])
++obj4.refresh_from_db()
++print(f"   Result: c8='{obj4.c8}' (expected: 'value_expr') - {'PASS' if obj4.c8 == 'value_expr' else 'FAIL'}")
++
++# Test 5: Test with F expression
++print("\n5. Testing F expression:")
++obj5 = TestModel.objects.create(name='test5', c8='initial5')
++obj5.c8 = F('name')
++TestModel.objects.bulk_update([obj5], ['c8'])
++obj5.refresh_from_db()
++print(f"   Result: c8='{obj5.c8}' (expected: 'test5') - {'PASS' if obj5.c8 == 'test5' else 'FAIL'}")
++
++# Test 6: Test that objects with resolve_expression are treated as expressions
++print("\n6. Testing custom object with resolve_expression:")
++obj6 = TestModel.objects.create(name='test6', c8='initial6')
++fake_expr = FakeExpression('fake_value')
++obj6.c8 = fake_expr
++TestModel.objects.bulk_update([obj6], ['c8'])
++obj6.refresh_from_db()
++# The fake expression should be resolved properly
++print(f"   Result: c8='{obj6.c8}' (expected: 'fake_value') - {'PASS' if obj6.c8 == 'fake_value' else 'FAIL'}")
++
++print("\nAll edge case tests completed!")
+diff --git a/test_fake_expression_detail.py b/test_fake_expression_detail.py
+new file mode 100644
+index 0000000000..88fc4e4340
+--- /dev/null
++++ b/test_fake_expression_detail.py
+@@ -0,0 +1,69 @@
++"""Test what happens with fake expressions in detail."""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models import F, Value, Expression
++from django.db import connection
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    c8 = models.CharField(max_length=100, null=True, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create a custom class with resolve_expression
++class FakeExpression:
++    def __init__(self, value):
++        self.value = value
++    
++    def resolve_expression(self, *args, **kwargs):
++        # Return a Value expression when resolved
++        return Value(self.value)
++    
++    def __str__(self):
++        return str(self.value)
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++print("Testing fake expression behavior:\n")
++
++# Test with fake expression that properly returns a Value when resolved
++obj = TestModel.objects.create(name='test', c8='initial')
++fake_expr = FakeExpression('fake_value')
++obj.c8 = fake_expr
++
++print(f"Object has resolve_expression: {hasattr(fake_expr, 'resolve_expression')}")
++print(f"Is instance of Expression: {isinstance(fake_expr, Expression)}")
++print(f"Is instance of F: {isinstance(fake_expr, F)}")
++
++TestModel.objects.bulk_update([obj], ['c8'])
++obj.refresh_from_db()
++print(f"\nResult: c8='{obj.c8}' (expected: 'fake_value')")
++
++# Check the SQL
++if connection.queries:
++    print(f"\nSQL Query executed:")
++    print(connection.queries[-2]['sql'])
+diff --git a/tests/queries/test_bulk_update.py b/tests/queries/test_bulk_update.py
+index 1d669e0bbd..38740c7721 100644
+--- a/tests/queries/test_bulk_update.py
++++ b/tests/queries/test_bulk_update.py
+@@ -211,6 +211,19 @@ class BulkUpdateTests(TestCase):
+         Number.objects.bulk_update(numbers, ['num'])
+         self.assertCountEqual(Number.objects.filter(num=1), numbers)
+ 
++    def test_plain_f_expression(self):
++        # Test plain F() expressions without arithmetic operations
++        notes = [
++            Note.objects.create(note='note-%s' % i, misc='misc-%s' % i)
++            for i in range(10)
++        ]
++        for note in notes:
++            note.note = F('misc')
++        Note.objects.bulk_update(notes, ['note'])
++        for note in notes:
++            note.refresh_from_db()
++            self.assertEqual(note.note, note.misc)
++
+     def test_booleanfield(self):
+         individuals = [Individual.objects.create(alive=False) for _ in range(10)]
+         for individual in individuals:

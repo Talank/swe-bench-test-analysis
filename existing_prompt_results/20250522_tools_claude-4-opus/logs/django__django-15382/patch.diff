@@ -1,0 +1,477 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index e3fdea6f3a..45e42d8538 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1090,7 +1090,8 @@ class Query(BaseExpression):
+             not connection.features.ignores_unnecessary_order_by_in_subqueries
+         ):
+             self.clear_ordering(force=False)
+-        sql, params = self.get_compiler(connection=connection).as_sql()
++        # For subqueries, we should not elide empty result sets
++        sql, params = self.get_compiler(connection=connection, elide_empty=False).as_sql()
+         if self.subquery:
+             sql = '(%s)' % sql
+         return sql, params
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..f449e0710c
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,87 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.models import Exists, Q
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create some test data
++author1 = Author.objects.create(name='Author 1')
++author2 = Author.objects.create(name='Author 2')
++book1 = Book.objects.create(title='Book 1', author=author1)
++
++print("Test 1: Exists with empty queryset (negated)")
++qs = Author.objects.filter(~Exists(Book.objects.none()), name='Author 1')
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 2: Exists with empty queryset (not negated)")
++qs = Author.objects.filter(Exists(Book.objects.none()), name='Author 1')
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 3: Complex query with empty exists")
++qs = Author.objects.filter(
++    Q(name='Author 1') & ~Exists(Book.objects.none())
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 4: Multiple conditions with empty exists")
++qs = Author.objects.filter(
++    ~Exists(Book.objects.none()),
++    name__startswith='Author',
++    id__gt=0
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 5: Chained filters with empty exists")
++qs = Author.objects.filter(name='Author 1').filter(~Exists(Book.objects.none()))
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++# Execute the queries to ensure they work
++print("Executing queries to verify they work...")
++for author in Author.objects.filter(~Exists(Book.objects.none())):
++    print(f"Found: {author.name}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..0574405350
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,95 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Exists, Q, Subquery, OuterRef
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE)
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Parent)
++    schema_editor.create_model(Child)
++
++# Create test data
++p1 = Parent.objects.create(name='Parent 1')
++p2 = Parent.objects.create(name='Parent 2')
++Child.objects.create(parent=p1, value=10)
++
++print("Test 1: Nested Exists with empty queryset")
++qs = Parent.objects.filter(
++    Exists(
++        Child.objects.filter(
++            parent=OuterRef('pk'),
++            value__in=Subquery(Child.objects.none().values('value'))
++        )
++    )
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 2: Multiple nested empty subqueries")
++qs = Parent.objects.filter(
++    ~Exists(Child.objects.none()) & 
++    Exists(Child.objects.filter(parent=OuterRef('pk')))
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 3: Empty subquery in exclude")
++qs = Parent.objects.exclude(
++    Exists(Child.objects.none())
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++print("Test 4: Combined with regular filters and empty exists")
++qs = Parent.objects.filter(
++    name__startswith='Parent'
++).exclude(
++    ~Exists(Child.objects.none())
++).filter(
++    id__gte=1
++)
++print(f"Count: {qs.count()}")
++print(f"Query: {qs.query}\n")
++
++# Verify queries execute successfully
++print("Executing queries...")
++for p in Parent.objects.filter(~Exists(Child.objects.none())):
++    print(f"Found parent: {p.name}")
+diff --git a/test_exists_empty_queryset.py b/test_exists_empty_queryset.py
+new file mode 100644
+index 0000000000..edb2219d30
+--- /dev/null
++++ b/test_exists_empty_queryset.py
+@@ -0,0 +1,119 @@
++"""
++Test for the fix of Exists with empty queryset removing WHERE block.
++"""
++import django
++from django.conf import settings
++
++# Configure Django first
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'test_exists_empty',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++from django.test import TestCase
++from django.db import models
++from django.db.models import Exists, Q
++
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_exists_empty'
++
++
++class ExistsEmptyQuerysetTest(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.obj1 = TestModel.objects.create(name='test1')
++        cls.obj2 = TestModel.objects.create(name='test2')
++    
++    def test_exists_with_empty_queryset_negated(self):
++        """Test that ~Exists(Model.objects.none()) doesn't remove WHERE block."""
++        qs = TestModel.objects.filter(~Exists(TestModel.objects.none()), name='test1')
++        # The query should be valid and return results
++        self.assertEqual(qs.count(), 1)
++        self.assertEqual(qs.first().name, 'test1')
++        
++        # Check that the query string contains the WHERE clause
++        query_str = str(qs.query)
++        self.assertIn('WHERE', query_str)
++        self.assertIn('NOT EXISTS', query_str)
++        self.assertIn('0 = 1', query_str)  # Empty queryset condition
++    
++    def test_exists_with_empty_queryset_not_negated(self):
++        """Test that Exists(Model.objects.none()) doesn't remove WHERE block."""
++        qs = TestModel.objects.filter(Exists(TestModel.objects.none()), name='test1')
++        # The query should be valid but return no results
++        self.assertEqual(qs.count(), 0)
++        
++        # Check that the query string contains the WHERE clause
++        query_str = str(qs.query)
++        self.assertIn('WHERE', query_str)
++        self.assertIn('EXISTS', query_str)
++        self.assertIn('0 = 1', query_str)  # Empty queryset condition
++    
++    def test_complex_query_with_empty_exists(self):
++        """Test complex queries with empty Exists subqueries."""
++        # Test with Q objects
++        qs = TestModel.objects.filter(
++            Q(name='test1') & ~Exists(TestModel.objects.none())
++        )
++        self.assertEqual(qs.count(), 1)
++        
++        # Test with multiple conditions
++        qs = TestModel.objects.filter(
++            ~Exists(TestModel.objects.none()),
++            name__startswith='test',
++            id__gt=0
++        )
++        self.assertEqual(qs.count(), 2)
++        
++        # Test chained filters
++        qs = TestModel.objects.filter(name='test1').filter(~Exists(TestModel.objects.none()))
++        self.assertEqual(qs.count(), 1)
++    
++    def test_annotation_with_empty_exists(self):
++        """Test that annotations with empty Exists work correctly."""
++        qs = TestModel.objects.annotate(
++            has_none=Exists(TestModel.objects.none())
++        )
++        # All objects should have has_none=False
++        for obj in qs:
++            self.assertFalse(obj.has_none)
++        
++        qs = TestModel.objects.annotate(
++            not_has_none=~Exists(TestModel.objects.none())
++        )
++        # All objects should have not_has_none=True
++        for obj in qs:
++            self.assertTrue(obj.not_has_none)
++
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    from django.db import connection
++    
++    # Create the table
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    
++    # Run the tests
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__"])
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..b7485d1131
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,57 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Exists
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define a test model
++class MyModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++# Test the issue
++print("Testing Exists with empty queryset...")
++qs = MyModel.objects.filter(~Exists(MyModel.objects.none()), name='test')
++print(f"QuerySet: {qs}")
++print(f"Query: {qs.query}")
++
++# Let's also test without negation
++print("\nTesting Exists with empty queryset (no negation)...")
++qs2 = MyModel.objects.filter(Exists(MyModel.objects.none()), name='test')
++print(f"QuerySet: {qs2}")
++print(f"Query: {qs2.query}")
++
++# Test with a normal subquery
++print("\nTesting Exists with normal queryset...")
++qs3 = MyModel.objects.filter(~Exists(MyModel.objects.filter(name='other')), name='test')
++print(f"QuerySet: {qs3}")
++print(f"Query: {qs3.query}")
+diff --git a/tests/queries/test_exists_empty.py b/tests/queries/test_exists_empty.py
+new file mode 100644
+index 0000000000..cce3bd69cf
+--- /dev/null
++++ b/tests/queries/test_exists_empty.py
+@@ -0,0 +1,75 @@
++"""
++Test for the fix of Exists with empty queryset removing WHERE block.
++"""
++from django.test import TestCase
++from django.db.models import Exists, Q
++
++from .models import Number
++
++
++class ExistsEmptyQuerysetTest(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.n1 = Number.objects.create(num=1)
++        cls.n2 = Number.objects.create(num=2)
++    
++    def test_exists_with_empty_queryset_negated(self):
++        """Test that ~Exists(Model.objects.none()) doesn't remove WHERE block."""
++        qs = Number.objects.filter(~Exists(Number.objects.none()), num=1)
++        # The query should be valid and return results
++        self.assertEqual(qs.count(), 1)
++        self.assertEqual(qs.first().num, 1)
++        
++        # Check that the query string contains the WHERE clause
++        query_str = str(qs.query)
++        self.assertIn('WHERE', query_str)
++        self.assertIn('NOT EXISTS', query_str)
++        self.assertIn('0 = 1', query_str)  # Empty queryset condition
++    
++    def test_exists_with_empty_queryset_not_negated(self):
++        """Test that Exists(Model.objects.none()) doesn't remove WHERE block."""
++        qs = Number.objects.filter(Exists(Number.objects.none()), num=1)
++        # The query should be valid but return no results
++        self.assertEqual(qs.count(), 0)
++        
++        # Check that the query string contains the WHERE clause
++        query_str = str(qs.query)
++        self.assertIn('WHERE', query_str)
++        self.assertIn('EXISTS', query_str)
++        self.assertIn('0 = 1', query_str)  # Empty queryset condition
++    
++    def test_complex_query_with_empty_exists(self):
++        """Test complex queries with empty Exists subqueries."""
++        # Test with Q objects
++        qs = Number.objects.filter(
++            Q(num=1) & ~Exists(Number.objects.none())
++        )
++        self.assertEqual(qs.count(), 1)
++        
++        # Test with multiple conditions
++        qs = Number.objects.filter(
++            ~Exists(Number.objects.none()),
++            num__gte=1,
++            id__gt=0
++        )
++        self.assertEqual(qs.count(), 2)
++        
++        # Test chained filters
++        qs = Number.objects.filter(num=1).filter(~Exists(Number.objects.none()))
++        self.assertEqual(qs.count(), 1)
++    
++    def test_annotation_with_empty_exists(self):
++        """Test that annotations with empty Exists work correctly."""
++        qs = Number.objects.annotate(
++            has_none=Exists(Number.objects.none())
++        )
++        # All objects should have has_none=False
++        for obj in qs:
++            self.assertFalse(obj.has_none)
++        
++        qs = Number.objects.annotate(
++            not_has_none=~Exists(Number.objects.none())
++        )
++        # All objects should have not_has_none=True  
++        for obj in qs:
++            self.assertTrue(obj.not_has_none)

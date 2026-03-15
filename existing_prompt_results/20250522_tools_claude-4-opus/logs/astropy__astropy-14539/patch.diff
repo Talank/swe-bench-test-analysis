@@ -1,0 +1,133 @@
+diff --git a/astropy/io/fits/diff.py b/astropy/io/fits/diff.py
+index 100cdf1b8c..d3608ef01d 100644
+--- a/astropy/io/fits/diff.py
++++ b/astropy/io/fits/diff.py
+@@ -1449,7 +1449,7 @@ class TableDataDiff(_BaseDiff):
+                 arrb.dtype, np.floating
+             ):
+                 diffs = where_not_allclose(arra, arrb, rtol=self.rtol, atol=self.atol)
+-            elif "P" in col.format:
++            elif "P" in col.format or "Q" in col.format:
+                 diffs = (
+                     [
+                         idx
+diff --git a/astropy/io/fits/tests/test_diff.py b/astropy/io/fits/tests/test_diff.py
+index adfebe6a5b..06a71d906b 100644
+--- a/astropy/io/fits/tests/test_diff.py
++++ b/astropy/io/fits/tests/test_diff.py
+@@ -923,3 +923,41 @@ def test_rawdatadiff_diff_with_rtol(tmp_path):
+ 
+     assert "...and at 1 more indices." in str1
+     assert "...and at 1 more indices." not in str2
++
++
++def test_vla_diff_identical(tmp_path):
++    """Test that FITSDiff correctly handles VLA columns when comparing identical files.
++    
++    Regression test for issue where FITSDiff may report differences between 
++    identical files containing VLA columns.
++    """
++    # Test with Q format (64-bit) VLA
++    path1 = tmp_path / "vla_q.fits"
++    col = Column('a', format='QD', array=[[0], [0, 0]])
++    hdu = BinTableHDU.from_columns([col])
++    hdu.writeto(path1, overwrite=True)
++    
++    # Compare file to itself
++    diff = FITSDiff(path1, path1)
++    assert diff.identical, "Identical VLA files with Q format reported as different"
++    
++    # Test with P format (32-bit) VLA
++    path2 = tmp_path / "vla_p.fits"
++    col = Column('b', format='PD', array=[[1.0], [2.0, 3.0]])
++    hdu = BinTableHDU.from_columns([col])
++    hdu.writeto(path2, overwrite=True)
++    
++    # Compare file to itself
++    diff = FITSDiff(path2, path2)
++    assert diff.identical, "Identical VLA files with P format reported as different"
++    
++    # Test with mixed columns including VLA
++    path3 = tmp_path / "mixed.fits"
++    col1 = Column('x', format='D', array=[1.0, 2.0])
++    col2 = Column('y', format='QD', array=[[1.0], [2.0, 3.0]])
++    col3 = Column('z', format='I', array=[10, 20])
++    hdu = BinTableHDU.from_columns([col1, col2, col3])
++    hdu.writeto(path3, overwrite=True)
++    
++    diff = FITSDiff(path3, path3)
++    assert diff.identical, "Identical files with mixed columns including VLA reported as different"
+diff --git a/debug_format.py b/debug_format.py
+new file mode 100644
+index 0000000000..7a0ef57530
+--- /dev/null
++++ b/debug_format.py
+@@ -0,0 +1,33 @@
++from astropy.io import fits
++import numpy as np
++
++# Create the test file
++col = fits.Column('a', format='QD', array=[[0], [0, 0]])
++hdu = fits.BinTableHDU.from_columns([col])
++hdu.writeto('diffbug.fits', overwrite=True)
++
++# Check the column format
++with fits.open('diffbug.fits') as hdul:
++    hdu1 = hdul[1]
++    print(f"Column format: {hdu1.columns[0].format}")
++    print(f"'P' in format: {'P' in hdu1.columns[0].format}")
++    print(f"'Q' in format: {'Q' in hdu1.columns[0].format}")
++    print(f"Format starts with 'Q': {hdu1.columns[0].format.startswith('Q')}")
++    
++    # Check the data type
++    data = hdu1.data['a']
++    print(f"\nData type: {data.dtype}")
++    print(f"Data shape: {data.shape}")
++    print(f"Data[0]: {data[0]}")
++    print(f"Data[1]: {data[1]}")
++    
++    # Test comparison
++    print(f"\nTesting data[0] == data[0]: {data[0] == data[0]}")
++    print(f"Result type: {type(data[0] == data[0])}")
++    
++    # Test np.where
++    try:
++        result = np.where(data != data)
++        print(f"np.where result: {result}")
++    except Exception as e:
++        print(f"np.where error: {e}")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..434a264865
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,29 @@
++from astropy.io import fits
++
++# Reproduce the issue
++col = fits.Column('a', format='QD', array=[[0], [0, 0]])
++hdu = fits.BinTableHDU.from_columns([col])
++hdu.writeto('diffbug.fits', overwrite=True)
++
++print("Testing FITSDiff on identical file...")
++print(f"identical: {fits.FITSDiff('diffbug.fits', 'diffbug.fits').identical}")
++fits.printdiff('diffbug.fits', 'diffbug.fits')
++
++# Let's also test with the HDU objects directly
++with fits.open('diffbug.fits') as hdul:
++    hdu1 = hdul[1]
++    hdu2 = hdul[1]
++    
++    print("\nTesting HDUDiff on identical HDUs...")
++    hdudiff = fits.diff.HDUDiff(hdu1, hdu2)
++    print(f"identical: {hdudiff.identical}")
++    
++    print("\nTesting TableDataDiff on identical table data...")
++    tablediff = fits.diff.TableDataDiff(hdu1.data, hdu2.data)
++    print(f"identical: {tablediff.identical}")
++    
++    # Let's check the data
++    print("\nChecking the data:")
++    print(f"Column 'a' data: {hdu1.data['a']}")
++    print(f"Column 'a' dtype: {hdu1.data['a'].dtype}")
++    print(f"Column 'a' shape: {hdu1.data['a'].shape}")

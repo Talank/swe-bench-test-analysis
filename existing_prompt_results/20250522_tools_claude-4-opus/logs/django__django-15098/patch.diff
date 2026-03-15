@@ -1,0 +1,632 @@
+diff --git a/django/utils/translation/trans_real.py b/django/utils/translation/trans_real.py
+index 7dcc77b46c..5ed2300820 100644
+--- a/django/utils/translation/trans_real.py
++++ b/django/utils/translation/trans_real.py
+@@ -43,7 +43,10 @@ language_code_re = _lazy_re_compile(
+     re.IGNORECASE
+ )
+ 
+-language_code_prefix_re = _lazy_re_compile(r'^/(\w+([@-]\w+)?)(/|$)')
++language_code_prefix_re = _lazy_re_compile(
++    r'^/([a-z]{2,3}(?:-[a-z]{4})?(?:-[a-z]{2}|(?:-[0-9]{3}))?(?:@[a-z0-9]{1,20})?)(/|$)',
++    re.IGNORECASE
++)
+ 
+ 
+ @receiver(setting_changed)
+diff --git a/test_de_simple.py b/test_de_simple.py
+new file mode 100644
+index 0000000000..21453c684e
+--- /dev/null
++++ b/test_de_simple.py
+@@ -0,0 +1,21 @@
++import re
++
++# Test the regex
++regex = re.compile(
++    r'^/([a-z]{2,3}(?:-[a-z]{4})?(?:-[a-z]{2}|(?:-[0-9]{3}))?(?:@[a-z0-9]{1,20})?)(/|$)',
++    re.IGNORECASE
++)
++
++test_paths = [
++    '/de-simple-page/',
++    '/de/',
++    '/de-at/',
++    '/en-latn-us/',
++]
++
++for path in test_paths:
++    match = regex.match(path)
++    if match:
++        print(f"{path} -> matched: '{match.group(1)}'")
++    else:
++        print(f"{path} -> NO MATCH")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..8c1bb42f67
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,91 @@
++"""
++Final verification that language locales with script and region work correctly.
++"""
++import os
++import django
++from django.conf import settings
++from django.test import Client
++from django.urls import path
++from django.http import HttpResponse
++from django.conf.urls.i18n import i18n_patterns
++
++# Configure Django settings as in the problem statement
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['testserver', 'localhost'],
++    LANGUAGE_CODE='en-us',
++    LANGUAGES=[
++        ('en-us', "English"),
++        ('en-latn-us', "Latin English"),
++        ('en-Latn-US', "BCP 47 case format"),
++        ('sr-latn', "Serbian Latin"),
++        ('zh-hans', "Simplified Chinese"),
++    ],
++    USE_I18N=True,
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++        'django.middleware.common.CommonMiddleware',
++    ],
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Define view as in problem statement
++def bangiah(request):
++    return HttpResponse('U!')
++
++# Define URL patterns as in problem statement
++urlpatterns = []
++urlpatterns += i18n_patterns(
++    path('', bangiah),
++)
++
++# Run tests
++if __name__ == '__main__':
++    client = Client()
++    
++    print("Testing language locales with script and region:")
++    print("=" * 50)
++    
++    test_cases = [
++        ('/en-us/', 200, 'Basic language-region'),
++        ('/en-latn-us/', 200, 'Language-script-region (lowercase)'),
++        ('/en-Latn-US/', 404, 'Language-script-region (mixed case, not in LANGUAGES)'),
++        ('/sr-latn/', 200, 'Language-script'),
++        ('/zh-hans/', 200, 'Language-script'),
++    ]
++    
++    for url, expected_status, description in test_cases:
++        response = client.get(url)
++        status_match = "✓" if response.status_code == expected_status else "✗"
++        print(f"{status_match} GET {url} -> {response.status_code} ({description})")
++        if response.status_code != expected_status:
++            print(f"  Expected: {expected_status}")
++    
++    print("\nTesting language code extraction:")
++    print("=" * 50)
++    from django.utils.translation import trans_real
++    
++    paths = [
++        '/en-us/',
++        '/en-latn-us/',
++        '/sr-latn/',
++        '/zh-hans/',
++        '/de-simple-page/',  # Should NOT match
++    ]
++    
++    for path in paths:
++        lang = trans_real.get_language_from_path(path)
++        print(f"  {path} -> {lang if lang else 'None (no match)'}")
+diff --git a/test_i18n_resolution.py b/test_i18n_resolution.py
+new file mode 100644
+index 0000000000..4c4f8c39e3
+--- /dev/null
++++ b/test_i18n_resolution.py
+@@ -0,0 +1,75 @@
++import os
++import django
++from django.conf import settings
++from django.test import TestCase, Client
++from django.urls import path
++from django.http import HttpResponse
++from django.conf.urls.i18n import i18n_patterns
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['testserver', 'localhost'],
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++        ('en-latn-us', 'Latin American English'),
++    ],
++    USE_I18N=True,
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++        'django.middleware.common.CommonMiddleware',
++    ],
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Define views
++def test_view(request):
++    return HttpResponse('Success!')
++
++def page_view(request, arg):
++    return HttpResponse(f'Page: {arg}')
++
++# Define URL patterns
++urlpatterns = i18n_patterns(
++    path('', test_view, name='home'),
++    path('<slug:arg>-page/', page_view, name='page'),
++    prefix_default_language=False,
++)
++
++# Run tests
++if __name__ == '__main__':
++    client = Client()
++    
++    print("Testing i18n URL resolution:")
++    
++    # Test language prefixes
++    tests = [
++        ('/en/', 200, 'with en prefix'),
++        ('/de/', 200, 'with de prefix'),
++        ('/en-latn-us/', 200, 'with en-latn-us prefix'),
++        ('/', 200, 'without prefix (default language)'),
++        ('/de-simple-page/', 200, 'de-simple-page (should match page pattern)'),
++    ]
++    
++    for url, expected_status, description in tests:
++        response = client.get(url)
++        print(f"  GET {url} -> Status: {response.status_code} ({description})")
++        if response.status_code != expected_status:
++            print(f"    FAILED: Expected {expected_status}")
++            if response.status_code == 200:
++                print(f"    Content: {response.content}")
+diff --git a/test_i18n_script_region.py b/test_i18n_script_region.py
+new file mode 100644
+index 0000000000..b6f95b0174
+--- /dev/null
++++ b/test_i18n_script_region.py
+@@ -0,0 +1,73 @@
++"""
++Test for i18n patterns with language codes containing script and region.
++"""
++import os
++from django.conf import settings
++from django.test import SimpleTestCase, override_settings
++from django.test.client import Client
++from django.urls import reverse
++from django.utils import translation
++
++@override_settings(
++    USE_I18N=True,
++    LANGUAGE_CODE='en-us',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('en-us', 'American English'),
++        ('en-latn-us', 'Latin American English'),
++        ('sr-latn', 'Serbian Latin'),
++        ('zh-hans', 'Simplified Chinese'),
++        ('zh-hant', 'Traditional Chinese'),
++    ],
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++        'django.middleware.common.CommonMiddleware',
++    ],
++    ROOT_URLCONF='i18n.patterns.urls.default',
++)
++class I18nScriptRegionTests(SimpleTestCase):
++    def setUp(self):
++        self.client = Client()
++
++    def test_language_prefix_with_script(self):
++        """Test that language codes with script work in i18n_patterns."""
++        # Test sr-latn (script only)
++        response = self.client.get('/sr-latn/')
++        self.assertEqual(response.status_code, 200)
++        
++        # Test zh-hans (script only)
++        response = self.client.get('/zh-hans/')
++        self.assertEqual(response.status_code, 200)
++
++    def test_language_prefix_with_script_and_region(self):
++        """Test that language codes with both script and region work in i18n_patterns."""
++        # Test en-latn-us (language-script-region)
++        response = self.client.get('/en-latn-us/')
++        self.assertEqual(response.status_code, 200)
++
++    def test_get_language_from_path(self):
++        """Test that get_language_from_path correctly extracts language codes with script and region."""
++        from django.utils.translation import trans_real
++        
++        # Test basic language-region
++        lang = trans_real.get_language_from_path('/en-us/')
++        self.assertEqual(lang, 'en-us')
++        
++        # Test language-script
++        lang = trans_real.get_language_from_path('/sr-latn/')
++        self.assertEqual(lang, 'sr-latn')
++        
++        # Test language-script-region
++        lang = trans_real.get_language_from_path('/en-latn-us/')
++        self.assertEqual(lang, 'en-latn-us')
++
++if __name__ == '__main__':
++    import django
++    from django.test.utils import get_runner
++    
++    os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.i18n.patterns.tests'
++    django.setup()
++    
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2, interactive=True)
++    failures = test_runner.run_tests(['test_i18n_script_region.I18nScriptRegionTests'])
+diff --git a/test_language_detection.py b/test_language_detection.py
+new file mode 100644
+index 0000000000..30c8d1bfd7
+--- /dev/null
++++ b/test_language_detection.py
+@@ -0,0 +1,42 @@
++import os
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++        ('de-at', 'Austrian German'),
++        ('en-latn-us', 'Latin American English'),
++    ],
++)
++
++django.setup()
++
++from django.utils.translation import trans_real
++
++# Test paths
++test_paths = [
++    '/en/',
++    '/de/',
++    '/de-at/',
++    '/de-simple-page/',
++    '/en-latn-us/',
++    '/en-us/',
++]
++
++print("Testing get_language_from_path:")
++for path in test_paths:
++    lang = trans_real.get_language_from_path(path)
++    print(f"  {path} -> {lang}")
++
++print("\nChecking language support:")
++test_codes = ['en', 'de', 'de-at', 'de-simple-page', 'en-latn-us', 'en-us']
++for code in test_codes:
++    try:
++        supported = trans_real.get_supported_language_variant(code)
++        print(f"  {code} -> {supported} (supported)")
++    except LookupError:
++        print(f"  {code} -> NOT SUPPORTED")
+diff --git a/test_locale_script_region.py b/test_locale_script_region.py
+new file mode 100644
+index 0000000000..aff80b9fa2
+--- /dev/null
++++ b/test_locale_script_region.py
+@@ -0,0 +1,83 @@
++"""
++Test script to reproduce the issue with language locales containing both script and region.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase, override_settings
++from django.urls import path
++from django.http import HttpResponse
++from django.conf.urls.i18n import i18n_patterns
++from django.test import Client
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['testserver', 'localhost'],
++    LANGUAGE_CODE='en-us',
++    LANGUAGES=[
++        ('en-us', "English"),
++        ('en-latn-us', "Latin English"),
++        ('en-Latn-US', "BCP 47 case format"),
++    ],
++    USE_I18N=True,
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++    ],
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++# Define view
++def test_view(request):
++    return HttpResponse('Success!')
++
++# Define URL patterns
++urlpatterns = []
++urlpatterns += i18n_patterns(
++    path('', test_view, name='test'),
++)
++
++# Run tests
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    from django.utils.translation import trans_real
++    
++    # First, let's test the regex directly
++    print("Testing language_code_prefix_re regex:")
++    print(f"Current regex pattern: {trans_real.language_code_prefix_re.pattern}")
++    
++    test_paths = [
++        '/en-us/',
++        '/en-latn-us/',
++        '/en-Latn-US/',
++        '/sr-Latn/',
++        '/zh-Hans/',
++    ]
++    
++    for test_path in test_paths:
++        match = trans_real.language_code_prefix_re.match(test_path)
++        if match:
++            print(f"  {test_path} -> matched: {match.group(1)}")
++        else:
++            print(f"  {test_path} -> NO MATCH")
++    
++    print("\nTesting with Django test client:")
++    client = Client()
++    
++    for lang in ['en-us', 'en-latn-us', 'en-Latn-US']:
++        response = client.get(f'/{lang}/')
++        print(f"  GET /{lang}/ -> Status: {response.status_code}")
+diff --git a/test_middleware_behavior.py b/test_middleware_behavior.py
+new file mode 100644
+index 0000000000..cd703ca384
+--- /dev/null
++++ b/test_middleware_behavior.py
+@@ -0,0 +1,61 @@
++import os
++import django
++from django.conf import settings
++from django.test import Client
++from django.urls import path, re_path
++from django.http import HttpResponse
++from django.conf.urls.i18n import i18n_patterns
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['testserver', 'localhost'],
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++        ('fr', 'French'),
++    ],
++    USE_I18N=True,
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++        'django.middleware.common.CommonMiddleware',
++    ],
++)
++
++django.setup()
++
++# URL patterns from the failing test
++urlpatterns = i18n_patterns(
++    re_path(r'^(?P<arg>[\w-]+)-page', lambda request, **arg: HttpResponse('Yes')),
++    path('simple/', lambda r: HttpResponse('Yes')),
++    re_path(r'^(.+)/(.+)/$', lambda *args: HttpResponse()),
++    prefix_default_language=False,
++)
++
++# Test with client
++client = Client()
++
++print("Testing /de-simple-page/ with no language preference:")
++response = client.get('/de-simple-page/')
++print(f"  Status: {response.status_code}")
++print(f"  Content: {response.content[:50]}...")
++
++print("\nTesting /de-simple-page/ with Accept-Language: en:")
++response = client.get('/de-simple-page/', HTTP_ACCEPT_LANGUAGE='en')
++print(f"  Status: {response.status_code}")
++print(f"  Content: {response.content[:50]}...")
++
++print("\nTesting /de-simple-page/ with Accept-Language: de:")
++response = client.get('/de-simple-page/', HTTP_ACCEPT_LANGUAGE='de')
++print(f"  Status: {response.status_code}")
++print(f"  Content: {response.content[:50]}...")
++
++# Let's also check what language is detected
++from django.utils.translation import trans_real
++
++print("\nLanguage detection:")
++print(f"  get_language_from_path('/de-simple-page/'): {trans_real.get_language_from_path('/de-simple-page/')}")
++print(f"  get_language_from_path('/en-latn-us/'): {trans_real.get_language_from_path('/en-latn-us/')}")
+diff --git a/test_regex.py b/test_regex.py
+new file mode 100644
+index 0000000000..466812fdbd
+--- /dev/null
++++ b/test_regex.py
+@@ -0,0 +1,20 @@
++import re
++
++# Current regex
++regex = re.compile(r'^/([a-z]{1,8}(?:-[a-z0-9]{1,8})*(?:@[a-z0-9]{1,20})?)(/|$)', re.IGNORECASE)
++
++test_paths = [
++    '/en-us/',
++    '/en-latn-us/',
++    '/de-simple-page/',
++    '/de/',
++    '/de-at/',
++    '/xyz/',
++]
++
++for path in test_paths:
++    match = regex.match(path)
++    if match:
++        print(f"{path} -> matched: '{match.group(1)}'")
++    else:
++        print(f"{path} -> NO MATCH")
+diff --git a/test_resolver.py b/test_resolver.py
+new file mode 100644
+index 0000000000..d520e0e4dd
+--- /dev/null
++++ b/test_resolver.py
+@@ -0,0 +1,62 @@
++import os
++import django
++from django.conf import settings
++from django.urls import resolve, Resolver404
++from django.conf.urls.i18n import i18n_patterns
++from django.http import HttpResponse
++from django.urls import path, re_path
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    ROOT_URLCONF=__name__,
++    ALLOWED_HOSTS=['testserver', 'localhost'],
++    LANGUAGE_CODE='en',
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++        ('fr', 'French'),
++    ],
++    USE_I18N=True,
++    MIDDLEWARE=[
++        'django.middleware.locale.LocaleMiddleware',
++        'django.middleware.common.CommonMiddleware',
++    ],
++)
++
++django.setup()
++
++# URL patterns from the failing test
++urlpatterns = i18n_patterns(
++    re_path(r'^(?P<arg>[\w-]+)-page', lambda request, **arg: HttpResponse('Yes')),
++    path('simple/', lambda r: HttpResponse('Yes')),
++    re_path(r'^(.+)/(.+)/$', lambda *args: HttpResponse()),
++    prefix_default_language=False,
++)
++
++# Test resolution
++from django.utils import translation
++
++test_paths = [
++    '/de-simple-page/',
++    '/de/de-simple-page/',
++    '/simple/',
++    '/de/simple/',
++]
++
++for test_path in test_paths:
++    print(f"\nTesting path: {test_path}")
++    
++    # Test with different active languages
++    for lang in ['en', 'de']:
++        translation.activate(lang)
++        print(f"  Active language: {lang}")
++        
++        try:
++            match = resolve(test_path)
++            print(f"    Resolved: {match.url_name or match.func}")
++            print(f"    Args: {match.args}")
++            print(f"    Kwargs: {match.kwargs}")
++        except Resolver404:
++            print(f"    404 - Not Found")
+diff --git a/test_supported_variant.py b/test_supported_variant.py
+new file mode 100644
+index 0000000000..e84099fa16
+--- /dev/null
++++ b/test_supported_variant.py
+@@ -0,0 +1,28 @@
++import os
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    USE_I18N=True,
++    LANGUAGES=[
++        ('en', 'English'),
++        ('de', 'German'),
++        ('de-at', 'Austrian German'),
++        ('pl', 'Polish'),
++    ],
++)
++
++django.setup()
++
++from django.utils.translation import trans_real
++
++# Test get_supported_language_variant
++test_codes = ['de', 'de-at', 'de-ch', 'de-simple-page', 'en-latn-us']
++
++for code in test_codes:
++    try:
++        result = trans_real.get_supported_language_variant(code)
++        print(f"{code} -> {result}")
++    except LookupError as e:
++        print(f"{code} -> LookupError: {e}")

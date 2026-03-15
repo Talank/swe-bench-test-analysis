@@ -1,0 +1,464 @@
+diff --git a/manual_test.sh b/manual_test.sh
+new file mode 100755
+index 000000000..ae4949862
+--- /dev/null
++++ b/manual_test.sh
+@@ -0,0 +1,79 @@
++#!/bin/bash
++# Manual test script to reproduce the issue
++
++# Create a test directory
++TEST_DIR=$(mktemp -d)
++echo "Test directory: $TEST_DIR"
++
++# Change to test directory
++cd "$TEST_DIR"
++
++# First run sphinx-quickstart to create initial project
++echo "=== First run of sphinx-quickstart ==="
++echo "Creating initial project..."
++# Use expect or similar to automate the first run
++cat > first_run.py << 'EOF'
++import sys
++sys.path.insert(0, '/testbed')
++from sphinx.cmd import quickstart as qs
++
++# Mock inputs for first run
++inputs = [
++    '.',           # Root path
++    'n',           # Separate source and build dirs
++    'Test Project', # Project name
++    'Test Author',  # Author
++    '',            # Version (default)
++    '',            # Release (default)
++    'en',          # Language
++    '',            # Source suffix (default)
++    '',            # Master document (default)
++    '',            # EPub (default)
++    '',            # autodoc
++    '',            # doctest
++    '',            # intersphinx
++    '',            # todo
++    '',            # coverage
++    '',            # imgmath
++    '',            # mathjax
++    '',            # ifconfig
++    '',            # viewcode
++    '',            # githubpages
++    '',            # Create Makefile
++    '',            # Create Windows batch file
++]
++input_iter = iter(inputs)
++
++original_term_input = qs.term_input
++def mock_term_input(prompt):
++    return next(input_iter)
++
++qs.term_input = mock_term_input
++try:
++    qs.main([])
++finally:
++    qs.term_input = original_term_input
++EOF
++
++python first_run.py
++
++echo -e "\n=== Checking if conf.py was created ==="
++if [ -f "conf.py" ]; then
++    echo "✓ conf.py exists"
++else
++    echo "✗ conf.py does not exist"
++    exit 1
++fi
++
++echo -e "\n=== Second run of sphinx-quickstart (testing the fix) ==="
++echo "Now running sphinx-quickstart again in the same directory..."
++echo "When prompted for 'Root path for the documentation', enter: ."
++echo "When prompted for 'Please enter a new root path (or just Enter to exit)', press Enter"
++echo ""
++
++# Run sphinx-quickstart interactively
++sphinx-quickstart
++
++# Clean up
++cd /
++rm -rf "$TEST_DIR"
+diff --git a/sphinx/cmd/quickstart.py b/sphinx/cmd/quickstart.py
+index a40a21073..449779903 100644
+--- a/sphinx/cmd/quickstart.py
++++ b/sphinx/cmd/quickstart.py
+@@ -95,6 +95,13 @@ def is_path(x: str) -> str:
+     return x
+ 
+ 
++def is_path_or_empty(x: str) -> str:
++    """Validator that allows empty string (for exit) or valid path."""
++    if not x:  # Allow empty string
++        return x
++    return is_path(x)
++
++
+ def allow_empty(x: str) -> str:
+     return x
+ 
+@@ -223,7 +230,7 @@ def ask_user(d: Dict) -> None:
+         print(__('sphinx-quickstart will not overwrite existing Sphinx projects.'))
+         print()
+         d['path'] = do_prompt(__('Please enter a new root path (or just Enter to exit)'),
+-                              '', is_path)
++                              '', is_path_or_empty)
+         if not d['path']:
+             sys.exit(1)
+ 
+diff --git a/test_existing_conf_exit.py b/test_existing_conf_exit.py
+new file mode 100644
+index 000000000..be982ac6d
+--- /dev/null
++++ b/test_existing_conf_exit.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python3
++"""Test for the specific bug: sphinx-quickstart should exit when Enter is pressed with existing conf.py"""
++
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++sys.path.insert(0, '/testbed')
++
++from sphinx.cmd import quickstart as qs
++
++
++def test_existing_conf_exit():
++    """Test that sphinx-quickstart exits gracefully when Enter is pressed with existing conf.py."""
++    
++    # Save original term_input
++    original_term_input = qs.term_input
++    
++    # Create a temporary directory with an existing conf.py
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create a conf.py file
++        conf_path = Path(tmpdir) / 'conf.py'
++        conf_path.write_text('# Existing conf.py\n')
++        
++        # Mock inputs
++        inputs = [
++            '',      # Press Enter to exit when asked for new path
++        ]
++        input_iter = iter(inputs)
++        
++        def mock_term_input(prompt):
++            try:
++                value = next(input_iter)
++                return value
++            except StopIteration:
++                raise AssertionError(f"Unexpected prompt: {prompt}")
++        
++        # Replace term_input with our mock
++        qs.term_input = mock_term_input
++        
++        try:
++            # Run quickstart with the tmpdir as argument
++            # Note: ask_user() calls sys.exit(1) directly when empty path is entered
++            try:
++                result = qs.main([tmpdir])
++                # If we get here, it didn't exit as expected
++                assert False, "Expected SystemExit to be raised"
++            except SystemExit as e:
++                # This is expected - check the exit code
++                assert e.code == 1, f"Expected exit code 1, got {e.code}"
++                print("✓ Test passed: sphinx-quickstart exits with code 1 when Enter is pressed")
++            
++        finally:
++            # Restore original term_input
++            qs.term_input = original_term_input
++
++
++def test_existing_conf_new_path():
++    """Test that sphinx-quickstart continues when a valid new path is provided."""
++    
++    # Save original term_input
++    original_term_input = qs.term_input
++    
++    # Create a temporary directory with an existing conf.py
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create a conf.py file
++        conf_path = Path(tmpdir) / 'conf.py'
++        conf_path.write_text('# Existing conf.py\n')
++        
++        # Create a subdirectory for the new project
++        new_dir = Path(tmpdir) / 'newproject'
++        new_dir.mkdir()
++        
++        # Mock inputs
++        inputs = [
++            str(new_dir),         # New path when prompted
++            'n',                  # Separate source and build dirs
++            'Test Project',       # Project name
++            'Test Author',        # Author
++            '',                   # Version (default)
++            '',                   # Release (default)
++            'en',                 # Language
++            '',                   # Source suffix (default)
++            '',                   # Master document (default)
++            '',                   # EPub (default)
++            '',                   # autodoc
++            '',                   # doctest
++            '',                   # intersphinx
++            '',                   # todo
++            '',                   # coverage
++            '',                   # imgmath
++            '',                   # mathjax
++            '',                   # ifconfig
++            '',                   # viewcode
++            '',                   # githubpages
++            '',                   # Create Makefile
++            '',                   # Create Windows batch file
++        ]
++        input_iter = iter(inputs)
++        
++        def mock_term_input(prompt):
++            try:
++                return next(input_iter)
++            except StopIteration:
++                raise AssertionError(f"Unexpected prompt: {prompt}")
++        
++        # Replace term_input with our mock
++        qs.term_input = mock_term_input
++        
++        try:
++            # Run quickstart with the tmpdir as argument
++            result = qs.main([tmpdir])
++            
++            # Should complete successfully
++            assert result == 0, f"Expected exit code 0, got {result}"
++            
++            # Check that conf.py was created in the new directory
++            new_conf_path = new_dir / 'conf.py'
++            assert new_conf_path.exists(), "conf.py should be created in new directory"
++            print("✓ Test passed: sphinx-quickstart creates project in new directory")
++            
++        finally:
++            # Restore original term_input
++            qs.term_input = original_term_input
++
++
++if __name__ == '__main__':
++    print("Testing sphinx-quickstart fix for existing conf.py...")
++    test_existing_conf_exit()
++    test_existing_conf_new_path()
++    print("\nAll tests passed!")
+diff --git a/test_manual.py b/test_manual.py
+new file mode 100644
+index 000000000..7c55139f6
+--- /dev/null
++++ b/test_manual.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python3
++"""Manual test to verify the fix works interactively."""
++
++import os
++import sys
++import tempfile
++
++# Create a temporary directory with conf.py
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Create a conf.py file
++    conf_path = os.path.join(tmpdir, 'conf.py')
++    with open(conf_path, 'w') as f:
++        f.write('# Existing conf.py\n')
++    
++    print(f"Created test directory: {tmpdir}")
++    print(f"Created conf.py at: {conf_path}")
++    print("\nTo test the fix manually:")
++    print(f"1. cd {tmpdir}")
++    print("2. sphinx-quickstart")
++    print("3. When prompted for root path, enter: .")
++    print("4. When prompted for new root path, press Enter")
++    print("5. The program should exit gracefully\n")
++    
++    # Change to the test directory and run sphinx-quickstart
++    old_cwd = os.getcwd()
++    os.chdir(tmpdir)
++    
++    print("Running sphinx-quickstart in the test directory...")
++    print("When prompted for 'Root path for the documentation', enter: .")
++    print("When prompted for 'Please enter a new root path (or just Enter to exit)', press Enter\n")
++    
++    os.system('sphinx-quickstart')
++    
++    os.chdir(old_cwd)
+diff --git a/test_quickstart_fix.py b/test_quickstart_fix.py
+new file mode 100644
+index 000000000..2e20a2033
+--- /dev/null
++++ b/test_quickstart_fix.py
+@@ -0,0 +1,115 @@
++#!/usr/bin/env python3
++"""Test script to reproduce and verify the sphinx-quickstart issue fix."""
++
++import os
++import sys
++import tempfile
++import shutil
++from unittest.mock import patch
++
++# Add the testbed to the path
++sys.path.insert(0, '/testbed')
++
++from sphinx.cmd.quickstart import main, term_input
++
++
++def test_quickstart_with_existing_conf():
++    """Test that sphinx-quickstart exits gracefully when Enter is pressed with existing conf.py."""
++    
++    # Create a temporary directory with an existing conf.py
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create a conf.py file
++        conf_path = os.path.join(tmpdir, 'conf.py')
++        with open(conf_path, 'w') as f:
++            f.write('# Existing conf.py\n')
++        
++        # Change to the temporary directory
++        old_cwd = os.getcwd()
++        os.chdir(tmpdir)
++        
++        try:
++            # Mock the input to simulate pressing Enter when asked for a new path
++            with patch('builtins.input') as mock_input:
++                # First call is for root path (use current dir)
++                # Second call is when asked for new path (press Enter to exit)
++                mock_input.side_effect = ['.', '']
++                
++                # Run sphinx-quickstart
++                result = main([])
++                
++                # Should exit with code 1
++                assert result == 1, f"Expected exit code 1, got {result}"
++                print("✓ Test passed: sphinx-quickstart exits with code 1 when Enter is pressed")
++                
++        finally:
++            os.chdir(old_cwd)
++
++
++def test_quickstart_with_new_path():
++    """Test that sphinx-quickstart continues when a valid new path is provided."""
++    
++    # Create a temporary directory with an existing conf.py
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create a conf.py file
++        conf_path = os.path.join(tmpdir, 'conf.py')
++        with open(conf_path, 'w') as f:
++            f.write('# Existing conf.py\n')
++        
++        # Create a subdirectory for the new project
++        new_dir = os.path.join(tmpdir, 'newproject')
++        os.makedirs(new_dir)
++        
++        # Change to the temporary directory
++        old_cwd = os.getcwd()
++        os.chdir(tmpdir)
++        
++        try:
++            # Mock the input to simulate providing a new path
++            with patch('builtins.input') as mock_input:
++                # Simulate user inputs
++                mock_input.side_effect = [
++                    '.',  # Root path (current dir with conf.py)
++                    'newproject',  # New path when prompted
++                    'n',  # Separate source and build dirs
++                    'Test Project',  # Project name
++                    'Test Author',  # Author
++                    '',  # Version (default)
++                    '',  # Release (default)
++                    'en',  # Language
++                    '',  # Source suffix (default)
++                    '',  # Master document (default)
++                    '',  # EPub (default)
++                    '',  # autodoc
++                    '',  # doctest
++                    '',  # intersphinx
++                    '',  # todo
++                    '',  # coverage
++                    '',  # imgmath
++                    '',  # mathjax
++                    '',  # ifconfig
++                    '',  # viewcode
++                    '',  # githubpages
++                    '',  # Create Makefile
++                    '',  # Create Windows batch file
++                ]
++                
++                # Run sphinx-quickstart
++                result = main([])
++                
++                # Should complete successfully
++                assert result == 0, f"Expected exit code 0, got {result}"
++                
++                # Check that conf.py was created in the new directory
++                new_conf_path = os.path.join(new_dir, 'conf.py')
++                assert os.path.exists(new_conf_path), "conf.py should be created in new directory"
++                print("✓ Test passed: sphinx-quickstart creates project in new directory")
++                
++        finally:
++            os.chdir(old_cwd)
++
++
++if __name__ == '__main__':
++    print("Testing sphinx-quickstart fix...")
++    test_quickstart_with_existing_conf()
++    test_quickstart_with_new_path()
++    print("\nAll tests passed!")
+diff --git a/test_validator.py b/test_validator.py
+new file mode 100644
+index 000000000..b5218134d
+--- /dev/null
++++ b/test_validator.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++"""Test the validator functions directly."""
++
++import sys
++sys.path.insert(0, '/testbed')
++
++from sphinx.cmd.quickstart import is_path, is_path_or_empty, ValidationError
++
++
++def test_is_path_or_empty():
++    """Test the is_path_or_empty validator."""
++    
++    # Test 1: Empty string should be allowed
++    try:
++        result = is_path_or_empty('')
++        assert result == '', f"Expected empty string, got {repr(result)}"
++        print("✓ Test 1 passed: Empty string is allowed")
++    except ValidationError as e:
++        print(f"✗ Test 1 failed: Empty string raised ValidationError: {e}")
++        return False
++    
++    # Test 2: Valid path should work
++    try:
++        result = is_path_or_empty('/tmp')
++        assert result == '/tmp', f"Expected '/tmp', got {repr(result)}"
++        print("✓ Test 2 passed: Valid path is accepted")
++    except ValidationError as e:
++        print(f"✗ Test 2 failed: Valid path raised ValidationError: {e}")
++        return False
++    
++    # Test 3: Invalid path should raise ValidationError
++    try:
++        result = is_path_or_empty('/this/path/does/not/exist/12345')
++        print(f"✗ Test 3 failed: Invalid path did not raise ValidationError")
++        return False
++    except ValidationError:
++        print("✓ Test 3 passed: Invalid path raises ValidationError")
++    
++    return True
++
++
++if __name__ == '__main__':
++    print("Testing is_path_or_empty validator...")
++    if test_is_path_or_empty():
++        print("\nAll validator tests passed!")
++    else:
++        print("\nSome validator tests failed!")

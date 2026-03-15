@@ -1,0 +1,500 @@
+diff --git a/sklearn/linear_model/logistic.py b/sklearn/linear_model/logistic.py
+index e4ea696ce..6d5233872 100644
+--- a/sklearn/linear_model/logistic.py
++++ b/sklearn/linear_model/logistic.py
+@@ -922,7 +922,18 @@ def _log_reg_scoring_path(X, y, train, test, pos_class=None, Cs=10,
+         check_input=False, max_squared_sum=max_squared_sum,
+         sample_weight=sample_weight)
+ 
+-    log_reg = LogisticRegression(fit_intercept=fit_intercept)
++    log_reg = LogisticRegression(fit_intercept=fit_intercept,
++                                 multi_class=multi_class,
++                                 solver=solver,
++                                 penalty=penalty,
++                                 dual=dual,
++                                 tol=tol,
++                                 C=1.0,  # C is not used here as coef_ is set manually
++                                 intercept_scaling=intercept_scaling,
++                                 class_weight=class_weight,
++                                 random_state=random_state,
++                                 max_iter=max_iter,
++                                 verbose=verbose)
+ 
+     # The score method of Logistic Regression has a classes_ attribute.
+     if multi_class == 'ovr':
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..df42aff4a
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,90 @@
++"""Test edge cases for the multinomial scoring fix."""
++import numpy as np
++from sklearn.linear_model import LogisticRegressionCV
++from sklearn.metrics import log_loss, make_scorer
++import warnings
++
++
++def test_custom_scorer_with_multinomial():
++    """Test that custom scorers work correctly with multinomial."""
++    np.random.seed(42)
++    
++    X = np.random.randn(100, 5)
++    y = np.random.choice(['a', 'b', 'c'], size=100)
++    
++    # Test with built-in scorer that uses predict_proba
++    lr_cv = LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',  # This uses predict_proba internally
++        cv=3,
++        random_state=42
++    )
++    
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        lr_cv.fit(X, y)
++    
++    # Should not raise any errors
++    assert lr_cv.C_.shape[0] > 0
++    print("Scorer with predict_proba test passed")
++
++
++def test_binary_with_multinomial():
++    """Test binary classification with multinomial setting."""
++    np.random.seed(42)
++    
++    X = np.random.randn(100, 5)
++    y = np.random.choice([0, 1], size=100)
++    
++    lr_cv = LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")
++        lr_cv.fit(X, y)
++    
++    # Should work fine with binary data
++    assert lr_cv.predict_proba(X).shape == (100, 2)
++    print("Binary with multinomial test passed")
++
++
++def test_solver_compatibility():
++    """Test that different solvers work correctly."""
++    np.random.seed(42)
++    
++    X = np.random.randn(50, 3)
++    y = np.random.choice(['a', 'b', 'c'], size=50)
++    
++    solvers = ['lbfgs', 'newton-cg', 'sag', 'saga']
++    
++    for solver in solvers:
++        lr_cv = LogisticRegressionCV(
++            multi_class='multinomial',
++            solver=solver,
++            scoring='neg_log_loss',
++            cv=2,
++            random_state=42,
++            max_iter=200
++        )
++        
++        with warnings.catch_warnings():
++            warnings.simplefilter("ignore")
++            lr_cv.fit(X, y)
++        
++        # Should work with all compatible solvers
++        assert lr_cv.C_.shape[0] > 0
++        print(f"Solver {solver} test passed")
++
++
++if __name__ == "__main__":
++    print("Testing edge cases...")
++    test_custom_scorer_with_multinomial()
++    test_binary_with_multinomial()
++    test_solver_compatibility()
++    print("\nAll edge case tests passed!")
+diff --git a/test_fix_comprehensive.py b/test_fix_comprehensive.py
+new file mode 100644
+index 000000000..6a3a18968
+--- /dev/null
++++ b/test_fix_comprehensive.py
+@@ -0,0 +1,115 @@
++import numpy as np
++from sklearn import preprocessing, linear_model, utils
++from sklearn.metrics import log_loss
++
++def test_multinomial_scoring():
++    """Test that LogisticRegressionCV with multinomial uses correct scoring."""
++    np.random.seed(seed=1234)
++    
++    samples = 200
++    features = 5
++    
++    X = np.random.random(size=(samples, features))
++    y = np.random.choice(['a', 'b', 'c'], size=samples)
++    
++    # Test with LogisticRegressionCV using multinomial
++    lr_cv = linear_model.LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_cv.fit(X, y)
++    
++    # Get the best C value
++    best_C = lr_cv.C_[0]
++    
++    # Fit a regular LogisticRegression with the same parameters
++    lr = linear_model.LogisticRegression(
++        multi_class='multinomial',
++        solver='lbfgs',
++        C=best_C,
++        random_state=42
++    )
++    lr.fit(X, y)
++    
++    # The probabilities should be similar (not exact due to CV)
++    probs_cv = lr_cv.predict_proba(X)
++    probs_lr = lr.predict_proba(X)
++    
++    # Calculate log loss for both
++    loss_cv = log_loss(y, probs_cv)
++    loss_lr = log_loss(y, probs_lr)
++    
++    print(f"LogisticRegressionCV log loss: {loss_cv}")
++    print(f"LogisticRegression log loss: {loss_lr}")
++    print(f"Difference: {abs(loss_cv - loss_lr)}")
++    
++    # They should be reasonably close
++    assert abs(loss_cv - loss_lr) < 0.1, f"Log losses differ too much: {loss_cv} vs {loss_lr}"
++    
++    # Test that the scoring during CV was done with multinomial
++    # The scores_ attribute contains the cross-validation scores
++    # They should be negative log losses calculated with multinomial approach
++    print(f"\nCV scores shape: {lr_cv.scores_['a'].shape}")
++    print(f"Best score from CV: {lr_cv.scores_['a'].mean(axis=0).max()}")
++    
++    return True
++
++def test_ovr_vs_multinomial_scoring():
++    """Test that OvR and multinomial give different scores as expected."""
++    np.random.seed(seed=42)
++    
++    samples = 100
++    features = 5
++    
++    X = np.random.random(size=(samples, features))
++    y = np.random.choice(['a', 'b', 'c'], size=samples)
++    
++    # Test OvR
++    lr_ovr = linear_model.LogisticRegressionCV(
++        multi_class='ovr',
++        solver='liblinear',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_ovr.fit(X, y)
++    
++    # Test multinomial
++    lr_multi = linear_model.LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_multi.fit(X, y)
++    
++    # Get predictions
++    probs_ovr = lr_ovr.predict_proba(X)
++    probs_multi = lr_multi.predict_proba(X)
++    
++    # Calculate log losses
++    loss_ovr = log_loss(y, probs_ovr)
++    loss_multi = log_loss(y, probs_multi)
++    
++    print(f"\nOvR log loss: {loss_ovr}")
++    print(f"Multinomial log loss: {loss_multi}")
++    
++    # They should be different
++    assert abs(loss_ovr - loss_multi) > 0.01, "OvR and multinomial should give different results"
++    
++    return True
++
++if __name__ == "__main__":
++    print("Testing multinomial scoring...")
++    test_multinomial_scoring()
++    
++    print("\n" + "="*50 + "\n")
++    
++    print("Testing OvR vs multinomial...")
++    test_ovr_vs_multinomial_scoring()
++    
++    print("\nAll tests passed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 000000000..c45c14498
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,110 @@
++import numpy as np
++from sklearn import preprocessing, linear_model, utils
++
++def ovr_approach(decision_function):
++    
++    probs = 1. / (1. + np.exp(-decision_function))
++    probs = probs / probs.sum(axis=1).reshape((probs.shape[0], -1))
++    
++    return probs
++
++def score_from_probs(probs, y_bin):
++    
++    return (y_bin*np.log(probs)).sum(axis=1).mean()
++    
++    
++np.random.seed(seed=1234)
++
++samples  = 200
++features = 5
++folds    = 10
++
++# Use a "probabilistic" scorer
++scorer = 'neg_log_loss'
++
++x = np.random.random(size=(samples, features))
++y = np.random.choice(['a', 'b', 'c'], size=samples)
++
++test  = np.random.choice(range(samples), size=int(samples/float(folds)), replace=False)
++train = [idx for idx in range(samples) if idx not in test]
++
++# Binarize the labels for y[test]
++lb = preprocessing.label.LabelBinarizer()
++lb.fit(y[test])
++y_bin = lb.transform(y[test])
++
++# What does _log_reg_scoring_path give us for the score?
++coefs, _, scores, _ = linear_model.logistic._log_reg_scoring_path(x, y, train, test, fit_intercept=True, scoring=scorer, multi_class='multinomial')
++
++# Choose a single C to look at, for simplicity
++c_index = 0
++coefs = coefs[c_index]
++scores = scores[c_index]
++
++# Initialise a LogisticRegression() instance, as in 
++# https://github.com/scikit-learn/scikit-learn/blob/master/sklearn/linear_model/logistic.py#L922
++existing_log_reg = linear_model.LogisticRegression(fit_intercept=True)
++existing_log_reg.coef_      = coefs[:, :-1]
++existing_log_reg.intercept_ = coefs[:, -1]
++
++existing_dec_fn = existing_log_reg.decision_function(x[test])
++
++existing_probs_builtin = existing_log_reg.predict_proba(x[test])
++
++# OvR approach
++existing_probs_ovr = ovr_approach(existing_dec_fn)
++
++# multinomial approach
++existing_probs_multi = utils.extmath.softmax(existing_dec_fn)
++
++# If we initialise our LogisticRegression() instance, with multi_class='multinomial'
++new_log_reg = linear_model.LogisticRegression(fit_intercept=True, multi_class='multinomial')
++new_log_reg.coef_      = coefs[:, :-1]
++new_log_reg.intercept_ = coefs[:, -1]
++
++new_dec_fn = new_log_reg.decision_function(x[test])
++
++new_probs_builtin = new_log_reg.predict_proba(x[test])
++
++# OvR approach
++new_probs_ovr = ovr_approach(new_dec_fn)
++
++# multinomial approach
++new_probs_multi = utils.extmath.softmax(new_dec_fn)
++
++print('score returned by _log_reg_scoring_path')
++print(scores)
++# -1.10566998
++
++print('OvR LR decision function == multinomial LR decision function?')
++print((existing_dec_fn == new_dec_fn).all())
++# True
++
++print('score calculated via OvR method (either decision function)')
++print(score_from_probs(existing_probs_ovr, y_bin))
++# -1.10566997908
++
++print('score calculated via multinomial method (either decision function)')
++print(score_from_probs(existing_probs_multi, y_bin))
++# -1.11426297223
++
++print('probs predicted by existing_log_reg.predict_proba() == probs generated via the OvR approach?')
++print((existing_probs_builtin == existing_probs_ovr).all())
++# True
++
++print('probs predicted by existing_log_reg.predict_proba() == probs generated via the multinomial approach?')
++print((existing_probs_builtin == existing_probs_multi).any())
++# False
++
++print('probs predicted by new_log_reg.predict_proba() == probs generated via the OvR approach?')
++print((new_probs_builtin == new_probs_ovr).all())
++# False
++
++print('probs predicted by new_log_reg.predict_proba() == probs generated via the multinomial approach?')
++print((new_probs_builtin == new_probs_multi).any())
++# True
++
++# So even though multi_class='multinomial' was specified in _log_reg_scoring_path(), 
++# the score it returned was the score calculated via OvR, not multinomial.
++# We can see that log_reg.predict_proba() returns the OvR predicted probabilities,
++# not the multinomial predicted probabilities.
+diff --git a/test_multinomial_scoring_bug.py b/test_multinomial_scoring_bug.py
+new file mode 100644
+index 000000000..8961c743d
+--- /dev/null
++++ b/test_multinomial_scoring_bug.py
+@@ -0,0 +1,137 @@
++"""Test for the multinomial scoring bug fix."""
++import numpy as np
++from sklearn.linear_model import LogisticRegressionCV
++from sklearn.metrics import log_loss
++from sklearn.model_selection import cross_val_score
++import pytest
++
++
++def test_multinomial_cv_scoring_uses_correct_multiclass():
++    """Test that LogisticRegressionCV with multi_class='multinomial' uses
++    multinomial (softmax) probabilities for scoring, not OvR probabilities.
++    
++    This is a regression test for issue #8720.
++    """
++    np.random.seed(42)
++    
++    # Generate multiclass data
++    n_samples = 200
++    n_features = 5
++    n_classes = 3
++    
++    X = np.random.randn(n_samples, n_features)
++    y = np.random.choice(n_classes, size=n_samples)
++    
++    # Fit LogisticRegressionCV with multinomial
++    lr_cv = LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_cv.fit(X, y)
++    
++    # Get the probabilities from the fitted model
++    probs_cv = lr_cv.predict_proba(X)
++    
++    # Calculate the log loss using these probabilities
++    # This should match what was used during CV
++    log_loss_multinomial = -log_loss(y, probs_cv)
++    
++    # The best score from CV should be close to the log loss
++    # calculated with multinomial probabilities
++    best_score = lr_cv.scores_[0].mean(axis=0).max()
++    
++    # They won't be exactly equal due to CV, but should be close
++    assert abs(best_score - log_loss_multinomial) < 0.1, (
++        f"CV score ({best_score}) doesn't match multinomial log loss "
++        f"({log_loss_multinomial})"
++    )
++    
++    # Also verify that the model is indeed using multinomial
++    assert lr_cv.multi_class == 'multinomial'
++    
++    # Test with cross_val_score to ensure consistency
++    cv_scores = cross_val_score(
++        LogisticRegressionCV(
++            multi_class='multinomial',
++            solver='lbfgs',
++            cv=3,
++            random_state=42
++        ),
++        X, y,
++        scoring='neg_log_loss',
++        cv=3
++    )
++    
++    # The mean CV score should be reasonable (not too different from the model's score)
++    assert cv_scores.mean() > -2.0, f"CV scores seem unreasonable: {cv_scores}"
++
++
++def test_ovr_vs_multinomial_cv_scoring():
++    """Test that OvR and multinomial CV scoring produce different results."""
++    np.random.seed(42)
++    
++    # Generate multiclass data
++    n_samples = 150
++    n_features = 4
++    n_classes = 3
++    
++    X = np.random.randn(n_samples, n_features)
++    # Create somewhat separable classes
++    y = np.array([i // (n_samples // n_classes) for i in range(n_samples)])
++    X[y == 0] += [1, 0, 0, 0]
++    X[y == 1] += [0, 1, 0, 0]
++    X[y == 2] += [0, 0, 1, 0]
++    
++    # Fit with OvR
++    lr_ovr = LogisticRegressionCV(
++        multi_class='ovr',
++        solver='liblinear',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_ovr.fit(X, y)
++    
++    # Fit with multinomial
++    lr_multi = LogisticRegressionCV(
++        multi_class='multinomial',
++        solver='lbfgs',
++        scoring='neg_log_loss',
++        cv=3,
++        random_state=42
++    )
++    lr_multi.fit(X, y)
++    
++    # Get best scores
++    best_score_ovr = lr_ovr.scores_[0].mean(axis=0).max()
++    best_score_multi = lr_multi.scores_[0].mean(axis=0).max()
++    
++    # They should be different
++    assert abs(best_score_ovr - best_score_multi) > 0.01, (
++        f"OvR score ({best_score_ovr}) and multinomial score ({best_score_multi}) "
++        "should be different"
++    )
++    
++    # Verify the probabilities are different
++    probs_ovr = lr_ovr.predict_proba(X[:10])
++    probs_multi = lr_multi.predict_proba(X[:10])
++    
++    # The probabilities should not be identical
++    assert not np.allclose(probs_ovr, probs_multi, rtol=1e-3), (
++        "OvR and multinomial probabilities should be different"
++    )
++
++
++if __name__ == "__main__":
++    print("Testing multinomial CV scoring bug fix...")
++    test_multinomial_cv_scoring_uses_correct_multiclass()
++    print("PASSED: Multinomial CV scoring test passed")
++    
++    print("\nTesting OvR vs multinomial CV scoring...")
++    test_ovr_vs_multinomial_cv_scoring()
++    print("PASSED: OvR vs multinomial test passed")
++    
++    print("\nAll tests passed!")

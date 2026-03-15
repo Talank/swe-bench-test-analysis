@@ -1,0 +1,171 @@
+diff --git a/django/db/backends/postgresql/client.py b/django/db/backends/postgresql/client.py
+index 4c9bd63546..3b5ddafaca 100644
+--- a/django/db/backends/postgresql/client.py
++++ b/django/db/backends/postgresql/client.py
+@@ -32,9 +32,9 @@ class DatabaseClient(BaseDatabaseClient):
+             args += ["-h", host]
+         if port:
+             args += ["-p", str(port)]
++        args.extend(parameters)
+         if dbname:
+             args += [dbname]
+-        args.extend(parameters)
+ 
+         env = {}
+         if passwd:
+diff --git a/test_dbshell_issue.py b/test_dbshell_issue.py
+new file mode 100644
+index 0000000000..ae620b7c2e
+--- /dev/null
++++ b/test_dbshell_issue.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python
++"""Test script to reproduce the dbshell parameter ordering issue."""
++
++# Direct import without Django setup
++from django.db.backends.postgresql.client import DatabaseClient
++
++# Test the current behavior
++settings_dict = {
++    'NAME': 'test_db',
++    'USER': 'test_user',
++    'PASSWORD': 'test_password',
++    'HOST': 'localhost',
++    'PORT': '5432',
++}
++
++# Test with parameters like "-c" and a SQL query
++parameters = ['-c', 'select * from some_table;']
++
++args, env = DatabaseClient.settings_to_cmd_args_env(settings_dict, parameters)
++
++print("Current argument order:")
++print("args:", args)
++print("\nExpected argument order (parameters before dbname):")
++expected_args = ['psql', '-U', 'test_user', '-h', 'localhost', '-p', '5432', '-c', 'select * from some_table;', 'test_db']
++print("args:", expected_args)
++
++print("\nIssue: Parameters are placed AFTER the database name, but psql expects them BEFORE.")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..96bb4a3a4c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python
++"""Test edge cases for the PostgreSQL dbshell parameter ordering fix."""
++
++from django.db.backends.postgresql.client import DatabaseClient
++
++def test_case(name, settings_dict, parameters, expected_args):
++    args, env = DatabaseClient.settings_to_cmd_args_env(settings_dict, parameters)
++    success = args == expected_args
++    print(f"\nTest: {name}")
++    print(f"  Result: {'✓ PASS' if success else '✗ FAIL'}")
++    if not success:
++        print(f"  Expected: {expected_args}")
++        print(f"  Got:      {args}")
++    else:
++        print(f"  Command: {' '.join(args)}")
++    return success
++
++# Test 1: No parameters
++test_case(
++    "No parameters",
++    {'NAME': 'mydb', 'USER': 'user'},
++    [],
++    ['psql', '-U', 'user', 'mydb']
++)
++
++# Test 2: Multiple parameters
++test_case(
++    "Multiple parameters",
++    {'NAME': 'mydb', 'USER': 'user'},
++    ['-c', 'SELECT 1;', '-t', '-A'],
++    ['psql', '-U', 'user', '-c', 'SELECT 1;', '-t', '-A', 'mydb']
++)
++
++# Test 3: No database name (uses default 'postgres')
++test_case(
++    "No database name",
++    {'USER': 'user'},
++    ['-c', 'SELECT 1;'],
++    ['psql', '-U', 'user', '-c', 'SELECT 1;', 'postgres']
++)
++
++# Test 4: Service without database name
++test_case(
++    "Service without database",
++    {'OPTIONS': {'service': 'myservice'}},
++    ['-c', 'SELECT 1;'],
++    ['psql', '-c', 'SELECT 1;']
++)
++
++# Test 5: All connection parameters with options
++test_case(
++    "Full connection with parameters",
++    {
++        'NAME': 'mydb',
++        'USER': 'user',
++        'HOST': 'server.com',
++        'PORT': '5433'
++    },
++    ['--list', '--tuples-only'],
++    ['psql', '-U', 'user', '-h', 'server.com', '-p', '5433', '--list', '--tuples-only', 'mydb']
++)
+diff --git a/test_psql_command.py b/test_psql_command.py
+new file mode 100644
+index 0000000000..8f822ffd95
+--- /dev/null
++++ b/test_psql_command.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python
++"""Test that demonstrates the fix for psql parameter ordering."""
++
++from django.db.backends.postgresql.client import DatabaseClient
++
++# Test case from the problem statement
++settings_dict = {
++    'NAME': 'some_database',
++    'USER': 'postgres',
++    'HOST': 'localhost',
++}
++
++# Parameters that would be passed via: ./manage.py dbshell -- -c "select * from some_table;"
++parameters = ['-c', 'select * from some_table;']
++
++args, env = DatabaseClient.settings_to_cmd_args_env(settings_dict, parameters)
++
++print("Generated psql command:")
++print(" ".join(args))
++print()
++
++# Verify the order is correct
++expected_order = ['psql', '-U', 'postgres', '-h', 'localhost', '-c', 'select * from some_table;', 'some_database']
++if args == expected_order:
++    print("✓ SUCCESS: Parameters are correctly placed before the database name")
++    print("  This will allow psql to properly execute the command without warnings")
++else:
++    print("✗ FAILED: Parameters are in wrong order")
++    print(f"  Expected: {expected_order}")
++    print(f"  Got:      {args}")
+diff --git a/tests/dbshell/test_postgresql.py b/tests/dbshell/test_postgresql.py
+index 02924d0bcc..d08cbeea3d 100644
+--- a/tests/dbshell/test_postgresql.py
++++ b/tests/dbshell/test_postgresql.py
+@@ -154,7 +154,14 @@ class PostgreSqlDbshellCommandTestCase(SimpleTestCase):
+     def test_parameters(self):
+         self.assertEqual(
+             self.settings_to_cmd_args_env({"NAME": "dbname"}, ["--help"]),
+-            (["psql", "dbname", "--help"], None),
++            (["psql", "--help", "dbname"], None),
++        )
++
++    def test_parameters_with_command(self):
++        # Test the specific case from the problem statement
++        self.assertEqual(
++            self.settings_to_cmd_args_env({"NAME": "dbname"}, ["-c", "select * from some_table;"]),
++            (["psql", "-c", "select * from some_table;", "dbname"], None),
+         )
+ 
+     @skipUnless(connection.vendor == "postgresql", "Requires a PostgreSQL connection")

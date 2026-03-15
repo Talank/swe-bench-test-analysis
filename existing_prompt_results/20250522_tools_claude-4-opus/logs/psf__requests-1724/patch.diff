@@ -1,0 +1,455 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..84c78e8a
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Reproduce the Unicode method name issue."""
++
++import requests
++import tempfile
++import os
++
++# Create a temporary file with some binary content
++with tempfile.NamedTemporaryFile(delete=False) as f:
++    f.write(b'\xcf\xfa\xed\xfe')  # Some binary data
++    temp_file = f.name
++
++try:
++    print("Test 1: Using str method name (should work)")
++    files = {u'file': open(temp_file, u'rb')}
++    response = requests.request(method='POST', url=u'http://httpbin.org/post', files=files)
++    print("Success! Status code:", response.status_code)
++    files['file'].close()
++    
++    print("\nTest 2: Using unicode method name (currently fails)")
++    files = {u'file': open(temp_file, u'rb')}
++    response = requests.request(method=u'POST', url=u'http://httpbin.org/post', files=files)
++    print("Success! Status code:", response.status_code)
++    files['file'].close()
++    
++except Exception as e:
++    print("Error:", type(e).__name__, str(e))
++    if 'files' in locals() and 'file' in files:
++        files['file'].close()
++finally:
++    # Clean up
++    if os.path.exists(temp_file):
++        os.unlink(temp_file)
+diff --git a/requests/models.py b/requests/models.py
+index f82f56a3..2d49061f 100644
+--- a/requests/models.py
++++ b/requests/models.py
+@@ -307,7 +307,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+         """Prepares the given HTTP method."""
+         self.method = method
+         if self.method is not None:
+-            self.method = self.method.upper()
++            self.method = to_native_string(self.method.upper())
+ 
+     def prepare_url(self, url, params):
+         """Prepares the given HTTP URL."""
+diff --git a/requests/sessions.py b/requests/sessions.py
+index cc72f65d..c6700dec 100644
+--- a/requests/sessions.py
++++ b/requests/sessions.py
+@@ -16,7 +16,7 @@ from .compat import cookielib, OrderedDict, urljoin, urlparse, urlunparse
+ from .cookies import cookiejar_from_dict, extract_cookies_to_jar, RequestsCookieJar
+ from .models import Request, PreparedRequest
+ from .hooks import default_hooks, dispatch_hook
+-from .utils import to_key_val_list, default_headers
++from .utils import to_key_val_list, default_headers, to_native_string
+ from .exceptions import TooManyRedirects, InvalidSchema
+ from .structures import CaseInsensitiveDict
+ 
+@@ -311,7 +311,7 @@ class Session(SessionRedirectMixin):
+         """
+         # Create the Request.
+         req = Request(
+-            method = method.upper(),
++            method = to_native_string(method.upper()),
+             url = url,
+             headers = headers,
+             files = files,
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..76c6859a
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test edge cases for the unicode method fix."""
++
++import sys
++import os
++
++# Ensure we're using the local requests module
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++from requests.models import PreparedRequest
++from requests.compat import is_py2, builtin_str
++
++def test_none_method():
++    """Test that None method is handled correctly."""
++    p = PreparedRequest()
++    p.prepare_method(None)
++    assert p.method is None
++    print("✓ None method test passed")
++
++def test_empty_string_method():
++    """Test that empty string method is handled correctly."""
++    p = PreparedRequest()
++    p.prepare_method('')
++    assert p.method == ''
++    assert isinstance(p.method, builtin_str)
++    print("✓ Empty string method test passed")
++
++def test_already_native_string():
++    """Test that native string methods are not affected."""
++    p = PreparedRequest()
++    p.prepare_method('GET')
++    assert p.method == 'GET'
++    assert isinstance(p.method, builtin_str)
++    print("✓ Native string method test passed")
++
++def test_lowercase_unicode_method():
++    """Test that lowercase unicode methods are uppercased correctly."""
++    p = PreparedRequest()
++    p.prepare_method(u'get')
++    assert p.method == 'GET'
++    assert isinstance(p.method, builtin_str)
++    print("✓ Lowercase unicode method test passed")
++
++def test_mixed_case_unicode_method():
++    """Test that mixed case unicode methods are handled correctly."""
++    p = PreparedRequest()
++    p.prepare_method(u'PoSt')
++    assert p.method == 'POST'
++    assert isinstance(p.method, builtin_str)
++    print("✓ Mixed case unicode method test passed")
++
++def test_non_ascii_method():
++    """Test that non-ASCII methods raise appropriate errors."""
++    p = PreparedRequest()
++    try:
++        # This should fail because HTTP methods must be ASCII
++        p.prepare_method(u'PÖST')
++        # If we get here in Python 2, it should have been encoded
++        if is_py2:
++            # In Python 2, to_native_string will encode using ASCII by default
++            # which should fail for non-ASCII characters
++            assert False, "Should have raised an error for non-ASCII method"
++    except (UnicodeEncodeError, UnicodeDecodeError):
++        print("✓ Non-ASCII method correctly raised encoding error")
++        return
++    
++    # In Python 3, it might not fail immediately but would fail later
++    print("✓ Non-ASCII method test passed (may fail later in request)")
++
++if __name__ == '__main__':
++    print(f"Python version: {sys.version}")
++    print(f"Python 2: {is_py2}")
++    print("=" * 60)
++    
++    test_none_method()
++    test_empty_string_method()
++    test_already_native_string()
++    test_lowercase_unicode_method()
++    test_mixed_case_unicode_method()
++    test_non_ascii_method()
++    
++    print("\n" + "=" * 60)
++    print("All edge case tests passed! ✓")
+diff --git a/test_unicode_method.py b/test_unicode_method.py
+new file mode 100644
+index 00000000..71c68059
+--- /dev/null
++++ b/test_unicode_method.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test unicode method names with binary data."""
++
++import sys
++import tempfile
++import os
++
++# Add the testbed directory to sys.path to use the local version
++sys.path.insert(0, '/testbed')
++
++from requests import Request, PreparedRequest, Session
++import requests
++
++# Test direct PreparedRequest usage
++def test_prepared_request():
++    print("Testing PreparedRequest with unicode method...")
++    p = PreparedRequest()
++    p.prepare(
++        method=u'POST',
++        url='http://httpbin.org/post',
++        headers={},
++        files=None,
++        data=None,
++        params=None,
++        auth=None,
++        cookies=None,
++        hooks=None,
++    )
++    # Check that method is a native string
++    if sys.version_info[0] == 2:
++        assert isinstance(p.method, str), "Method should be native str in Python 2"
++        assert not isinstance(p.method, unicode), "Method should not be unicode in Python 2"
++    else:
++        assert isinstance(p.method, str), "Method should be str in Python 3"
++    
++    assert p.method == 'POST', f"Method should be 'POST', got {p.method!r}"
++    print("✓ PreparedRequest test passed")
++
++# Test Request usage
++def test_request():
++    print("\nTesting Request with unicode method...")
++    req = Request(method=u'POST', url='http://httpbin.org/post')
++    prep = req.prepare()
++    
++    # Check that method is a native string
++    if sys.version_info[0] == 2:
++        assert isinstance(prep.method, str), "Method should be native str in Python 2"
++        assert not isinstance(prep.method, unicode), "Method should not be unicode in Python 2"
++    else:
++        assert isinstance(prep.method, str), "Method should be str in Python 3"
++    
++    assert prep.method == 'POST', f"Method should be 'POST', got {prep.method!r}"
++    print("✓ Request test passed")
++
++# Test Session usage
++def test_session():
++    print("\nTesting Session with unicode method...")
++    s = Session()
++    
++    # Create a request but don't send it
++    req = s.request(method=u'POST', url='http://httpbin.org/post', 
++                    data={'test': 'data'}, stream=True)
++    
++    # The request object should have been created successfully
++    print("✓ Session test passed")
++
++# Test with actual file upload (the original issue)
++def test_file_upload():
++    print("\nTesting file upload with unicode method...")
++    
++    # Create a temporary file with binary content
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        f.write(b'\xcf\xfa\xed\xfe\x07\x00\x00\x01')  # Some binary data
++        temp_file = f.name
++    
++    try:
++        # This should not raise UnicodeDecodeError
++        files = {u'file': open(temp_file, u'rb')}
++        
++        # Test with mock request (not actually sending)
++        req = Request(method=u'POST', url='http://httpbin.org/post', files=files)
++        prep = req.prepare()
++        
++        # Check that method is a native string
++        if sys.version_info[0] == 2:
++            assert isinstance(prep.method, str), "Method should be native str in Python 2"
++            assert not isinstance(prep.method, unicode), "Method should not be unicode in Python 2"
++        else:
++            assert isinstance(prep.method, str), "Method should be str in Python 3"
++        
++        files['file'].close()
++        print("✓ File upload test passed")
++        
++    finally:
++        # Clean up
++        if os.path.exists(temp_file):
++            os.unlink(temp_file)
++
++# Test various HTTP methods
++def test_various_methods():
++    print("\nTesting various HTTP methods with unicode...")
++    methods = [u'GET', u'POST', u'PUT', u'DELETE', u'HEAD', u'OPTIONS', u'PATCH']
++    
++    for method in methods:
++        req = Request(method=method, url='http://httpbin.org/')
++        prep = req.prepare()
++        
++        # Check that method is a native string
++        if sys.version_info[0] == 2:
++            assert isinstance(prep.method, str), f"Method {method} should be native str in Python 2"
++            assert not isinstance(prep.method, unicode), f"Method {method} should not be unicode in Python 2"
++        else:
++            assert isinstance(prep.method, str), f"Method {method} should be str in Python 3"
++        
++        assert prep.method == method.upper(), f"Method should be {method.upper()!r}, got {prep.method!r}"
++    
++    print("✓ Various methods test passed")
++
++# Run all tests
++if __name__ == '__main__':
++    print(f"Python version: {sys.version}")
++    print("=" * 60)
++    
++    test_prepared_request()
++    test_request()
++    test_session()
++    test_file_upload()
++    test_various_methods()
++    
++    print("\n" + "=" * 60)
++    print("All tests passed! ✓")
+diff --git a/test_unicode_method_issue.py b/test_unicode_method_issue.py
+new file mode 100644
+index 00000000..b3b63d62
+--- /dev/null
++++ b/test_unicode_method_issue.py
+@@ -0,0 +1,106 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test for the specific unicode method issue described in the PR."""
++
++import sys
++import os
++import tempfile
++
++# Ensure we're using the local requests module
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import requests
++from requests.compat import is_py2
++
++def test_unicode_method_with_files():
++    """Test that unicode method names work with file uploads."""
++    
++    # Create a temporary file with binary content
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        # Write some binary data that would cause issues if mixed with unicode
++        f.write(b'\xcf\xfa\xed\xfe\x07\x00\x00\x01\x03\x00\x00\x80')
++        temp_file = f.name
++    
++    try:
++        print("Testing unicode method with file upload...")
++        
++        # This is the exact scenario from the bug report
++        files = {u'file': open(temp_file, u'rb')}
++        
++        # Create a request with unicode method (don't actually send it)
++        # In the bug report, this would raise UnicodeDecodeError in Python 2
++        req = requests.Request(method=u'POST', url=u'http://httpbin.org/post', files=files)
++        prep = req.prepare()
++        
++        # Verify the method is properly encoded
++        print(f"Method type: {type(prep.method)}")
++        print(f"Method value: {prep.method!r}")
++        
++        # The method should be a native string
++        if is_py2:
++            # In Python 2, it should be str (bytes), not unicode
++            assert isinstance(prep.method, str) and not isinstance(prep.method, unicode)
++        else:
++            # In Python 3, it should be str
++            assert isinstance(prep.method, str)
++        
++        assert prep.method == 'POST'
++        
++        files['file'].close()
++        print("✓ Test passed! No UnicodeDecodeError occurred.")
++        
++    finally:
++        # Clean up
++        if os.path.exists(temp_file):
++            os.unlink(temp_file)
++
++def test_session_unicode_method_with_files():
++    """Test that unicode method names work with file uploads using Session."""
++    
++    # Create a temporary file with binary content
++    with tempfile.NamedTemporaryFile(delete=False) as f:
++        # Write some binary data
++        f.write(b'\xcf\xfa\xed\xfe\x07\x00\x00\x01\x03\x00\x00\x80')
++        temp_file = f.name
++    
++    try:
++        print("\nTesting Session with unicode method and file upload...")
++        
++        files = {u'file': open(temp_file, u'rb')}
++        
++        # Create a session and prepare a request (don't send it)
++        s = requests.Session()
++        req = s.prepare_request(
++            requests.Request(method=u'POST', url=u'http://httpbin.org/post', files=files)
++        )
++        
++        # Verify the method is properly encoded
++        print(f"Method type: {type(req.method)}")
++        print(f"Method value: {req.method!r}")
++        
++        # The method should be a native string
++        if is_py2:
++            assert isinstance(req.method, str) and not isinstance(req.method, unicode)
++        else:
++            assert isinstance(req.method, str)
++        
++        assert req.method == 'POST'
++        
++        files['file'].close()
++        print("✓ Session test passed!")
++        
++    finally:
++        # Clean up
++        if os.path.exists(temp_file):
++            os.unlink(temp_file)
++
++if __name__ == '__main__':
++    print(f"Python version: {sys.version}")
++    print(f"Python 2: {is_py2}")
++    print("=" * 60)
++    
++    test_unicode_method_with_files()
++    test_session_unicode_method_with_files()
++    
++    print("\n" + "=" * 60)
++    print("All tests passed! ✓")
+diff --git a/test_unicode_method_simple.py b/test_unicode_method_simple.py
+new file mode 100644
+index 00000000..e98589df
+--- /dev/null
++++ b/test_unicode_method_simple.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Simple test for unicode method names."""
++
++import sys
++import os
++
++# Ensure we're using the local requests module
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++from requests.models import PreparedRequest
++from requests.compat import is_py2, builtin_str
++
++def test_unicode_method():
++    """Test that unicode method names are converted to native strings."""
++    print(f"Python version: {sys.version}")
++    print(f"is_py2: {is_py2}")
++    
++    # Create a PreparedRequest with unicode method
++    p = PreparedRequest()
++    p.prepare_method(u'POST')
++    
++    print(f"Method type: {type(p.method)}")
++    print(f"Method value: {p.method!r}")
++    
++    # In Python 2, method should be native str (bytes), not unicode
++    # In Python 3, everything is str anyway
++    assert isinstance(p.method, builtin_str), f"Method should be native string, got {type(p.method)}"
++    assert p.method == 'POST', f"Method should be 'POST', got {p.method!r}"
++    
++    print("✓ Test passed!")
++
++if __name__ == '__main__':
++    test_unicode_method()

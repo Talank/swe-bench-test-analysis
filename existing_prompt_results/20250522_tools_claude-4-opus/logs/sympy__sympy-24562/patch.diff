@@ -1,0 +1,269 @@
+diff --git a/debug_rational.py b/debug_rational.py
+new file mode 100644
+index 0000000000..a9ef3bf870
+--- /dev/null
++++ b/debug_rational.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Debug script to understand the Rational issue"""
++
++from sympy import Rational
++from sympy.core.numbers import SYMPY_INTS
++
++# Let's trace through what happens with Rational('0.5', '100')
++print("Tracing Rational('0.5', '100'):")
++
++# Initial values
++p = '0.5'
++q = '100'
++print(f"Initial: p={p!r}, q={q!r}")
++
++# Since q is not None and p is not SYMPY_INTS
++print(f"\np is not SYMPY_INTS: {not isinstance(p, SYMPY_INTS)}")
++
++# So p = Rational(p)
++p_rational = Rational(p)
++print(f"p_rational = Rational({p!r}) = {p_rational}")
++print(f"p_rational.p = {p_rational.p}, p_rational.q = {p_rational.q}")
++
++# q *= p.q
++q_before = q
++q_mult = p_rational.q
++print(f"\nBefore: q = {q_before!r}")
++print(f"Should do: q *= p_rational.q = {q_before!r} * {q_mult}")
++print("But wait, q is still a string '100', so this multiplication is string repetition!")
++print(f"Result: q = '100' * 2 = {'100' * 2}")
++
++# Let's also check what happens with numeric values
++print("\n" + "="*50)
++print("\nFor comparison, with Rational(0.5, 100):")
++p2 = 0.5
++q2 = 100
++print(f"Initial: p={p2!r}, q={q2!r}")
++print(f"p is not SYMPY_INTS: {not isinstance(p2, SYMPY_INTS)}")
++p2_rational = Rational(p2)
++print(f"p_rational = Rational({p2!r}) = {p2_rational}")
++print(f"p_rational.p = {p2_rational.p}, p_rational.q = {p2_rational.q}")
++print(f"q *= p_rational.q = {q2} * {p2_rational.q} = {q2 * p2_rational.q}")
+diff --git a/sympy/core/numbers.py b/sympy/core/numbers.py
+index 52f7ea45ad..0159a3c4e8 100644
+--- a/sympy/core/numbers.py
++++ b/sympy/core/numbers.py
+@@ -1627,17 +1627,25 @@ def __new__(cls, p, q=None, gcd=None):
+ 
+         if not isinstance(p, SYMPY_INTS):
+             p = Rational(p)
+-            q *= p.q
+-            p = p.p
++            # Convert q to int first to avoid string multiplication
++            if not isinstance(q, SYMPY_INTS):
++                q = Rational(q)
++                p_val = p.p * q.q
++                q_val = p.q * q.p
++                p = p_val
++                q = q_val
++            else:
++                q = int(q)
++                q *= p.q
++                p = p.p
+         else:
+             p = int(p)
+-
+-        if not isinstance(q, SYMPY_INTS):
+-            q = Rational(q)
+-            p *= q.q
+-            q = q.p
+-        else:
+-            q = int(q)
++            if not isinstance(q, SYMPY_INTS):
++                q = Rational(q)
++                p *= q.q
++                q = q.p
++            else:
++                q = int(q)
+ 
+         # p and q are now ints
+         if q == 0:
+diff --git a/sympy/core/tests/test_numbers.py b/sympy/core/tests/test_numbers.py
+index 8baf408933..afee61c95e 100644
+--- a/sympy/core/tests/test_numbers.py
++++ b/sympy/core/tests/test_numbers.py
+@@ -353,6 +353,11 @@ def test_Rational_new():
+     assert Rational(pi.evalf(100)).evalf(100) == pi.evalf(100)
+     raises(TypeError, lambda: Rational('3**3'))
+     raises(TypeError, lambda: Rational('1/2 + 2/3'))
++    
++    # Test string arguments for both numerator and denominator
++    assert Rational('0.5', '100') == Rational(1, 200)
++    assert Rational('1/2', '100') == Rational(1, 200)
++    assert Rational('2.5', '0.5') == Rational(5, 1)
+ 
+     # handle fractions.Fraction instances
+     try:
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..1177c2c925
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,53 @@
++#!/usr/bin/env python
++"""Test edge cases for the Rational fix"""
++
++from sympy import Rational, S
++from sympy.core.numbers import SYMPY_INTS
++
++def test_edge_cases():
++    # Test with SYMPY_INTS types
++    print("Testing with SYMPY_INTS types...")
++    assert Rational(2, 4) == Rational(1, 2)
++    
++    # Test with one string, one number
++    print("Testing mixed types...")
++    assert Rational('0.5', 100) == Rational(1, 200)
++    assert Rational(0.5, '100') == Rational(1, 200)
++    
++    # Test with both strings
++    print("Testing both strings...")
++    assert Rational('0.5', '100') == Rational(1, 200)
++    assert Rational('1/2', '100') == Rational(1, 200)
++    
++    # Test with complex fractions
++    print("Testing complex fractions...")
++    assert Rational('1/3', '1/6') == Rational(2, 1)
++    
++    # Test with negative values
++    print("Testing negative values...")
++    assert Rational('-0.5', '100') == Rational(-1, 200)
++    assert Rational('0.5', '-100') == Rational(-1, 200)
++    assert Rational('-0.5', '-100') == Rational(1, 200)
++    
++    # Test with zero
++    print("Testing with zero...")
++    assert Rational('0', '100') == S.Zero
++    assert Rational(0, '100') == S.Zero
++    
++    # Test division by zero
++    print("Testing division by zero...")
++    assert Rational('1', '0') == S.ComplexInfinity
++    assert Rational(1, '0') == S.ComplexInfinity
++    
++    # Test with very large numbers
++    print("Testing large numbers...")
++    assert Rational('1000000', '2000000') == Rational(1, 2)
++    
++    # Test with scientific notation
++    print("Testing scientific notation...")
++    assert Rational('1e-3', '1e3') == Rational(1, 1000000)
++    
++    print("\nAll edge case tests passed!")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_rational_comprehensive.py b/test_rational_comprehensive.py
+new file mode 100644
+index 0000000000..65086d40cf
+--- /dev/null
++++ b/test_rational_comprehensive.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python
++"""Comprehensive test for Rational with various input types"""
++
++from sympy import Rational, S
++import sys
++
++def test_rational_combinations():
++    """Test various combinations of inputs to Rational"""
++    test_cases = [
++        # (p, q, expected_result, description)
++        ('0.5', '100', Rational(1, 200), "String decimal and string integer"),
++        (0.5, 100, Rational(1, 200), "Float and integer"),
++        ('1/2', '100', Rational(1, 200), "String fraction and string integer"),
++        ('1', '2', Rational(1, 2), "String integers"),
++        (1, 2, Rational(1, 2), "Integers"),
++        ('0.5', 100, Rational(1, 200), "String decimal and integer"),
++        (0.5, '100', Rational(1, 200), "Float and string integer"),
++        ('2.5', '0.5', Rational(5, 1), "String decimals"),
++        (2.5, 0.5, Rational(5, 1), "Floats"),
++        ('10', '3', Rational(10, 3), "String integers that don't simplify"),
++        ('6', '9', Rational(2, 3), "String integers that simplify"),
++        ('0.25', '0.5', Rational(1, 2), "String decimals that simplify"),
++        ('-0.5', '100', Rational(-1, 200), "Negative string decimal"),
++        ('0.5', '-100', Rational(-1, 200), "Negative string denominator"),
++        ('-0.5', '-100', Rational(1, 200), "Both negative strings"),
++    ]
++    
++    passed = 0
++    failed = 0
++    
++    for p, q, expected, desc in test_cases:
++        try:
++            result = Rational(p, q)
++            if result == expected:
++                print(f"✓ {desc}: Rational({p!r}, {q!r}) = {result}")
++                passed += 1
++            else:
++                print(f"✗ {desc}: Rational({p!r}, {q!r}) = {result}, expected {expected}")
++                failed += 1
++        except Exception as e:
++            print(f"✗ {desc}: Rational({p!r}, {q!r}) raised {type(e).__name__}: {e}")
++            failed += 1
++    
++    print(f"\nPassed: {passed}/{len(test_cases)}")
++    print(f"Failed: {failed}/{len(test_cases)}")
++    
++    return failed == 0
++
++def test_edge_cases():
++    """Test edge cases"""
++    print("\nTesting edge cases:")
++    
++    # Test with very small fractions
++    r1 = Rational('0.001', '1000')
++    print(f"Rational('0.001', '1000') = {r1} (expected 1/1000000)")
++    
++    # Test with scientific notation
++    try:
++        r2 = Rational('1e-3', '1000')
++        print(f"Rational('1e-3', '1000') = {r2} (expected 1/1000000)")
++    except Exception as e:
++        print(f"Rational('1e-3', '1000') raised {type(e).__name__}: {e}")
++    
++    # Test with repeating decimals (should work via fractions module)
++    try:
++        r3 = Rational('0.333333333333333', '3')
++        print(f"Rational('0.333333333333333', '3') = {r3}")
++    except Exception as e:
++        print(f"Rational('0.333333333333333', '3') raised {type(e).__name__}: {e}")
++
++if __name__ == "__main__":
++    success = test_rational_combinations()
++    test_edge_cases()
++    sys.exit(0 if success else 1)
+diff --git a/test_rational_issue.py b/test_rational_issue.py
+new file mode 100644
+index 0000000000..05e2936dbe
+--- /dev/null
++++ b/test_rational_issue.py
+@@ -0,0 +1,22 @@
++#!/usr/bin/env python
++"""Test script to reproduce the Rational issue"""
++
++from sympy import Rational
++
++# Test cases
++print("Testing Rational with string arguments:")
++print(f"Rational('0.5', '100') = {Rational('0.5', '100')}")
++print(f"Expected: 1/200")
++print()
++
++print("Testing Rational with numeric arguments:")
++print(f"Rational(0.5, 100) = {Rational(0.5, 100)}")
++print(f"Expected: 1/200")
++print()
++
++# Additional test cases
++print("Additional test cases:")
++print(f"Rational('0.5') = {Rational('0.5')}")
++print(f"Rational('100') = {Rational('100')}")
++print(f"Rational('1', '2') = {Rational('1', '2')}")
++print(f"Rational('1/2', '100') = {Rational('1/2', '100')}")

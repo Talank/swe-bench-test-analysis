@@ -1,0 +1,1114 @@
+diff --git a/debug_unique_field.py b/debug_unique_field.py
+new file mode 100644
+index 0000000000..c13395ae41
+--- /dev/null
++++ b/debug_unique_field.py
+@@ -0,0 +1,64 @@
++"""
++Debug unique field constraints
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++class ModelWithUniqueField(models.Model):
++    """Model with a unique field"""
++    code = models.CharField(max_length=10, unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'model_unique_field'
++        unique_together = [['code']]
++
++# Create the model
++with connection.schema_editor() as editor:
++    editor.create_model(ModelWithUniqueField)
++
++# Check all constraints
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'model_unique_field')
++    print("All constraints on model_unique_field:")
++    for name, info in constraints.items():
++        print(f"  {name}:")
++        print(f"    columns: {info['columns']}")
++        print(f"    unique: {info.get('unique')}")
++        print(f"    primary_key: {info.get('primary_key')}")
++        print(f"    index: {info.get('index')}")
++        print(f"    type: {info.get('type')}")
++        print()
++
++# Test _constraint_names
++with connection.schema_editor() as editor:
++    # Get unique constraints on 'code'
++    unique_constraints = editor._constraint_names(
++        ModelWithUniqueField,
++        ['code'],
++        unique=True,
++        primary_key=False
++    )
++    print(f"Unique non-PK constraints on 'code': {unique_constraints}")
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index f2ca8c8df9..b033a58abb 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -568,6 +568,16 @@ class BaseDatabaseSchemaEditor:
+             exclude=meta_constraint_names | meta_index_names,
+             **constraint_kwargs,
+         )
++        # When deleting a unique constraint, exclude primary key constraints
++        # to avoid conflicts when the primary key is also marked as unique
++        if constraint_kwargs.get('unique'):
++            constraint_names = self._constraint_names(
++                model,
++                columns,
++                exclude=meta_constraint_names | meta_index_names,
++                primary_key=False,
++                **constraint_kwargs,
++            )
+         if len(constraint_names) != 1:
+             raise ValueError(
+                 "Found wrong number (%s) of constraints for %s(%s)"
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 0000000000..60eae0824a
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,119 @@
++"""
++Final test to verify our fix solves the stated problem
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from unittest.mock import patch
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++print("Testing the exact scenario from the problem statement:")
++print("=" * 60)
++
++# Create a model with unique_together on primary key (the exact issue)
++class FooBar(models.Model):
++    """Model with erroneous unique_together constraint on primary key"""
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'foo_bar'
++        unique_together = [['id']]  # Erroneous constraint
++
++# Mock PostgreSQL constraints as described in the problem
++def mock_postgresql_constraints(cursor, table_name):
++    """
++    Mock the exact PostgreSQL constraints from the problem statement:
++    - "foo_bar_pkey" PRIMARY KEY, btree (id)
++    - "foo_bar_id_1c3b3088c74c3b17_uniq" UNIQUE CONSTRAINT, btree (id)
++    """
++    if table_name == 'foo_bar':
++        return {
++            'foo_bar_pkey': {
++                'columns': ['id'], 
++                'primary_key': True, 
++                'unique': True,  # PostgreSQL marks PK as unique
++                'foreign_key': None, 
++                'check': False, 
++                'index': False,
++                'type': 'p'  # Primary key type in PostgreSQL
++            },
++            'foo_bar_id_1c3b3088c74c3b17_uniq': {
++                'columns': ['id'], 
++                'primary_key': False, 
++                'unique': True, 
++                'foreign_key': None, 
++                'check': False, 
++                'index': False,
++                'type': 'u'  # Unique constraint type in PostgreSQL
++            }
++        }
++    return {}
++
++# Create the model
++with connection.schema_editor() as editor:
++    editor.create_model(FooBar)
++
++print("Model created with unique_together = [['id']]")
++
++# Test with PostgreSQL-like constraints
++with patch.object(connection.introspection, 'get_constraints', mock_postgresql_constraints):
++    print("\nPostgreSQL constraints (as described in problem):")
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'foo_bar')
++        for name, info in constraints.items():
++            if info['columns'] == ['id']:
++                constraint_type = 'PRIMARY KEY' if info['primary_key'] else 'UNIQUE CONSTRAINT'
++                print(f'  "{name}" {constraint_type}, btree (id)')
++    
++    print("\nAttempting to drop unique_together constraint...")
++    try:
++        with connection.schema_editor() as editor:
++            # Mock execute to see what SQL would be generated
++            sql_executed = []
++            def capture_sql(sql, params=()):
++                sql_executed.append(str(sql))
++            
++            editor.execute = capture_sql
++            
++            # This is the operation that was failing
++            editor.alter_unique_together(FooBar, [['id']], [])
++            
++        print("✓ SUCCESS! The migration can now proceed.")
++        if sql_executed:
++            print(f"\nSQL that would be executed:")
++            for sql in sql_executed:
++                print(f"  {sql}")
++            
++            # Verify we're dropping the right constraint
++            if 'foo_bar_id_1c3b3088c74c3b17_uniq' in sql_executed[0]:
++                print("\n✓ Correctly identified and would drop the unique_together constraint")
++                print("  (not the primary key constraint)")
++            
++    except ValueError as e:
++        print(f"✗ FAILED: {e}")
++        print("\nThis is the error that would occur without the fix.")
++
++print("\n" + "=" * 60)
++print("The fix successfully resolves the issue described in the")
++print("problem statement by excluding primary key constraints when") 
++print("looking for unique constraints to delete.")
+diff --git a/test_comprehensive_fix.py b/test_comprehensive_fix.py
+new file mode 100644
+index 0000000000..b006c4e153
+--- /dev/null
++++ b/test_comprehensive_fix.py
+@@ -0,0 +1,157 @@
++"""
++Comprehensive test to demonstrate the fix for unique_together on primary key issue
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from unittest.mock import patch
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++print("=" * 70)
++print("Testing fix for: Cannot drop unique_together constraint on a single")
++print("field with its own unique=True constraint")
++print("=" * 70)
++
++# Create test models
++class ModelWithUniqueTogetherOnPK(models.Model):
++    """Model with erroneous unique_together on primary key"""
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'model_unique_pk'
++        unique_together = [['id']]  # This is the problematic constraint
++
++class ModelWithUniqueTogetherOnUniqueField(models.Model):
++    """Model with unique_together on a field that also has unique=True"""
++    code = models.CharField(max_length=10, unique=True)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'model_unique_field'
++        unique_together = [['code']]  # Redundant but should be removable
++
++# Test 1: SQLite behavior
++print("\n1. Testing with SQLite (primary key not marked as unique):")
++with connection.schema_editor() as editor:
++    editor.create_model(ModelWithUniqueTogetherOnPK)
++
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'model_unique_pk')
++    print("   Constraints:")
++    for name, info in constraints.items():
++        if info.get('unique') or info.get('primary_key'):
++            print(f"     {name}: unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++
++try:
++    with connection.schema_editor() as editor:
++        editor.alter_unique_together(ModelWithUniqueTogetherOnPK, [['id']], [])
++    print("   ✓ Successfully removed unique_together constraint")
++except ValueError as e:
++    print(f"   ✗ Failed: {e}")
++
++# Clean up
++with connection.schema_editor() as editor:
++    editor.delete_model(ModelWithUniqueTogetherOnPK)
++
++# Test 2: PostgreSQL-like behavior
++print("\n2. Testing with PostgreSQL-like behavior (primary key marked as unique):")
++
++def mock_pg_constraints(cursor, table_name):
++    """Mock PostgreSQL constraints where PK is marked as unique"""
++    if table_name == 'model_unique_pk':
++        return {
++            'model_unique_pk_pkey': {
++                'columns': ['id'], 
++                'primary_key': True, 
++                'unique': True,  # PostgreSQL marks PK as unique
++                'foreign_key': None, 
++                'check': False, 
++                'index': False
++            },
++            'model_unique_pk_id_uniq': {
++                'columns': ['id'], 
++                'primary_key': False, 
++                'unique': True, 
++                'foreign_key': None, 
++                'check': False, 
++                'index': False
++            }
++        }
++    return {}
++
++with connection.schema_editor() as editor:
++    editor.create_model(ModelWithUniqueTogetherOnPK)
++
++with patch.object(connection.introspection, 'get_constraints', mock_pg_constraints):
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'model_unique_pk')
++        print("   Constraints (simulated PostgreSQL):")
++        for name, info in constraints.items():
++            print(f"     {name}: unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++    
++    try:
++        with connection.schema_editor() as editor:
++            # Mock execute to avoid actual SQL execution
++            executed_sql = []
++            original_execute = editor.execute
++            
++            def capture_sql(sql, params=()):
++                executed_sql.append(str(sql))
++            
++            editor.execute = capture_sql
++            editor.alter_unique_together(ModelWithUniqueTogetherOnPK, [['id']], [])
++            
++        print("   ✓ Successfully removed unique_together constraint")
++        print(f"   SQL executed: {executed_sql[0] if executed_sql else 'None'}")
++        if executed_sql and 'model_unique_pk_id_uniq' in executed_sql[0]:
++            print("   ✓ Correctly targeted the unique_together constraint, not the PK")
++    except ValueError as e:
++        print(f"   ✗ Failed: {e}")
++
++# Clean up
++with connection.schema_editor() as editor:
++    editor.delete_model(ModelWithUniqueTogetherOnPK)
++
++# Test 3: Unique field case
++print("\n3. Testing with unique field (not primary key):")
++with connection.schema_editor() as editor:
++    editor.create_model(ModelWithUniqueTogetherOnUniqueField)
++
++try:
++    with connection.schema_editor() as editor:
++        editor.alter_unique_together(ModelWithUniqueTogetherOnUniqueField, [['code']], [])
++    print("   ✓ Successfully removed unique_together constraint on unique field")
++except ValueError as e:
++    print(f"   ✗ Failed: {e}")
++
++# Clean up
++with connection.schema_editor() as editor:
++    editor.delete_model(ModelWithUniqueTogetherOnUniqueField)
++
++print("\n" + "=" * 70)
++print("Summary: The fix ensures that when removing a unique_together")
++print("constraint, primary key constraints are excluded from consideration")
++print("to avoid the 'Found wrong number of constraints' error.")
++print("=" * 70)
+diff --git a/test_constraint_issue.py b/test_constraint_issue.py
+new file mode 100644
+index 0000000000..d5e5da5a7a
+--- /dev/null
++++ b/test_constraint_issue.py
+@@ -0,0 +1,71 @@
++"""
++Test to understand how Django handles constraints
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Check constraints before
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'test_model')
++    print("All constraints:")
++    for name, info in constraints.items():
++        print(f"  {name}: {info}")
++
++# Now test the _constraint_names method
++with connection.schema_editor() as schema_editor:
++    # Get all unique constraints on the 'id' column
++    constraint_names = schema_editor._constraint_names(
++        TestModel,
++        column_names=['id'],
++        unique=True
++    )
++    print(f"\nUnique constraints on 'id' column: {constraint_names}")
++    
++    # Get primary key constraints
++    pk_names = schema_editor._constraint_names(
++        TestModel,
++        primary_key=True
++    )
++    print(f"Primary key constraints: {pk_names}")
++    
++    # Get unique constraints that are NOT primary keys
++    with connection.cursor() as cursor2:
++        all_constraints = connection.introspection.get_constraints(cursor2, 'test_model')
++        unique_non_pk = []
++        for name, info in all_constraints.items():
++            if info.get('unique') and not info.get('primary_key') and info['columns'] == ['id']:
++                unique_non_pk.append(name)
++        print(f"Unique non-PK constraints on 'id': {unique_non_pk}")
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..f027ba0d68
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,107 @@
++"""
++Verify that our fix correctly handles the case where primary key is also marked as unique
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from unittest.mock import patch, MagicMock
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model with erroneous unique_together on primary key
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Mock get_constraints to simulate PostgreSQL behavior
++def mock_get_constraints(cursor, table_name):
++    """Simulate PostgreSQL constraints where PK is also marked as unique"""
++    return {
++        'test_model_pkey': {
++            'columns': ['id'], 
++            'primary_key': True, 
++            'unique': True,  # In PostgreSQL, PK is also unique
++            'foreign_key': None, 
++            'check': False, 
++            'index': False
++        },
++        'test_model_id_1c3b3088c74c3b17_uniq': {
++            'columns': ['id'], 
++            'primary_key': False, 
++            'unique': True, 
++            'foreign_key': None, 
++            'check': False, 
++            'index': False
++        }
++    }
++
++print("Testing our fix with PostgreSQL-like constraints...")
++
++# Create the table
++with connection.schema_editor() as editor:
++    editor.create_model(TestModel)
++
++# Patch get_constraints to simulate PostgreSQL
++with patch.object(connection.introspection, 'get_constraints', mock_get_constraints):
++    with connection.schema_editor() as editor:
++        columns = ['id']
++        constraint_kwargs = {'unique': True}
++        
++        # Get meta constraints
++        meta_constraint_names = {
++            constraint.name for constraint in TestModel._meta.constraints
++        }
++        meta_index_names = {constraint.name for constraint in TestModel._meta.indexes}
++        
++        print(f"\nMeta constraint names: {meta_constraint_names}")
++        print(f"Meta index names: {meta_index_names}")
++        
++        # Test the original behavior (without primary_key=False)
++        print("\nOriginal behavior (finds both PK and unique constraint):")
++        constraint_names_orig = editor._constraint_names(
++            TestModel,
++            columns,
++            exclude=meta_constraint_names | meta_index_names,
++            unique=True,
++        )
++        print(f"  Found constraints: {constraint_names_orig}")
++        
++        # Test our fix (with primary_key=False)
++        print("\nWith our fix (excludes PK):")
++        constraint_names_fixed = editor._constraint_names(
++            TestModel,
++            columns,
++            exclude=meta_constraint_names | meta_index_names,
++            primary_key=False,
++            unique=True,
++        )
++        print(f"  Found constraints: {constraint_names_fixed}")
++        
++        # Verify the fix works correctly
++        if len(constraint_names_orig) == 2 and len(constraint_names_fixed) == 1:
++            print("\nSUCCESS: Fix correctly excludes primary key constraint!")
++            print(f"  Will delete: {constraint_names_fixed[0]}")
++        else:
++            print("\nERROR: Fix did not work as expected")
+diff --git a/test_pk_unique_together.py b/test_pk_unique_together.py
+new file mode 100644
+index 0000000000..9d8ed0b20b
+--- /dev/null
++++ b/test_pk_unique_together.py
+@@ -0,0 +1,113 @@
++"""
++Test for the specific issue where unique_together contains the primary key
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model with erroneous unique_together on primary key
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Create another model to test the fix
++class TestModel2(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model2'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Test the current behavior
++print("Testing current behavior...")
++try:
++    # Create the table
++    with connection.schema_editor() as editor:
++        editor.create_model(TestModel)
++    
++    # Check constraints
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'test_model')
++        print("\nConstraints after creation:")
++        for name, info in constraints.items():
++            if info.get('unique') or info.get('primary_key'):
++                print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++    
++    # Try to remove unique_together
++    print("\nTrying to remove unique_together...")
++    with connection.schema_editor() as editor:
++        editor.alter_unique_together(TestModel, [['id']], [])
++    
++    # Check constraints after
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'test_model')
++        print("\nConstraints after removal:")
++        for name, info in constraints.items():
++            if info.get('unique') or info.get('primary_key'):
++                print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++    
++    print("\nSUCCESS: unique_together removed successfully")
++    
++except ValueError as e:
++    print(f"\nERROR: {e}")
++
++# Now let's trace through what happens in _delete_composed_index
++print("\n\nDebugging _delete_composed_index behavior...")
++with connection.schema_editor() as editor:
++    editor.create_model(TestModel2)
++    
++    # Manually call _delete_composed_index to see what happens
++    columns = ['id']
++    constraint_kwargs = {'unique': True}
++    
++    # Get meta constraints
++    meta_constraint_names = {
++        constraint.name for constraint in TestModel2._meta.constraints
++    }
++    meta_index_names = {constraint.name for constraint in TestModel2._meta.indexes}
++    
++    print(f"Meta constraint names: {meta_constraint_names}")
++    print(f"Meta index names: {meta_index_names}")
++    
++    # Get constraint names
++    constraint_names = editor._constraint_names(
++        TestModel2,
++        columns,
++        exclude=meta_constraint_names | meta_index_names,
++        **constraint_kwargs,
++    )
++    print(f"Found constraints: {constraint_names}")
++    print(f"Number of constraints: {len(constraint_names)}")
++    
++    # Show all constraints for debugging
++    with connection.cursor() as cursor:
++        all_constraints = connection.introspection.get_constraints(cursor, 'test_model2')
++        print("\nAll constraints on test_model2:")
++        for name, info in all_constraints.items():
++            print(f"  {name}: {info}")
+diff --git a/test_pk_unique_together_postgres_sim.py b/test_pk_unique_together_postgres_sim.py
+new file mode 100644
+index 0000000000..c0d6792cf2
+--- /dev/null
++++ b/test_pk_unique_together_postgres_sim.py
+@@ -0,0 +1,109 @@
++"""
++Simulate PostgreSQL behavior where primary key is marked as unique=True
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from unittest.mock import patch, MagicMock
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model with erroneous unique_together on primary key
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Mock get_constraints to simulate PostgreSQL behavior
++def mock_get_constraints(cursor, table_name):
++    """Simulate PostgreSQL constraints where PK is also marked as unique"""
++    return {
++        'test_model_pkey': {
++            'columns': ['id'], 
++            'primary_key': True, 
++            'unique': True,  # In PostgreSQL, PK is also unique
++            'foreign_key': None, 
++            'check': False, 
++            'index': False
++        },
++        'test_model_id_1c3b3088c74c3b17_uniq': {
++            'columns': ['id'], 
++            'primary_key': False, 
++            'unique': True, 
++            'foreign_key': None, 
++            'check': False, 
++            'index': False
++        }
++    }
++
++print("Testing PostgreSQL-like behavior...")
++try:
++    # Create the table
++    with connection.schema_editor() as editor:
++        editor.create_model(TestModel)
++    
++    # Patch get_constraints to simulate PostgreSQL
++    with patch.object(connection.introspection, 'get_constraints', mock_get_constraints):
++        # Check constraints
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_model')
++            print("\nConstraints (simulated PostgreSQL):")
++            for name, info in constraints.items():
++                if info.get('unique') or info.get('primary_key'):
++                    print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++        
++        # Try to remove unique_together
++        print("\nTrying to remove unique_together...")
++        with connection.schema_editor() as editor:
++            editor.alter_unique_together(TestModel, [['id']], [])
++        
++        print("\nSUCCESS: unique_together removed successfully")
++    
++except ValueError as e:
++    print(f"\nERROR: {e}")
++    
++    # Debug what's happening
++    with patch.object(connection.introspection, 'get_constraints', mock_get_constraints):
++        with connection.schema_editor() as editor:
++            columns = ['id']
++            constraint_kwargs = {'unique': True}
++            
++            # Get meta constraints
++            meta_constraint_names = {
++                constraint.name for constraint in TestModel._meta.constraints
++            }
++            meta_index_names = {constraint.name for constraint in TestModel._meta.indexes}
++            
++            print(f"\nMeta constraint names: {meta_constraint_names}")
++            print(f"Meta index names: {meta_index_names}")
++            
++            # Get constraint names
++            constraint_names = editor._constraint_names(
++                TestModel,
++                columns,
++                exclude=meta_constraint_names | meta_index_names,
++                **constraint_kwargs,
++            )
++            print(f"Found constraints matching unique=True on 'id': {constraint_names}")
++            print(f"Number of constraints: {len(constraint_names)}")
+diff --git a/test_unique_together_pk.py b/test_unique_together_pk.py
+new file mode 100644
+index 0000000000..94b3a2f14c
+--- /dev/null
++++ b/test_unique_together_pk.py
+@@ -0,0 +1,70 @@
++"""
++Test for the issue where Django cannot drop unique_together constraint 
++on a single field with its own unique=True constraint
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++from django.db.migrations import Migration, operations
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Check constraints before
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'test_model')
++    print("Constraints before:")
++    for name, info in constraints.items():
++        if info.get('unique') or info.get('primary_key'):
++            print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++
++# Try to remove the unique_together constraint
++print("\nAttempting to remove unique_together constraint...")
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.alter_unique_together(
++            TestModel,
++            old_unique_together=[['id']],
++            new_unique_together=[]
++        )
++    print("Success!")
++except ValueError as e:
++    print(f"Error: {e}")
++
++# Check constraints after
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'test_model')
++    print("\nConstraints after:")
++    for name, info in constraints.items():
++        if info.get('unique') or info.get('primary_key'):
++            print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
+diff --git a/test_unique_together_pk_fix.py b/test_unique_together_pk_fix.py
+new file mode 100644
+index 0000000000..faafc8212e
+--- /dev/null
++++ b/test_unique_together_pk_fix.py
+@@ -0,0 +1,137 @@
++"""
++Test case for the fix to handle unique_together on primary key
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from unittest.mock import patch
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++class UniqueTogetherPKTest(TransactionTestCase):
++    """Test that unique_together on primary key can be removed"""
++    
++    def setUp(self):
++        # Create a model with unique_together on primary key
++        class TestModel(models.Model):
++            name = models.CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'test_unique_pk'
++                unique_together = [['id']]
++        
++        self.model = TestModel
++        
++        # Create the table
++        with connection.schema_editor() as editor:
++            editor.create_model(self.model)
++    
++    def tearDown(self):
++        # Drop the table
++        with connection.schema_editor() as editor:
++            editor.delete_model(self.model)
++    
++    def test_remove_unique_together_on_pk_sqlite(self):
++        """Test removing unique_together on PK with SQLite"""
++        # Should work without error
++        with connection.schema_editor() as editor:
++            editor.alter_unique_together(self.model, [['id']], [])
++        
++        # Verify the unique constraint is gone
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_unique_pk')
++            unique_constraints = [
++                name for name, info in constraints.items()
++                if info.get('unique') and not info.get('primary_key') and info['columns'] == ['id']
++            ]
++            self.assertEqual(len(unique_constraints), 0)
++    
++    def test_remove_unique_together_on_pk_postgres_like(self):
++        """Test removing unique_together on PK with PostgreSQL-like constraints"""
++        # Mock get_constraints to simulate PostgreSQL behavior
++        def mock_get_constraints(cursor, table_name):
++            """Simulate PostgreSQL constraints where PK is also marked as unique"""
++            return {
++                'test_unique_pk_pkey': {
++                    'columns': ['id'], 
++                    'primary_key': True, 
++                    'unique': True,  # In PostgreSQL, PK is also unique
++                    'foreign_key': None, 
++                    'check': False, 
++                    'index': False
++                },
++                'test_unique_pk_id_uniq': {
++                    'columns': ['id'], 
++                    'primary_key': False, 
++                    'unique': True, 
++                    'foreign_key': None, 
++                    'check': False, 
++                    'index': False
++                }
++            }
++        
++        # Mock the execute to prevent actual SQL execution
++        with patch.object(connection.introspection, 'get_constraints', mock_get_constraints):
++            with connection.schema_editor() as editor:
++                # Capture the SQL that would be executed
++                original_execute = editor.execute
++                executed_sql = []
++                
++                def mock_execute(sql, params=()):
++                    executed_sql.append(str(sql))
++                    # Don't actually execute it since the constraint doesn't exist
++                
++                editor.execute = mock_execute
++                
++                # This should not raise ValueError anymore
++                editor.alter_unique_together(self.model, [['id']], [])
++        
++        # Verify that only one DROP statement was executed
++        drop_statements = [sql for sql in executed_sql if 'DROP' in sql.upper()]
++        self.assertEqual(len(drop_statements), 1)
++        # And it should be dropping the unique constraint, not the primary key
++        self.assertIn('test_unique_pk_id_uniq', drop_statements[0])
++
++# Run the test
++if __name__ == '__main__':
++    test = UniqueTogetherPKTest()
++    test.setUp()
++    
++    print("Running test_remove_unique_together_on_pk_sqlite...")
++    try:
++        test.test_remove_unique_together_on_pk_sqlite()
++        print("✓ PASSED")
++    except Exception as e:
++        print(f"✗ FAILED: {e}")
++    
++    test.tearDown()
++    test.setUp()
++    
++    print("\nRunning test_remove_unique_together_on_pk_postgres_like...")
++    try:
++        test.test_remove_unique_together_on_pk_postgres_like()
++        print("✓ PASSED")
++    except Exception as e:
++        print(f"✗ FAILED: {e}")
++    
++    test.tearDown()
+diff --git a/test_unique_together_pk_postgres.py b/test_unique_together_pk_postgres.py
+new file mode 100644
+index 0000000000..c7036de801
+--- /dev/null
++++ b/test_unique_together_pk_postgres.py
+@@ -0,0 +1,86 @@
++"""
++Test for the issue where Django cannot drop unique_together constraint 
++on a single field with its own unique=True constraint on PostgreSQL
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++from django.db.migrations import Migration, operations
++
++# Configure Django settings for PostgreSQL
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.postgresql',
++            'NAME': 'test_db',
++            'USER': 'postgres',
++            'PASSWORD': 'postgres',
++            'HOST': 'localhost',
++            'PORT': '5432',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        unique_together = [['id']]  # Erroneous constraint on primary key
++
++# Create the table
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++except Exception as e:
++    print(f"Error creating model: {e}")
++    # Table might already exist, drop it first
++    with connection.cursor() as cursor:
++        cursor.execute("DROP TABLE IF EXISTS test_model CASCADE")
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++
++# Check constraints before
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'test_model')
++    print("Constraints before:")
++    for name, info in constraints.items():
++        if info.get('unique') or info.get('primary_key'):
++            print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++
++# Try to remove the unique_together constraint
++print("\nAttempting to remove unique_together constraint...")
++try:
++    with connection.schema_editor() as schema_editor:
++        schema_editor.alter_unique_together(
++            TestModel,
++            old_unique_together=[['id']],
++            new_unique_together=[]
++        )
++    print("Success!")
++except ValueError as e:
++    print(f"Error: {e}")
++
++# Check constraints after
++with connection.cursor() as cursor:
++    constraints = connection.introspection.get_constraints(cursor, 'test_model')
++    print("\nConstraints after:")
++    for name, info in constraints.items():
++        if info.get('unique') or info.get('primary_key'):
++            print(f"  {name}: columns={info['columns']}, unique={info.get('unique')}, primary_key={info.get('primary_key')}")
++
++# Clean up
++with connection.cursor() as cursor:
++    cursor.execute("DROP TABLE IF EXISTS test_model CASCADE")

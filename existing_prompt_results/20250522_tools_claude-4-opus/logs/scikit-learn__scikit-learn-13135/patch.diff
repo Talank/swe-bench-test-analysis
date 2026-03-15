@@ -1,0 +1,246 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..d25f9aa79
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,18 @@
++import numpy as np
++from sklearn.preprocessing import KBinsDiscretizer
++
++# Reproduce the issue
++X = np.array([0, 0.5, 2, 3, 9, 10]).reshape(-1, 1)
++
++# with 5 bins
++est = KBinsDiscretizer(n_bins=5, strategy='kmeans', encode='ordinal')
++try:
++    Xt = est.fit_transform(X)
++    print("Transform successful!")
++    print("Transformed data:", Xt.ravel())
++except ValueError as e:
++    print(f"Error occurred: {e}")
++    print("\nDebugging info:")
++    est.fit(X)
++    print("Bin edges:", est.bin_edges_[0])
++    print("Are bin edges sorted?", np.all(np.diff(est.bin_edges_[0]) >= 0))
+diff --git a/sklearn/preprocessing/_discretization.py b/sklearn/preprocessing/_discretization.py
+index dd969c12b..38ae798e0 100644
+--- a/sklearn/preprocessing/_discretization.py
++++ b/sklearn/preprocessing/_discretization.py
+@@ -172,6 +172,8 @@ class KBinsDiscretizer(BaseEstimator, TransformerMixin):
+                 # 1D k-means procedure
+                 km = KMeans(n_clusters=n_bins[jj], init=init, n_init=1)
+                 centers = km.fit(column[:, None]).cluster_centers_[:, 0]
++                # Sort centers to ensure monotonicity
++                centers.sort()
+                 bin_edges[jj] = (centers[1:] + centers[:-1]) * 0.5
+                 bin_edges[jj] = np.r_[col_min, bin_edges[jj], col_max]
+ 
+diff --git a/sklearn/preprocessing/tests/test_discretization.py b/sklearn/preprocessing/tests/test_discretization.py
+index c2e307e85..410615f93 100644
+--- a/sklearn/preprocessing/tests/test_discretization.py
++++ b/sklearn/preprocessing/tests/test_discretization.py
+@@ -247,3 +247,25 @@ def test_overwrite():
+     Xinv = est.inverse_transform(Xt)
+     assert_array_equal(Xt, Xt_before)
+     assert_array_equal(Xinv, np.array([[0.5], [1.5], [2.5], [2.5]]))
++
++
++def test_kmeans_strategy_monotonic_bin_edges():
++    """Test that bin edges are monotonic when using kmeans strategy.
++    
++    Non-regression test for:
++    https://github.com/scikit-learn/scikit-learn/issues/13524
++    """
++    # This specific case would fail without proper sorting of k-means centers
++    X = np.array([0, 0.5, 2, 3, 9, 10]).reshape(-1, 1)
++    
++    # Test with n_bins close to n_samples
++    est = KBinsDiscretizer(n_bins=5, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    
++    # Check that bin edges are monotonic
++    assert np.all(np.diff(est.bin_edges_[0]) >= 0), \
++        "Bin edges should be monotonically increasing"
++    
++    # Verify the transform works correctly
++    assert Xt.shape == X.shape
++    assert len(np.unique(Xt)) <= 5  # Should have at most 5 bins
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..29d53638e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,51 @@
++import numpy as np
++from sklearn.preprocessing import KBinsDiscretizer
++import warnings
++
++def test_edge_cases():
++    """Test various edge cases for the kmeans strategy fix."""
++    
++    # Edge case 1: All identical values
++    print("Test 1: All identical values")
++    X = np.array([5, 5, 5, 5, 5]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=3, strategy='kmeans', encode='ordinal')
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")  # Ignore the constant feature warning
++        Xt = est.fit_transform(X)
++    print(f"  Transformed: {Xt.ravel()}")
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Success!")
++    
++    # Edge case 2: Two distinct values
++    print("\nTest 2: Two distinct values")
++    X = np.array([1, 1, 1, 10, 10, 10]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=3, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Transformed: {Xt.ravel()}")
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    
++    # Edge case 3: Very small range
++    print("\nTest 3: Very small range")
++    X = np.array([1.0, 1.001, 1.002, 1.003, 1.004]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=4, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Transformed: {Xt.ravel()}")
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    
++    # Edge case 4: Large number of bins relative to samples
++    print("\nTest 4: Large number of bins relative to samples")
++    X = np.array([1, 2, 3]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=3, strategy='kmeans', encode='ordinal')
++    with warnings.catch_warnings():
++        warnings.simplefilter("ignore")  # Ignore convergence warnings
++        Xt = est.fit_transform(X)
++    print(f"  Transformed: {Xt.ravel()}")
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    
++    print("\nAll edge case tests passed!")
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_fix_comprehensive.py b/test_fix_comprehensive.py
+new file mode 100644
+index 000000000..b82bd4a25
+--- /dev/null
++++ b/test_fix_comprehensive.py
+@@ -0,0 +1,59 @@
++import numpy as np
++from sklearn.preprocessing import KBinsDiscretizer
++
++def test_kmeans_monotonicity():
++    """Test that kmeans strategy produces monotonic bin edges."""
++    
++    # Test case 1: Original failing case
++    print("Test 1: Original failing case")
++    X = np.array([0, 0.5, 2, 3, 9, 10]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=5, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    print(f"  Transformed: {Xt.ravel()}")
++    assert np.all(np.diff(est.bin_edges_[0]) >= 0), "Bin edges must be monotonic"
++    
++    # Test case 2: Random data
++    print("\nTest 2: Random data")
++    np.random.seed(42)
++    X = np.random.randn(100, 1) * 10 + 5
++    est = KBinsDiscretizer(n_bins=10, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Bin edges shape: {est.bin_edges_[0].shape}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    assert np.all(np.diff(est.bin_edges_[0]) >= 0), "Bin edges must be monotonic"
++    
++    # Test case 3: Data with outliers
++    print("\nTest 3: Data with outliers")
++    X = np.array([1, 2, 3, 4, 5, 100]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=4, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    print(f"  Transformed: {Xt.ravel()}")
++    assert np.all(np.diff(est.bin_edges_[0]) >= 0), "Bin edges must be monotonic"
++    
++    # Test case 4: Multiple features
++    print("\nTest 4: Multiple features")
++    X = np.random.randn(50, 3)
++    est = KBinsDiscretizer(n_bins=5, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    for i in range(3):
++        print(f"  Feature {i} - Monotonic: {np.all(np.diff(est.bin_edges_[i]) >= 0)}")
++        assert np.all(np.diff(est.bin_edges_[i]) >= 0), f"Bin edges for feature {i} must be monotonic"
++    
++    # Test case 5: Edge case with n_bins close to n_samples
++    print("\nTest 5: Edge case with n_bins close to n_samples")
++    X = np.array([1, 2, 3, 4, 5]).reshape(-1, 1)
++    est = KBinsDiscretizer(n_bins=4, strategy='kmeans', encode='ordinal')
++    Xt = est.fit_transform(X)
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    print(f"  Transformed: {Xt.ravel()}")
++    assert np.all(np.diff(est.bin_edges_[0]) >= 0), "Bin edges must be monotonic"
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_kmeans_monotonicity()
+diff --git a/test_inverse_transform.py b/test_inverse_transform.py
+new file mode 100644
+index 000000000..253f5ad59
+--- /dev/null
++++ b/test_inverse_transform.py
+@@ -0,0 +1,28 @@
++import numpy as np
++from sklearn.preprocessing import KBinsDiscretizer
++
++# Test that inverse transform still works correctly after our fix
++X = np.array([0, 0.5, 2, 3, 9, 10]).reshape(-1, 1)
++
++for encode in ['ordinal', 'onehot', 'onehot-dense']:
++    print(f"\nTesting with encode='{encode}'")
++    est = KBinsDiscretizer(n_bins=5, strategy='kmeans', encode=encode)
++    Xt = est.fit_transform(X)
++    
++    # Test inverse transform
++    X_inv = est.inverse_transform(Xt)
++    
++    print(f"  Original shape: {X.shape}")
++    print(f"  Transformed shape: {Xt.shape}")
++    print(f"  Inverse shape: {X_inv.shape}")
++    print(f"  Bin edges: {est.bin_edges_[0]}")
++    print(f"  Inverse values: {X_inv.ravel()}")
++    
++    # Check that inverse values are within expected ranges
++    for i, (orig, inv) in enumerate(zip(X.ravel(), X_inv.ravel())):
++        bin_idx = int(est.transform([[orig]])[0, 0] if encode == 'ordinal' 
++                      else np.argmax(est.transform([[orig]])))
++        lower = est.bin_edges_[0][bin_idx]
++        upper = est.bin_edges_[0][bin_idx + 1]
++        expected = (lower + upper) / 2
++        print(f"    X[{i}]={orig:.1f} -> bin {bin_idx} [{lower:.3f}, {upper:.3f}] -> inv={inv:.3f} (expected={expected:.3f})")
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 000000000..ad7bc31b3
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,17 @@
++import numpy as np
++from sklearn.preprocessing import KBinsDiscretizer
++
++# Test the exact case mentioned in the issue
++X = np.array([0, 0.5, 2, 3, 9, 10]).reshape(-1, 1)
++
++# Test with different n_bins values
++for n_bins in [3, 4, 5]:
++    print(f"\nTesting with n_bins={n_bins}")
++    est = KBinsDiscretizer(n_bins=n_bins, strategy='kmeans', encode='ordinal')
++    try:
++        Xt = est.fit_transform(X)
++        print(f"  Success! Transformed shape: {Xt.shape}")
++        print(f"  Bin edges: {est.bin_edges_[0]}")
++        print(f"  Monotonic: {np.all(np.diff(est.bin_edges_[0]) >= 0)}")
++    except ValueError as e:
++        print(f"  Failed with error: {e}")

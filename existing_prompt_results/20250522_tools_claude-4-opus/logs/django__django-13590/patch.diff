@@ -1,0 +1,582 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..58cec899c6 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,15 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            resolved_values = [
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+-            )
++            ]
++            # Named tuples need special handling - they require unpacking
++            if hasattr(value, '_fields'):
++                return type(value)(*resolved_values)
++            else:
++                return type(value)(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/apps.py b/test_app/apps.py
+new file mode 100644
+index 0000000000..04ba5af569
+--- /dev/null
++++ b/test_app/apps.py
+@@ -0,0 +1,5 @@
++
++from django.apps import AppConfig
++
++class TestAppConfig(AppConfig):
++    name = 'test_app'
+diff --git a/test_app/models.py b/test_app/models.py
+new file mode 100644
+index 0000000000..56047e242c
+--- /dev/null
++++ b/test_app/models.py
+@@ -0,0 +1,11 @@
++
++from django.db import models
++
++class Product(models.Model):
++    name = models.CharField(max_length=100)
++    price = models.DecimalField(max_digits=10, decimal_places=2)
++    created_date = models.DateField()
++    quantity = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..62d56cdfb5
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,97 @@
++"""Test edge cases for the named tuple fix."""
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++    SECRET_KEY='test',
++)
++django.setup()
++
++from collections import namedtuple
++from django.db.models.sql.query import Query
++from django.db import models
++
++
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++
++def test_nested_named_tuples():
++    """Test nested named tuples."""
++    Inner = namedtuple('Inner', ['a', 'b'])
++    Outer = namedtuple('Outer', ['inner', 'c'])
++    
++    inner = Inner(1, 2)
++    outer = Outer(inner, 3)
++    
++    query = Query(TestModel)
++    result = query.resolve_lookup_value(outer, None, True)
++    
++    print(f"Nested named tuple test:")
++    print(f"  Input: {outer}")
++    print(f"  Result: {result}")
++    print(f"  Inner preserved: {isinstance(result.inner, Inner)}")
++    print()
++
++
++def test_empty_named_tuple():
++    """Test empty named tuple."""
++    Empty = namedtuple('Empty', [])
++    empty = Empty()
++    
++    query = Query(TestModel)
++    result = query.resolve_lookup_value(empty, None, True)
++    
++    print(f"Empty named tuple test:")
++    print(f"  Input: {empty}")
++    print(f"  Result: {result}")
++    print(f"  Type preserved: {type(result) == Empty}")
++    print()
++
++
++def test_single_field_named_tuple():
++    """Test single field named tuple."""
++    Single = namedtuple('Single', ['value'])
++    single = Single(42)
++    
++    query = Query(TestModel)
++    result = query.resolve_lookup_value(single, None, True)
++    
++    print(f"Single field named tuple test:")
++    print(f"  Input: {single}")
++    print(f"  Result: {result}")
++    print(f"  Value: {result.value}")
++    print()
++
++
++def test_mixed_types_in_list():
++    """Test list with mixed types including named tuples."""
++    Range = namedtuple('Range', ['start', 'end'])
++    mixed_list = [1, Range(2, 3), 'test', (4, 5)]
++    
++    query = Query(TestModel)
++    result = query.resolve_lookup_value(mixed_list, None, True)
++    
++    print(f"Mixed types list test:")
++    print(f"  Input: {mixed_list}")
++    print(f"  Result: {result}")
++    print(f"  Named tuple preserved: {isinstance(result[1], Range)}")
++    print(f"  Regular tuple preserved: {isinstance(result[3], tuple)}")
++    print()
++
++
++if __name__ == '__main__':
++    test_nested_named_tuples()
++    test_empty_named_tuple()
++    test_single_field_named_tuple()
++    test_mixed_types_in_list()
+diff --git a/test_named_tuple_range_integration.py b/test_named_tuple_range_integration.py
+new file mode 100644
+index 0000000000..5686ff8784
+--- /dev/null
++++ b/test_named_tuple_range_integration.py
+@@ -0,0 +1,136 @@
++"""Integration test for named tuples with __range lookups."""
++import os
++import sys
++import django
++from collections import namedtuple
++from datetime import date
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++SECRET_KEY = 'test'
++USE_TZ = False
++""")
++
++# Create app
++os.makedirs('/testbed/test_app', exist_ok=True)
++with open('/testbed/test_app/__init__.py', 'w') as f:
++    f.write("")
++
++with open('/testbed/test_app/models.py', 'w') as f:
++    f.write("""
++from django.db import models
++
++class Product(models.Model):
++    name = models.CharField(max_length=100)
++    price = models.DecimalField(max_digits=10, decimal_places=2)
++    created_date = models.DateField()
++    quantity = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++""")
++
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from django.db import connection
++from decimal import Decimal
++from test_app.models import Product
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Product)
++
++# Define named tuples for different types
++PriceRange = namedtuple('PriceRange', ['min_price', 'max_price'])
++DateRange = namedtuple('DateRange', ['start_date', 'end_date'])
++QuantityRange = namedtuple('QuantityRange', ['low', 'high'])
++
++def test_named_tuples_with_different_field_types():
++    """Test named tuples work with various field types in __range lookups."""
++    
++    # Create test data
++    Product.objects.create(
++        name="Product 1",
++        price=Decimal("10.50"),
++        created_date=date(2023, 1, 15),
++        quantity=5
++    )
++    Product.objects.create(
++        name="Product 2", 
++        price=Decimal("25.00"),
++        created_date=date(2023, 2, 20),
++        quantity=15
++    )
++    Product.objects.create(
++        name="Product 3",
++        price=Decimal("50.00"),
++        created_date=date(2023, 3, 10),
++        quantity=25
++    )
++    
++    print("Testing named tuples with different field types:")
++    print()
++    
++    # Test with DecimalField
++    price_range = PriceRange(min_price=Decimal("20.00"), max_price=Decimal("30.00"))
++    results = Product.objects.filter(price__range=price_range)
++    print(f"Price range {price_range}:")
++    for p in results:
++        print(f"  - {p.name}: ${p.price}")
++    assert results.count() == 1
++    assert results.first().name == "Product 2"
++    print()
++    
++    # Test with DateField
++    date_range = DateRange(start_date=date(2023, 2, 1), end_date=date(2023, 2, 28))
++    results = Product.objects.filter(created_date__range=date_range)
++    print(f"Date range {date_range}:")
++    for p in results:
++        print(f"  - {p.name}: {p.created_date}")
++    assert results.count() == 1
++    assert results.first().name == "Product 2"
++    print()
++    
++    # Test with IntegerField
++    quantity_range = QuantityRange(low=10, high=20)
++    results = Product.objects.filter(quantity__range=quantity_range)
++    print(f"Quantity range {quantity_range}:")
++    for p in results:
++        print(f"  - {p.name}: {p.quantity} units")
++    assert results.count() == 1
++    assert results.first().name == "Product 2"
++    print()
++    
++    # Test combining multiple named tuple ranges
++    results = Product.objects.filter(
++        price__range=PriceRange(Decimal("0"), Decimal("30")),
++        quantity__range=QuantityRange(0, 20)
++    )
++    print("Combined ranges (price 0-30, quantity 0-20):")
++    for p in results:
++        print(f"  - {p.name}: ${p.price}, {p.quantity} units")
++    assert results.count() == 2
++    print()
++    
++    print("All tests passed!")
++    return True
++
++if __name__ == "__main__":
++    success = test_named_tuples_with_different_field_types()
++    sys.exit(0 if success else 1)
+diff --git a/test_named_tuple_regression.py b/test_named_tuple_regression.py
+new file mode 100644
+index 0000000000..1f49f9fdf2
+--- /dev/null
++++ b/test_named_tuple_regression.py
+@@ -0,0 +1,91 @@
++"""
++Test case for named tuple support in __range lookups.
++This test ensures that the regression described in the issue is fixed.
++"""
++from collections import namedtuple
++from django.test import TestCase
++from django.db import models
++from django.db.models.sql.query import Query
++
++
++class NamedTupleRegressionTest(TestCase):
++    """Test that named tuples work correctly with resolve_lookup_value."""
++    
++    def test_named_tuple_in_resolve_lookup_value(self):
++        """Test that named tuples are properly reconstructed."""
++        # Create a simple model for testing
++        class TestModel(models.Model):
++            value = models.IntegerField()
++            
++            class Meta:
++                app_label = 'test'
++        
++        # Create a named tuple type
++        DateRange = namedtuple('DateRange', ['near', 'far'])
++        
++        # Create an instance
++        date_range = DateRange(near=1, far=10)
++        
++        # Test resolve_lookup_value
++        query = Query(TestModel)
++        result = query.resolve_lookup_value(date_range, can_reuse=None, allow_joins=True)
++        
++        # Verify the result
++        self.assertIsInstance(result, DateRange)
++        self.assertEqual(result.near, 1)
++        self.assertEqual(result.far, 10)
++        
++    def test_regular_tuple_still_works(self):
++        """Ensure regular tuples still work as before."""
++        class TestModel(models.Model):
++            value = models.IntegerField()
++            
++            class Meta:
++                app_label = 'test'
++        
++        regular_tuple = (1, 10)
++        
++        query = Query(TestModel)
++        result = query.resolve_lookup_value(regular_tuple, can_reuse=None, allow_joins=True)
++        
++        self.assertIsInstance(result, tuple)
++        self.assertEqual(result, (1, 10))
++        
++    def test_list_still_works(self):
++        """Ensure lists still work as before."""
++        class TestModel(models.Model):
++            value = models.IntegerField()
++            
++            class Meta:
++                app_label = 'test'
++        
++        test_list = [1, 10]
++        
++        query = Query(TestModel)
++        result = query.resolve_lookup_value(test_list, can_reuse=None, allow_joins=True)
++        
++        self.assertIsInstance(result, list)
++        self.assertEqual(result, [1, 10])
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['django.contrib.contenttypes'],
++        SECRET_KEY='test',
++    )
++    django.setup()
++    
++    # Run the tests
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(['__main__'])
+diff --git a/test_namedtuple_range.py b/test_namedtuple_range.py
+new file mode 100644
+index 0000000000..d640e85c4d
+--- /dev/null
++++ b/test_namedtuple_range.py
+@@ -0,0 +1,63 @@
++"""Test script to reproduce the named tuple issue with __range lookups."""
++import os
++import sys
++import django
++from collections import namedtuple
++from django.db import models
++from django.test import TestCase
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++""")
++
++django.setup()
++
++# Create a test model
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the named tuple
++DateRange = namedtuple('DateRange', ['near', 'far'])
++
++# Test the issue
++from django.db.models.sql.query import Query
++
++def test_named_tuple_issue():
++    """Test that named tuples work with resolve_lookup_value."""
++    query = Query(TestModel)
++    
++    # Create a named tuple instance
++    date_range = DateRange(near=1, far=10)
++    
++    # This should fail in Django 3.0 without the fix
++    try:
++        result = query.resolve_lookup_value(date_range, None, True)
++        print(f"Success! Result: {result}")
++        print(f"Result type: {type(result)}")
++        print(f"Is named tuple: {isinstance(result, DateRange)}")
++        return True
++    except TypeError as e:
++        print(f"Error: {e}")
++        return False
++
++if __name__ == "__main__":
++    success = test_named_tuple_issue()
++    sys.exit(0 if success else 1)
+diff --git a/test_range_lookup.py b/test_range_lookup.py
+new file mode 100644
+index 0000000000..c859986f54
+--- /dev/null
++++ b/test_range_lookup.py
+@@ -0,0 +1,92 @@
++"""Test script to test named tuple with __range lookups in actual queries."""
++import os
++import sys
++import django
++from collections import namedtuple
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++SECRET_KEY = 'test'
++""")
++
++# Create app config
++os.makedirs('/testbed/test_app', exist_ok=True)
++with open('/testbed/test_app/__init__.py', 'w') as f:
++    f.write("")
++
++with open('/testbed/test_app/models.py', 'w') as f:
++    f.write("""
++from django.db import models
++
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_app'
++""")
++
++with open('/testbed/test_app/apps.py', 'w') as f:
++    f.write("""
++from django.apps import AppConfig
++
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++""")
++
++sys.path.insert(0, '/testbed')
++
++django.setup()
++
++from django.db import connection
++from test_app.models import TestModel
++
++# Create the named tuple
++DateRange = namedtuple('DateRange', ['near', 'far'])
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue
++def test_range_with_named_tuple():
++    """Test that named tuples work with __range lookups."""
++    # Create some test data
++    TestModel.objects.create(value=5)
++    TestModel.objects.create(value=15)
++    TestModel.objects.create(value=25)
++    
++    # Create a named tuple for the range
++    range_tuple = DateRange(near=10, far=20)
++    
++    # This should work with the fix
++    try:
++        results = TestModel.objects.filter(value__range=range_tuple)
++        print(f"Query successful!")
++        print(f"Found {results.count()} results")
++        for obj in results:
++            print(f"  - value: {obj.value}")
++        return True
++    except Exception as e:
++        print(f"Error: {e}")
++        import traceback
++        traceback.print_exc()
++        return False
++
++if __name__ == "__main__":
++    success = test_range_with_named_tuple()
++    sys.exit(0 if success else 1)
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..8edced3319
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,14 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'test_app',
++]
++SECRET_KEY = 'test'
++USE_TZ = False

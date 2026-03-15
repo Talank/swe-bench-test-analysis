@@ -1,0 +1,732 @@
+diff --git a/demo_fix.py b/demo_fix.py
+new file mode 100644
+index 0000000000..93cc0f3542
+--- /dev/null
++++ b/demo_fix.py
+@@ -0,0 +1,91 @@
++"""
++Demonstration of the fix for bulk_create with db_column fields
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = True
++""")
++
++django.setup()
++
++from django.db import models, connection
++
++class ActivityBlackListed(models.Model):
++    """
++    Model from the problem statement
++    """
++    class Meta:
++        db_table = "Activity_BlackListed"
++        app_label = 'test_app'
++    
++    blacklistid = models.IntegerField(primary_key=True, db_column="BlacklistID")
++    sectorid = models.IntegerField(null=True, blank=True, db_column="SectorID")
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ActivityBlackListed)
++
++print("BEFORE FIX:")
++print("The ON CONFLICT clause would have used field names (blacklistid, sectorid)")
++print("instead of db_column names (BlacklistID, SectorID), causing a PostgreSQL error.")
++print()
++print("AFTER FIX:")
++print("The ON CONFLICT clause now correctly uses db_column names.")
++print()
++
++# Test the fix
++instances = [
++    ActivityBlackListed(blacklistid=1, sectorid=10),
++    ActivityBlackListed(blacklistid=2, sectorid=20),
++]
++
++# Insert initial data
++ActivityBlackListed.objects.bulk_create(instances)
++
++# Now update with conflicts
++updated_instances = [
++    ActivityBlackListed(blacklistid=1, sectorid=100),
++    ActivityBlackListed(blacklistid=2, sectorid=200),
++]
++
++from django.test.utils import CaptureQueriesContext
++with CaptureQueriesContext(connection) as queries:
++    ActivityBlackListed.objects.bulk_create(
++        updated_instances,
++        update_conflicts=True,
++        update_fields=["sectorid"],
++        unique_fields=["blacklistid"]
++    )
++
++# Show the generated SQL
++for query in queries:
++    if "ON CONFLICT" in query['sql']:
++        print("Generated SQL:")
++        print(query['sql'])
++        print()
++        print("Notice that:")
++        print("1. INSERT uses correct column names: BlacklistID, SectorID")
++        print("2. ON CONFLICT uses correct column name: BlacklistID")
++        print("3. DO UPDATE SET uses correct column name: SectorID")
++        print()
++        print("This would work correctly in PostgreSQL now!")
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index 0562a71dd1..e94d89f99a 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -1722,11 +1722,28 @@ class SQLInsertCompiler(SQLCompiler):
+ 
+         placeholder_rows, param_rows = self.assemble_as_sql(fields, value_rows)
+ 
++        # Convert field names to column names for on_conflict handling
++        if self.query.update_fields:
++            update_columns = []
++            for field_name in self.query.update_fields:
++                field = opts.get_field(field_name)
++                update_columns.append(field.column)
++        else:
++            update_columns = []
++        
++        if self.query.unique_fields:
++            unique_columns = []
++            for field_name in self.query.unique_fields:
++                field = opts.get_field(field_name)
++                unique_columns.append(field.column)
++        else:
++            unique_columns = []
++        
+         on_conflict_suffix_sql = self.connection.ops.on_conflict_suffix_sql(
+             fields,
+             self.query.on_conflict,
+-            self.query.update_fields,
+-            self.query.unique_fields,
++            update_columns,
++            unique_columns,
+         )
+         if (
+             self.returning_fields
+diff --git a/test_bulk_create_db_column.py b/test_bulk_create_db_column.py
+new file mode 100644
+index 0000000000..39df2e7e0c
+--- /dev/null
++++ b/test_bulk_create_db_column.py
+@@ -0,0 +1,71 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = True
++""")
++
++django.setup()
++
++from django.db import models, connection
++from django.test import TestCase
++
++class ActivityBlackListed(models.Model):
++    """Test model with db_column set on fields"""
++    class Meta:
++        db_table = "Activity_BlackListed"
++        app_label = 'test_app'
++    
++    blacklistid = models.IntegerField(primary_key=True, db_column="BlacklistID")
++    sectorid = models.IntegerField(null=True, blank=True, db_column="SectorID")
++    name = models.CharField(max_length=100, db_column="Name", default="")
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ActivityBlackListed)
++
++# Test the issue
++instances = [
++    ActivityBlackListed(blacklistid=1, sectorid=10, name="Test1"),
++    ActivityBlackListed(blacklistid=2, sectorid=20, name="Test2"),
++]
++
++# First, let's see what SQL is generated
++from django.db import connection
++from django.test.utils import CaptureQueriesContext
++
++# Try bulk_create with update_conflicts
++try:
++    with CaptureQueriesContext(connection) as queries:
++        ActivityBlackListed.objects.bulk_create(
++            instances, 
++            update_conflicts=True, 
++            update_fields=["sectorid", "name"], 
++            unique_fields=["blacklistid"]
++        )
++    
++    print("SQL Generated:")
++    for query in queries:
++        print(query['sql'])
++        print()
++except Exception as e:
++    print(f"Error: {e}")
++    print(f"Error type: {type(e)}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..53bccda746
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,189 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = True
++""")
++
++django.setup()
++
++from django.db import models, connection
++from django.test import TestCase
++
++class TestModel(models.Model):
++    """Test model with various db_column configurations"""
++    class Meta:
++        db_table = "test_table"
++        app_label = 'test_app'
++    
++    # Primary key with db_column
++    id_field = models.IntegerField(primary_key=True, db_column="ID")
++    
++    # Regular fields with db_column
++    name_field = models.CharField(max_length=100, db_column="Name")
++    value_field = models.IntegerField(db_column="Value", default=0)
++    
++    # Field without db_column (should use field name)
++    status = models.CharField(max_length=20, default="active")
++    
++    # Field with same name as db_column
++    description = models.TextField(db_column="description", default="")
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test cases
++print("Test 1: Basic bulk_create with update_conflicts")
++instances = [
++    TestModel(id_field=1, name_field="Test1", value_field=10, status="active"),
++    TestModel(id_field=2, name_field="Test2", value_field=20, status="inactive"),
++]
++
++try:
++    with connection.cursor() as cursor:
++        # Clear table first
++        cursor.execute("DELETE FROM test_table")
++    
++    # Insert initial data
++    TestModel.objects.bulk_create(instances)
++    
++    # Now try to update with conflicts
++    updated_instances = [
++        TestModel(id_field=1, name_field="Updated1", value_field=100, status="updated"),
++        TestModel(id_field=2, name_field="Updated2", value_field=200, status="updated"),
++    ]
++    
++    from django.db import connection
++    from django.test.utils import CaptureQueriesContext
++    
++    with CaptureQueriesContext(connection) as queries:
++        TestModel.objects.bulk_create(
++            updated_instances,
++            update_conflicts=True,
++            update_fields=["name_field", "value_field", "status"],
++            unique_fields=["id_field"]
++        )
++    
++    print("SQL for update_conflicts:")
++    for query in queries:
++        if "ON CONFLICT" in query['sql']:
++            print(query['sql'])
++    
++    # Verify the update worked
++    obj1 = TestModel.objects.get(id_field=1)
++    obj2 = TestModel.objects.get(id_field=2)
++    
++    print(f"\nVerification:")
++    print(f"Object 1: name={obj1.name_field}, value={obj1.value_field}, status={obj1.status}")
++    print(f"Object 2: name={obj2.name_field}, value={obj2.value_field}, status={obj2.status}")
++    
++    print("\nTest 1: PASSED")
++    
++except Exception as e:
++    print(f"Test 1 FAILED: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\n" + "="*50 + "\n")
++
++print("Test 2: Mixed db_column and regular fields")
++try:
++    with connection.cursor() as cursor:
++        cursor.execute("DELETE FROM test_table")
++    
++    instances = [
++        TestModel(id_field=3, name_field="Test3", value_field=30, status="new", description="desc3"),
++    ]
++    
++    TestModel.objects.bulk_create(instances)
++    
++    # Update with mixed fields
++    updated = [
++        TestModel(id_field=3, name_field="Updated3", value_field=300, status="updated", description="updated desc"),
++    ]
++    
++    with CaptureQueriesContext(connection) as queries:
++        TestModel.objects.bulk_create(
++            updated,
++            update_conflicts=True,
++            update_fields=["name_field", "status", "description"],  # Mix of db_column and regular
++            unique_fields=["id_field"]
++        )
++    
++    print("SQL for mixed fields:")
++    for query in queries:
++        if "ON CONFLICT" in query['sql']:
++            print(query['sql'])
++            # Check that it uses correct column names
++            assert '"Name"' in query['sql'], "Should use db_column 'Name' not 'name_field'"
++            assert '"status"' in query['sql'], "Should use field name 'status' when no db_column"
++            assert '"description"' in query['sql'], "Should use db_column 'description'"
++    
++    print("\nTest 2: PASSED")
++    
++except Exception as e:
++    print(f"Test 2 FAILED: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\n" + "="*50 + "\n")
++
++print("Test 3: Ignore conflicts")
++try:
++    with connection.cursor() as cursor:
++        cursor.execute("DELETE FROM test_table")
++    
++    instances = [
++        TestModel(id_field=4, name_field="Test4", value_field=40),
++    ]
++    
++    TestModel.objects.bulk_create(instances)
++    
++    # Try to insert duplicate with ignore_conflicts
++    duplicate = [
++        TestModel(id_field=4, name_field="Duplicate", value_field=400),
++    ]
++    
++    with CaptureQueriesContext(connection) as queries:
++        result = TestModel.objects.bulk_create(
++            duplicate,
++            ignore_conflicts=True
++        )
++    
++    print("SQL for ignore_conflicts:")
++    for query in queries:
++        if "INSERT" in query['sql']:
++            print(query['sql'])
++    
++    # Verify original wasn't updated
++    obj = TestModel.objects.get(id_field=4)
++    assert obj.name_field == "Test4", f"Expected 'Test4', got '{obj.name_field}'"
++    assert obj.value_field == 40, f"Expected 40, got {obj.value_field}"
++    
++    print("\nTest 3: PASSED")
++    
++except Exception as e:
++    print(f"Test 3 FAILED: {e}")
++    import traceback
++    traceback.print_exc()
++
++print("\nAll tests completed!")
+diff --git a/test_db_column_bulk_create.py b/test_db_column_bulk_create.py
+new file mode 100644
+index 0000000000..6fe0f03713
+--- /dev/null
++++ b/test_db_column_bulk_create.py
+@@ -0,0 +1,127 @@
++"""
++Test for bulk_create with db_column on unique_fields and update_fields
++"""
++import os
++import sys
++import django
++from django.test import TestCase, TransactionTestCase
++from django.db import models, connection
++
++# Add the test directory to Python path
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++
++# Initialize Django
++django.setup()
++
++
++class BulkCreateDBColumnModel(models.Model):
++    """Model with db_column set on fields"""
++    class Meta:
++        app_label = 'test_db_column'
++        db_table = 'bulk_create_db_column_test'
++    
++    custom_id = models.IntegerField(primary_key=True, db_column="CustomID")
++    sector_id = models.IntegerField(null=True, blank=True, db_column="SectorID")
++    name = models.CharField(max_length=100, db_column="Name", default="")
++    status = models.CharField(max_length=20, default="active")  # No db_column
++
++
++class BulkCreateDBColumnTests(TransactionTestCase):
++    """Test bulk_create with db_column fields"""
++    
++    def setUp(self):
++        # Create the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(BulkCreateDBColumnModel)
++    
++    def tearDown(self):
++        # Drop the table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(BulkCreateDBColumnModel)
++    
++    def test_bulk_create_update_conflicts_with_db_column(self):
++        """Test that ON CONFLICT uses correct column names when db_column is set"""
++        # Create initial objects
++        objs = [
++            BulkCreateDBColumnModel(custom_id=1, sector_id=10, name="Test1", status="active"),
++            BulkCreateDBColumnModel(custom_id=2, sector_id=20, name="Test2", status="inactive"),
++        ]
++        BulkCreateDBColumnModel.objects.bulk_create(objs)
++        
++        # Update with conflicts
++        updated_objs = [
++            BulkCreateDBColumnModel(custom_id=1, sector_id=100, name="Updated1", status="updated"),
++            BulkCreateDBColumnModel(custom_id=2, sector_id=200, name="Updated2", status="updated"),
++        ]
++        
++        # Capture the SQL
++        from django.test.utils import CaptureQueriesContext
++        with CaptureQueriesContext(connection) as queries:
++            BulkCreateDBColumnModel.objects.bulk_create(
++                updated_objs,
++                update_conflicts=True,
++                update_fields=["sector_id", "name", "status"],
++                unique_fields=["custom_id"]
++            )
++        
++        # Find the query with ON CONFLICT
++        conflict_query = None
++        for query in queries:
++            if "ON CONFLICT" in query['sql']:
++                conflict_query = query['sql']
++                break
++        
++        self.assertIsNotNone(conflict_query, "Should have found an ON CONFLICT query")
++        
++        # Check that the query uses db_column names
++        self.assertIn('"CustomID"', conflict_query, "Should use db_column 'CustomID' in ON CONFLICT")
++        self.assertIn('"SectorID"', conflict_query, "Should use db_column 'SectorID' in UPDATE SET")
++        self.assertIn('"Name"', conflict_query, "Should use db_column 'Name' in UPDATE SET")
++        self.assertIn('"status"', conflict_query, "Should use field name 'status' when no db_column")
++        
++        # Verify the update worked
++        obj1 = BulkCreateDBColumnModel.objects.get(custom_id=1)
++        self.assertEqual(obj1.sector_id, 100)
++        self.assertEqual(obj1.name, "Updated1")
++        self.assertEqual(obj1.status, "updated")
++        
++        obj2 = BulkCreateDBColumnModel.objects.get(custom_id=2)
++        self.assertEqual(obj2.sector_id, 200)
++        self.assertEqual(obj2.name, "Updated2")
++        self.assertEqual(obj2.status, "updated")
++    
++    def test_bulk_create_ignore_conflicts_with_db_column(self):
++        """Test that ignore_conflicts works with db_column"""
++        # Create initial object
++        obj = BulkCreateDBColumnModel(custom_id=3, sector_id=30, name="Test3")
++        obj.save()
++        
++        # Try to create duplicate with ignore_conflicts
++        duplicate = BulkCreateDBColumnModel(custom_id=3, sector_id=300, name="Duplicate")
++        result = BulkCreateDBColumnModel.objects.bulk_create(
++            [duplicate],
++            ignore_conflicts=True
++        )
++        
++        # Verify original wasn't changed
++        obj = BulkCreateDBColumnModel.objects.get(custom_id=3)
++        self.assertEqual(obj.sector_id, 30)
++        self.assertEqual(obj.name, "Test3")
++
++
++if __name__ == '__main__':
++    # Run the tests
++    import unittest
++    from django.test.utils import setup_test_environment, teardown_test_environment
++    
++    setup_test_environment()
++    
++    suite = unittest.TestLoader().loadTestsFromTestCase(BulkCreateDBColumnTests)
++    runner = unittest.TextTestRunner(verbosity=2)
++    result = runner.run(suite)
++    
++    teardown_test_environment()
++    
++    # Exit with appropriate code
++    sys.exit(0 if result.wasSuccessful() else 1)
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..3288d0399d
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,78 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'test_settings'
++
++# Create a minimal settings module
++with open('/testbed/test_settings.py', 'w') as f:
++    f.write("""
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = True
++""")
++
++django.setup()
++
++from django.db import models, connection
++from django.test import TestCase
++
++class ActivityBlackListed(models.Model):
++    """Test model with db_column set on fields"""
++    class Meta:
++        db_table = "Activity_BlackListed"
++        app_label = 'test_app'
++    
++    blacklistid = models.IntegerField(primary_key=True, db_column="BlacklistID")
++    sectorid = models.IntegerField(null=True, blank=True, db_column="SectorID")
++    name = models.CharField(max_length=100, db_column="Name", default="")
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ActivityBlackListed)
++
++# Test the issue
++instances = [
++    ActivityBlackListed(blacklistid=1, sectorid=10, name="Test1"),
++    ActivityBlackListed(blacklistid=2, sectorid=20, name="Test2"),
++]
++
++# Monkey patch to debug
++original_on_conflict_suffix_sql = connection.ops.on_conflict_suffix_sql
++
++def debug_on_conflict_suffix_sql(fields, on_conflict, update_fields, unique_fields):
++    print(f"on_conflict_suffix_sql called with:")
++    print(f"  fields: {fields} (type: {type(fields)})")
++    print(f"  on_conflict: {on_conflict}")
++    print(f"  update_fields: {update_fields} (type: {type(update_fields)})")
++    if update_fields:
++        print(f"    First update field: {update_fields[0]} (type: {type(update_fields[0])})")
++    print(f"  unique_fields: {unique_fields} (type: {type(unique_fields)})")
++    if unique_fields:
++        print(f"    First unique field: {unique_fields[0]} (type: {type(unique_fields[0])})")
++    return original_on_conflict_suffix_sql(fields, on_conflict, update_fields, unique_fields)
++
++connection.ops.on_conflict_suffix_sql = debug_on_conflict_suffix_sql
++
++# Try bulk_create with update_conflicts
++try:
++    ActivityBlackListed.objects.bulk_create(
++        instances, 
++        update_conflicts=True, 
++        update_fields=["sectorid", "name"], 
++        unique_fields=["blacklistid"]
++    )
++except Exception as e:
++    print(f"Error: {e}")
++    print(f"Error type: {type(e)}")
+diff --git a/test_settings.py b/test_settings.py
+new file mode 100644
+index 0000000000..2edb342c6e
+--- /dev/null
++++ b/test_settings.py
+@@ -0,0 +1,13 @@
++
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++SECRET_KEY = 'test'
++USE_TZ = True
+diff --git a/tests/bulk_create/models.py b/tests/bulk_create/models.py
+index 27abc416bd..e8a03d640a 100644
+--- a/tests/bulk_create/models.py
++++ b/tests/bulk_create/models.py
+@@ -136,3 +136,11 @@ class RelatedModel(models.Model):
+     name = models.CharField(max_length=15, null=True)
+     country = models.OneToOneField(Country, models.CASCADE, primary_key=True)
+     big_auto_fields = models.ManyToManyField(BigAutoFieldModel)
++
++
++class DBColumnModel(models.Model):
++    """Model with db_column set on fields for testing bulk_create"""
++    custom_id = models.IntegerField(primary_key=True, db_column="CustomID")
++    sector_id = models.IntegerField(null=True, blank=True, db_column="SectorID")
++    name = models.CharField(max_length=100, db_column="Name", default="")
++    status = models.CharField(max_length=20, default="active")  # No db_column
+diff --git a/tests/bulk_create/tests.py b/tests/bulk_create/tests.py
+index 6c490d1235..1e7fe92fe6 100644
+--- a/tests/bulk_create/tests.py
++++ b/tests/bulk_create/tests.py
+@@ -21,6 +21,7 @@ from django.test import (
+ from .models import (
+     BigAutoFieldModel,
+     Country,
++    DBColumnModel,
+     NoFields,
+     NullableFields,
+     Pizzeria,
+@@ -772,3 +773,63 @@ class BulkCreateTests(TestCase):
+     @skipIfDBFeature("supports_update_conflicts_with_target")
+     def test_update_conflicts_no_unique_fields(self):
+         self._test_update_conflicts([])
++
++    @skipUnlessDBFeature("supports_update_conflicts", "supports_update_conflicts_with_target")
++    def test_update_conflicts_with_db_column(self):
++        """Test that ON CONFLICT uses correct column names when db_column is set"""
++        # Create initial objects
++        objs = [
++            DBColumnModel(custom_id=1, sector_id=10, name="Test1", status="active"),
++            DBColumnModel(custom_id=2, sector_id=20, name="Test2", status="inactive"),
++        ]
++        DBColumnModel.objects.bulk_create(objs)
++        
++        # Update with conflicts
++        updated_objs = [
++            DBColumnModel(custom_id=1, sector_id=100, name="Updated1", status="updated"),
++            DBColumnModel(custom_id=2, sector_id=200, name="Updated2", status="updated"),
++        ]
++        
++        # Capture the SQL to verify column names are correct
++        from django.test.utils import CaptureQueriesContext
++        with CaptureQueriesContext(connection) as queries:
++            DBColumnModel.objects.bulk_create(
++                updated_objs,
++                update_conflicts=True,
++                update_fields=["sector_id", "name", "status"],
++                unique_fields=["custom_id"]
++            )
++        
++        # Find the query with ON CONFLICT
++        conflict_query = None
++        for query in queries:
++            if "ON CONFLICT" in query['sql']:
++                conflict_query = query['sql']
++                break
++        
++        self.assertIsNotNone(conflict_query, "Should have found an ON CONFLICT query")
++        
++        # Check that the query uses db_column names
++        # The exact format depends on the database backend
++        if connection.vendor == 'postgresql':
++            self.assertIn('"CustomID"', conflict_query, "Should use db_column 'CustomID' in ON CONFLICT")
++            self.assertIn('"SectorID"', conflict_query, "Should use db_column 'SectorID' in UPDATE SET")
++            self.assertIn('"Name"', conflict_query, "Should use db_column 'Name' in UPDATE SET")
++            self.assertIn('"status"', conflict_query, "Should use field name 'status' when no db_column")
++        elif connection.vendor == 'sqlite':
++            # SQLite doesn't quote identifiers the same way
++            self.assertIn('CustomID', conflict_query, "Should use db_column 'CustomID' in ON CONFLICT")
++            self.assertIn('SectorID', conflict_query, "Should use db_column 'SectorID' in UPDATE SET")
++            self.assertIn('Name', conflict_query, "Should use db_column 'Name' in UPDATE SET")
++            self.assertIn('status', conflict_query, "Should use field name 'status' when no db_column")
++        
++        # Verify the update worked
++        obj1 = DBColumnModel.objects.get(custom_id=1)
++        self.assertEqual(obj1.sector_id, 100)
++        self.assertEqual(obj1.name, "Updated1")
++        self.assertEqual(obj1.status, "updated")
++        
++        obj2 = DBColumnModel.objects.get(custom_id=2)
++        self.assertEqual(obj2.sector_id, 200)
++        self.assertEqual(obj2.name, "Updated2")
++        self.assertEqual(obj2.status, "updated")

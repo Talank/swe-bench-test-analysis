@@ -1,0 +1,355 @@
+diff --git a/django/utils/timesince.py b/django/utils/timesince.py
+index 701c49bab9..27a19c75f2 100644
+--- a/django/utils/timesince.py
++++ b/django/utils/timesince.py
+@@ -97,6 +97,8 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+             d.hour,
+             d.minute,
+             d.second,
++            0,
++            d.tzinfo,
+         )
+     else:
+         pivot = d
+diff --git a/test_comprehensive_tz.py b/test_comprehensive_tz.py
+new file mode 100644
+index 0000000000..1baf1dbc10
+--- /dev/null
++++ b/test_comprehensive_tz.py
+@@ -0,0 +1,82 @@
++import datetime
++from django.test import TestCase, override_settings
++from django.test.utils import requires_tz_support
++from django.utils import timezone
++from django.utils.timesince import timesince, timeuntil
++
++
++class ComprehensiveTimesinceTests(TestCase):
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_various_intervals_with_tz(self):
++        """Test that timesince works with timezone-aware datetimes for various intervals."""
++        now = timezone.now()
++        
++        test_cases = [
++            (now - datetime.timedelta(days=31), "1\xa0month"),
++            (now - datetime.timedelta(days=62), "2\xa0months"),
++            (now - datetime.timedelta(days=365), "1\xa0year"),
++            (now - datetime.timedelta(days=400), "1\xa0year, 1\xa0month"),
++            (now - datetime.timedelta(days=31, hours=5), "1\xa0month"),
++            # Test a longer interval to ensure we get multiple units
++            (now - datetime.timedelta(days=35), "1\xa0month"),
++        ]
++        
++        for d, expected in test_cases:
++            with self.subTest(delta=now-d, expected=expected):
++                result = timesince(d, now)
++                self.assertEqual(result, expected)
++    
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_timeuntil_with_tz(self):
++        """Test that timeuntil also works with timezone-aware datetimes."""
++        now = timezone.now()
++        future = now + datetime.timedelta(days=31)
++        
++        result = timeuntil(future, now)
++        self.assertEqual(result, "1\xa0month")
++    
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_different_timezones_long_interval(self):
++        """Test with different timezones and long intervals."""
++        import pytz
++        
++        # Create two datetimes in different timezones
++        eastern = pytz.timezone('US/Eastern')
++        pacific = pytz.timezone('US/Pacific')
++        
++        now_eastern = timezone.now().astimezone(eastern)
++        past_pacific = (now_eastern - datetime.timedelta(days=35)).astimezone(pacific)
++        
++        # This should work without raising TypeError
++        result = timesince(past_pacific, now_eastern)
++        self.assertEqual(result, "1\xa0month")
++
++
++if __name__ == "__main__":
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            USE_TZ=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            SECRET_KEY='test-secret-key',
++        )
++        django.setup()
++    
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.ComprehensiveTimesinceTests"])
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..eebe845b9c
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,36 @@
++import datetime
++import django
++from django.conf import settings
++
++settings.configure(
++    USE_TZ=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++from django.utils import timezone
++from django.utils.timesince import timesince
++
++now = timezone.now()
++d = now - datetime.timedelta(days=32, hours=1)
++
++print(f"now: {now}")
++print(f"d: {d}")
++print(f"Difference: {now - d}")
++print(f"Result: {timesince(d, now)}")
++
++# Let's try a clearer case
++d2 = now - datetime.timedelta(days=33)
++print(f"\nd2: {d2}")
++print(f"Difference: {now - d2}")
++print(f"Result: {timesince(d2, now)}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..4c715d47ec
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,64 @@
++import datetime
++import django
++from django.conf import settings
++from django.test import TestCase, override_settings
++from django.test.utils import requires_tz_support
++
++settings.configure(
++    USE_TZ=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++from django.utils import timezone
++from django.utils.timesince import timesince
++
++
++class EdgeCaseTests(TestCase):
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_datetime_with_microseconds(self):
++        """Test that datetimes with microseconds work correctly."""
++        now = timezone.now()
++        # Create a datetime with microseconds
++        d = now.replace(microsecond=123456) - datetime.timedelta(days=31)
++        result = timesince(d, now)
++        self.assertEqual(result, "1\xa0month")
++    
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_datetime_without_microseconds(self):
++        """Test that datetimes without microseconds work correctly."""
++        now = timezone.now().replace(microsecond=0)
++        d = now - datetime.timedelta(days=31)
++        result = timesince(d, now)
++        self.assertEqual(result, "1\xa0month")
++    
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_february_edge_case(self):
++        """Test edge case with February (28/29 days)."""
++        # Use a specific date to ensure consistent behavior
++        march1 = timezone.make_aware(datetime.datetime(2023, 3, 1, 12, 0, 0))
++        jan31 = timezone.make_aware(datetime.datetime(2023, 1, 31, 12, 0, 0))
++        
++        result = timesince(jan31, march1)
++        # From Jan 31 to Mar 1 is exactly 1 month in the algorithm's logic
++        self.assertEqual(result, "1\xa0month")
++
++
++if __name__ == "__main__":
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.EdgeCaseTests"])
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..95294cb82e
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,56 @@
++"""Test the exact issue described in the problem statement."""
++import datetime
++import django
++from django.conf import settings
++from django.test import TestCase, override_settings
++from django.test.utils import requires_tz_support
++
++settings.configure(
++    USE_TZ=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++django.setup()
++
++from django.utils import timezone
++from django.utils.timesince import timesince
++
++
++class TimesinceTests(TestCase):
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_long_interval_with_tz(self):
++        """
++        This is the exact test case from the problem statement.
++        It should not raise TypeError: can't subtract offset-naive and offset-aware datetimes
++        """
++        now = timezone.now()
++        d = now - datetime.timedelta(days=31)
++        self.assertEqual(timesince(d), "1\xa0month")
++
++
++if __name__ == "__main__":
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    
++    print("Running the exact test case from the problem statement...")
++    print("This previously raised: TypeError: can't subtract offset-naive and offset-aware datetimes")
++    print()
++    
++    failures = test_runner.run_tests(["__main__.TimesinceTests.test_long_interval_with_tz"])
++    
++    if failures == 0:
++        print("\n✅ SUCCESS: The issue has been fixed!")
++    else:
++        print("\n❌ FAILURE: The issue persists.")
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..5db79eda4d
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,50 @@
++import datetime
++from django.test import TestCase, override_settings
++from django.test.utils import requires_tz_support
++from django.utils import timezone
++from django.utils.timesince import timesince
++
++
++class ReproduceTimesinceIssue(TestCase):
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_long_interval_with_tz(self):
++        """Test that timesince works with timezone-aware datetimes and intervals > 1 month."""
++        now = timezone.now()
++        d = now - datetime.timedelta(days=31)
++        print(f"now: {now}")
++        print(f"d: {d}")
++        print(f"now is aware: {timezone.is_aware(now)}")
++        print(f"d is aware: {timezone.is_aware(d)}")
++        
++        # This should not raise TypeError
++        result = timesince(d)
++        print(f"Result: {result}")
++        self.assertEqual(result, "1\xa0month")
++
++
++if __name__ == "__main__":
++    import django
++    from django.conf import settings
++    
++    if not settings.configured:
++        settings.configure(
++            USE_TZ=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            SECRET_KEY='test-secret-key',
++        )
++        django.setup()
++    
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__.ReproduceTimesinceIssue"])
+diff --git a/tests/utils_tests/test_timesince.py b/tests/utils_tests/test_timesince.py
+index bf05f32f5e..b5a501a8b7 100644
+--- a/tests/utils_tests/test_timesince.py
++++ b/tests/utils_tests/test_timesince.py
+@@ -1,6 +1,6 @@
+ import datetime
+ 
+-from django.test import TestCase
++from django.test import TestCase, override_settings
+ from django.test.utils import requires_tz_support
+ from django.utils import timezone, translation
+ from django.utils.timesince import timesince, timeuntil
+@@ -240,3 +240,11 @@ class TimesinceTests(TestCase):
+         msg = "depth must be greater than 0."
+         with self.assertRaisesMessage(ValueError, msg):
+             timesince(self.t, self.t, depth=0)
++
++    @requires_tz_support
++    @override_settings(USE_TZ=True)
++    def test_long_interval_with_tz(self):
++        """Test that timesince works with timezone-aware datetimes and intervals > 1 month."""
++        now = timezone.now()
++        d = now - datetime.timedelta(days=31)
++        self.assertEqual(timesince(d), "1\xa0month")

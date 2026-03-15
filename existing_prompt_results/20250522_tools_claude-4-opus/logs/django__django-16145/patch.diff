@@ -1,0 +1,881 @@
+diff --git a/django/core/management/commands/runserver.py b/django/core/management/commands/runserver.py
+index 3c39f57e4d..285d169373 100644
+--- a/django/core/management/commands/runserver.py
++++ b/django/core/management/commands/runserver.py
+@@ -105,6 +105,9 @@ class Command(BaseCommand):
+                     self._raw_ipv6 = True
+                 elif self.use_ipv6 and not _fqdn:
+                     raise CommandError('"%s" is not a valid IPv6 address.' % self.addr)
++                # Handle the special case of "0" as shorthand for "0.0.0.0"
++                elif self.addr == "0":
++                    self.addr = "0.0.0.0"
+         if not self.addr:
+             self.addr = self.default_addr_ipv6 if self.use_ipv6 else self.default_addr
+             self._raw_ipv6 = self.use_ipv6
+diff --git a/simple_test.py b/simple_test.py
+new file mode 100644
+index 0000000000..fe9368080d
+--- /dev/null
++++ b/simple_test.py
+@@ -0,0 +1,39 @@
++import re
++
++# This is the regex from runserver.py
++naiveip_re = re.compile(
++    r"""^(?:
++(?P<addr>
++    (?P<ipv4>\d{1,3}(?:\.\d{1,3}){3}) |         # IPv4 address
++    (?P<ipv6>\[[a-fA-F0-9:]+\]) |               # IPv6 address
++    (?P<fqdn>[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*) # FQDN
++):)?(?P<port>\d+)$""",
++    re.X,
++)
++
++# Test cases
++test_cases = [
++    '0:8000',
++    '0.0.0.0:8000',
++    '127.0.0.1:8000',
++    ':8000',
++    'localhost:8000',
++]
++
++for test in test_cases:
++    m = naiveip_re.match(test)
++    if m:
++        addr, ipv4, ipv6, fqdn, port = m.groups()
++        print(f"\nInput: {test}")
++        print(f"  addr: {addr}")
++        print(f"  ipv4: {ipv4}")
++        print(f"  ipv6: {ipv6}")
++        print(f"  fqdn: {fqdn}")
++        print(f"  port: {port}")
++        
++        # Show what Django would use
++        if not addr:
++            display_addr = "127.0.0.1"  # default_addr
++        else:
++            display_addr = addr
++        print(f"  Django would display: http://{display_addr}:{port}/")
+diff --git a/test_address_parsing.py b/test_address_parsing.py
+new file mode 100644
+index 0000000000..0c25f7f6ce
+--- /dev/null
++++ b/test_address_parsing.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management.commands.runserver import Command
++
++# Configure minimal Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++)
++
++django.setup()
++
++# Create a command instance
++cmd = Command()
++
++# Test address parsing
++test_cases = [
++    ('0:8000', 'Should parse as 0.0.0.0:8000'),
++    ('0.0.0.0:8000', 'Should parse as 0.0.0.0:8000'),
++    ('127.0.0.1:8000', 'Should parse as 127.0.0.1:8000'),
++    (':8000', 'Should parse as default address:8000'),
++]
++
++for addrport, description in test_cases:
++    print(f"\nTesting: {addrport} ({description})")
++    
++    # Simulate command line options
++    options = {
++        'addrport': addrport,
++        'use_ipv6': False,
++        'use_threading': True,
++        'use_reloader': False,
++        'skip_checks': True,
++    }
++    
++    # Call handle to parse the address
++    try:
++        cmd.handle(**options)
++    except SystemExit:
++        pass
++    except Exception as e:
++        # Ignore server startup errors, we just want to see the parsed address
++        pass
++    
++    print(f"  Parsed addr: '{cmd.addr}'")
++    print(f"  Parsed port: '{cmd.port}'")
++    print(f"  Display addr: '{cmd.addr if cmd.addr else 'empty'}'")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..1ed9f4c84b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++"""Test edge cases for the runserver fix"""
++import unittest
++import sys
++import os
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.core.management.commands.runserver import Command
++from django.core.management import CommandError
++
++
++class TestRunserverEdgeCases(unittest.TestCase):
++    def test_zero_with_different_ports(self):
++        """Test that '0:PORT' works with different port numbers"""
++        test_ports = ['8000', '8080', '3000', '9999', '80']
++        
++        for port in test_ports:
++            with self.subTest(port=port):
++                cmd = Command()
++                options = {
++                    'addrport': f'0:{port}',
++                    'use_ipv6': False,
++                }
++                
++                import re
++                from django.core.management.commands.runserver import naiveip_re
++                
++                cmd.use_ipv6 = options["use_ipv6"]
++                cmd._raw_ipv6 = False
++                
++                m = re.match(naiveip_re, options["addrport"])
++                self.assertIsNotNone(m, f"Regex should match '0:{port}'")
++                
++                cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++                
++                if cmd.addr:
++                    if _ipv6:
++                        cmd.addr = cmd.addr[1:-1]
++                        cmd.use_ipv6 = True
++                        cmd._raw_ipv6 = True
++                    elif cmd.use_ipv6 and not _fqdn:
++                        raise CommandError('"%s" is not a valid IPv6 address.' % cmd.addr)
++                    elif cmd.addr == "0":
++                        cmd.addr = "0.0.0.0"
++                
++                self.assertEqual(cmd.addr, '0.0.0.0', f"Address '0' should be converted to '0.0.0.0'")
++                self.assertEqual(cmd.port, port, f"Port should be '{port}'")
++    
++    def test_numeric_hostnames_not_affected(self):
++        """Test that other numeric hostnames are not affected"""
++        # These should NOT be converted
++        test_cases = [
++            ('00:8000', '00', '8000'),  # Double zero
++            ('01:8000', '01', '8000'),  # Zero with leading digit
++            ('10:8000', '10', '8000'),  # Two digits
++            ('0x0:8000', '0x0', '8000'),  # Hex notation
++        ]
++        
++        for addrport, expected_addr, expected_port in test_cases:
++            with self.subTest(addrport=addrport):
++                cmd = Command()
++                options = {
++                    'addrport': addrport,
++                    'use_ipv6': False,
++                }
++                
++                import re
++                from django.core.management.commands.runserver import naiveip_re
++                
++                cmd.use_ipv6 = options["use_ipv6"]
++                cmd._raw_ipv6 = False
++                
++                m = re.match(naiveip_re, options["addrport"])
++                if m is None:
++                    continue  # Some might not match the regex at all
++                
++                cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++                
++                if cmd.addr:
++                    if _ipv6:
++                        cmd.addr = cmd.addr[1:-1]
++                        cmd.use_ipv6 = True
++                        cmd._raw_ipv6 = True
++                    elif cmd.use_ipv6 and not _fqdn:
++                        raise CommandError('"%s" is not a valid IPv6 address.' % cmd.addr)
++                    elif cmd.addr == "0":
++                        cmd.addr = "0.0.0.0"
++                
++                # These should NOT be converted to 0.0.0.0
++                self.assertEqual(cmd.addr, expected_addr, f"Address '{expected_addr}' should not be converted")
++                self.assertEqual(cmd.port, expected_port, f"Port should be '{expected_port}'")
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..c10a2fb107
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management.commands.runserver import Command
++from io import StringIO
++
++# Configure minimal Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=['django.contrib.staticfiles'],
++    STATIC_URL='/static/',
++)
++
++django.setup()
++
++# Test cases
++test_cases = [
++    ('0:8000', 'http://0.0.0.0:8000/'),
++    ('0.0.0.0:8000', 'http://0.0.0.0:8000/'),
++    ('127.0.0.1:8000', 'http://127.0.0.1:8000/'),
++    ('localhost:8000', 'http://localhost:8000/'),
++]
++
++for addrport, expected_url in test_cases:
++    print(f"\nTesting: {addrport}")
++    
++    # Create a command instance with StringIO for output capture
++    cmd = Command()
++    cmd.stdout = StringIO()
++    cmd.stderr = StringIO()
++    
++    # Simulate command line options
++    options = {
++        'addrport': addrport,
++        'use_ipv6': False,
++        'use_threading': True,
++        'use_reloader': False,
++        'skip_checks': True,
++        'no_color': False,
++    }
++    
++    # Parse the address
++    try:
++        # We'll call handle but catch the OSError when it tries to bind
++        cmd.handle(**options)
++    except OSError:
++        # Expected - we can't actually bind to the port
++        pass
++    except SystemExit:
++        pass
++    
++    # Check the parsed values
++    output = cmd.stdout.getvalue()
++    if expected_url in output:
++        print(f"  ✓ SUCCESS: Found '{expected_url}' in output")
++    else:
++        print(f"  ✗ FAILED: Expected '{expected_url}' but got:")
++        print(f"    addr: '{cmd.addr}', port: '{cmd.port}'")
++        # Find the actual URL in the output
++        import re
++        url_match = re.search(r'Starting development server at (http://[^\s]+)', output)
++        if url_match:
++            print(f"    Actual URL: {url_match.group(1)}")
+diff --git a/test_ipv6.py b/test_ipv6.py
+new file mode 100644
+index 0000000000..30a0428247
+--- /dev/null
++++ b/test_ipv6.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python
++"""Test IPv6 handling is not affected by our fix"""
++import unittest
++import sys
++import os
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.core.management.commands.runserver import Command
++from django.core.management import CommandError
++
++
++class TestRunserverIPv6(unittest.TestCase):
++    def test_ipv6_addresses(self):
++        """Test that IPv6 addresses still work correctly"""
++        test_cases = [
++            ('[::]:8000', '::', '8000', True),
++            ('[::1]:8000', '::1', '8000', True),
++            ('[2001:db8::1]:8000', '2001:db8::1', '8000', True),
++        ]
++        
++        for addrport, expected_addr, expected_port, expected_raw_ipv6 in test_cases:
++            with self.subTest(addrport=addrport):
++                cmd = Command()
++                options = {
++                    'addrport': addrport,
++                    'use_ipv6': False,  # This gets overridden by IPv6 address format
++                }
++                
++                import re
++                from django.core.management.commands.runserver import naiveip_re
++                
++                cmd.use_ipv6 = options["use_ipv6"]
++                cmd._raw_ipv6 = False
++                
++                m = re.match(naiveip_re, options["addrport"])
++                self.assertIsNotNone(m, f"Regex should match '{addrport}'")
++                
++                cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++                
++                if cmd.addr:
++                    if _ipv6:
++                        cmd.addr = cmd.addr[1:-1]  # Remove brackets
++                        cmd.use_ipv6 = True
++                        cmd._raw_ipv6 = True
++                    elif cmd.use_ipv6 and not _fqdn:
++                        raise CommandError('"%s" is not a valid IPv6 address.' % cmd.addr)
++                    elif cmd.addr == "0":
++                        cmd.addr = "0.0.0.0"
++                
++                self.assertEqual(cmd.addr, expected_addr, f"Address should be '{expected_addr}'")
++                self.assertEqual(cmd.port, expected_port, f"Port should be '{expected_port}'")
++                self.assertEqual(cmd._raw_ipv6, expected_raw_ipv6, f"_raw_ipv6 should be {expected_raw_ipv6}")
++                self.assertTrue(cmd.use_ipv6, "use_ipv6 should be True for IPv6 addresses")
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/test_output_message.py b/test_output_message.py
+new file mode 100644
+index 0000000000..38b5377b67
+--- /dev/null
++++ b/test_output_message.py
+@@ -0,0 +1,78 @@
++#!/usr/bin/env python
++"""Test the actual output message of runserver"""
++import sys
++import os
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++from django.core.management.commands.runserver import Command
++from io import StringIO
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=['django.contrib.staticfiles'],
++    STATIC_URL='/static/',
++)
++django.setup()
++
++
++def test_output_message():
++    """Test that the output message shows the correct URL"""
++    print("Testing runserver output messages:")
++    
++    test_cases = [
++        ('0:8000', 'http://0.0.0.0:8000/'),
++        ('0.0.0.0:8000', 'http://0.0.0.0:8000/'),
++        ('127.0.0.1:8000', 'http://127.0.0.1:8000/'),
++        ('localhost:8000', 'http://localhost:8000/'),
++    ]
++    
++    all_passed = True
++    
++    for addrport, expected_url in test_cases:
++        cmd = Command()
++        cmd.stdout = StringIO()
++        cmd.stderr = StringIO()
++        
++        # We need to mock the inner_run method to capture output without actually starting the server
++        original_run = cmd.run
++        
++        def mock_run(**options):
++            # Call inner_run directly to get the output without starting the server
++            try:
++                cmd.inner_run(None, **options)
++            except OSError:
++                # Expected when trying to bind to the port
++                pass
++        
++        cmd.run = mock_run
++        
++        try:
++            cmd.handle(
++                addrport=addrport,
++                use_ipv6=False,
++                use_threading=True,
++                use_reloader=False,
++                skip_checks=True,
++                no_color=False,
++            )
++        except (OSError, SystemExit):
++            pass
++        
++        output = cmd.stdout.getvalue()
++        
++        if f"Starting development server at {expected_url}" in output:
++            print(f"  ✓ {addrport}: Correctly shows '{expected_url}'")
++        else:
++            print(f"  ✗ {addrport}: Expected '{expected_url}' in output")
++            print(f"    Output: {output}")
++            all_passed = False
++    
++    return all_passed
++
++
++if __name__ == '__main__':
++    success = test_output_message()
++    sys.exit(0 if success else 1)
+diff --git a/test_parsing.py b/test_parsing.py
+new file mode 100644
+index 0000000000..607bb8eacb
+--- /dev/null
++++ b/test_parsing.py
+@@ -0,0 +1,73 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure minimal Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++)
++
++django.setup()
++
++# Import after Django setup
++from django.core.management.commands.runserver import Command
++
++# Test the address parsing logic
++test_cases = [
++    ('0:8000', '0.0.0.0', '8000'),
++    ('0.0.0.0:8000', '0.0.0.0', '8000'),
++    ('127.0.0.1:8000', '127.0.0.1', '8000'),
++    ('localhost:8000', 'localhost', '8000'),
++    (':8000', '127.0.0.1', '8000'),  # Should use default
++]
++
++print("Testing address parsing after fix:")
++for addrport, expected_addr, expected_port in test_cases:
++    cmd = Command()
++    
++    # Simulate the handle method's parsing logic
++    options = {'addrport': addrport, 'use_ipv6': False}
++    
++    # Copy the parsing logic from handle()
++    import re
++    from django.core.management.commands.runserver import naiveip_re
++    
++    cmd.use_ipv6 = options["use_ipv6"]
++    cmd._raw_ipv6 = False
++    
++    if not options["addrport"]:
++        cmd.addr = ""
++        cmd.port = cmd.default_port
++    else:
++        m = re.match(naiveip_re, options["addrport"])
++        if m is None:
++            print(f"  {addrport}: INVALID")
++            continue
++            
++        cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++        
++        if cmd.addr:
++            if _ipv6:
++                cmd.addr = cmd.addr[1:-1]
++                cmd.use_ipv6 = True
++                cmd._raw_ipv6 = True
++            elif cmd.use_ipv6 and not _fqdn:
++                print(f"  {addrport}: IPv6 ERROR")
++                continue
++            # Handle the special case of "0" as shorthand for "0.0.0.0"
++            elif cmd.addr == "0":
++                cmd.addr = "0.0.0.0"
++                
++    if not cmd.addr:
++        cmd.addr = cmd.default_addr_ipv6 if cmd.use_ipv6 else cmd.default_addr
++        cmd._raw_ipv6 = cmd.use_ipv6
++    
++    # Check results
++    if cmd.addr == expected_addr and cmd.port == expected_port:
++        print(f"  {addrport}: ✓ SUCCESS (addr='{cmd.addr}', port='{cmd.port}')")
++    else:
++        print(f"  {addrport}: ✗ FAILED (expected addr='{expected_addr}', port='{expected_port}', got addr='{cmd.addr}', port='{cmd.port}')")
+diff --git a/test_runserver.py b/test_runserver.py
+new file mode 100644
+index 0000000000..9c4403bcfd
+--- /dev/null
++++ b/test_runserver.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management import execute_from_command_line
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++        'django.contrib.staticfiles',
++    ],
++    MIDDLEWARE=[
++        'django.middleware.security.SecurityMiddleware',
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.middleware.common.CommonMiddleware',
++        'django.middleware.csrf.CsrfViewMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++        'django.middleware.clickjacking.XFrameOptionsMiddleware',
++    ],
++    ROOT_URLCONF='test_urls',
++    STATIC_URL='/static/',
++)
++
++# Create a minimal URL configuration
++with open('/testbed/test_urls.py', 'w') as f:
++    f.write("""
++from django.urls import path
++
++urlpatterns = []
++""")
++
++# Setup Django
++django.setup()
++
++# Test the runserver command with "0:8000"
++print("Testing runserver with '0:8000'...")
++sys.argv = ['manage.py', 'runserver', '0:8000', '--noreload']
++try:
++    execute_from_command_line(sys.argv)
++except KeyboardInterrupt:
++    pass
+diff --git a/test_runserver_address.py b/test_runserver_address.py
+new file mode 100644
+index 0000000000..25e43db833
+--- /dev/null
++++ b/test_runserver_address.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python
++"""Test for runserver address parsing fix"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.management import call_command
++from django.core.management.commands.runserver import Command
++from io import StringIO
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=['django.contrib.staticfiles'],
++    STATIC_URL='/static/',
++    ALLOWED_HOSTS=['*'],
++)
++
++django.setup()
++
++def test_runserver_address_parsing():
++    """Test that '0:8000' is correctly parsed as '0.0.0.0:8000'"""
++    
++    # Test cases: (input, expected_addr, expected_port)
++    test_cases = [
++        ('0:8000', '0.0.0.0', '8000'),
++        ('0:9999', '0.0.0.0', '9999'),
++        ('0.0.0.0:8000', '0.0.0.0', '8000'),
++        ('127.0.0.1:8000', '127.0.0.1', '8000'),
++        ('localhost:8000', 'localhost', '8000'),
++    ]
++    
++    print("Testing runserver address parsing:")
++    all_passed = True
++    
++    for addrport, expected_addr, expected_port in test_cases:
++        cmd = Command()
++        cmd.stdout = StringIO()
++        cmd.stderr = StringIO()
++        
++        # Call handle to parse the address (but it will fail to bind)
++        try:
++            cmd.handle(
++                addrport=addrport,
++                use_ipv6=False,
++                use_threading=True,
++                use_reloader=False,
++                skip_checks=True,
++                no_color=False,
++            )
++        except (OSError, SystemExit):
++            # Expected - we can't actually bind to the port
++            pass
++        
++        # Check the parsed values
++        if cmd.addr == expected_addr and cmd.port == expected_port:
++            print(f"  ✓ {addrport} -> addr='{cmd.addr}', port='{cmd.port}'")
++            
++            # Also check the output message
++            output = cmd.stdout.getvalue()
++            expected_url = f"http://{expected_addr}:{expected_port}/"
++            if expected_url in output:
++                print(f"    ✓ Output contains correct URL: {expected_url}")
++            else:
++                print(f"    ✗ Output missing correct URL: {expected_url}")
++                all_passed = False
++        else:
++            print(f"  ✗ {addrport} -> FAILED: expected addr='{expected_addr}', port='{expected_port}', got addr='{cmd.addr}', port='{cmd.port}'")
++            all_passed = False
++    
++    return all_passed
++
++if __name__ == '__main__':
++    success = test_runserver_address_parsing()
++    sys.exit(0 if success else 1)
+diff --git a/test_unit.py b/test_unit.py
+new file mode 100644
+index 0000000000..952611f7f7
+--- /dev/null
++++ b/test_unit.py
+@@ -0,0 +1,107 @@
++#!/usr/bin/env python
++"""Unit test for the runserver 0:8000 fix"""
++import unittest
++import sys
++import os
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.core.management.commands.runserver import Command
++from django.core.management import CommandError
++
++
++class TestRunserverZeroAddress(unittest.TestCase):
++    def test_zero_address_parsing(self):
++        """Test that '0:8000' is parsed as '0.0.0.0:8000'"""
++        cmd = Command()
++        
++        # Mock the handle method to just do the parsing part
++        options = {
++            'addrport': '0:8000',
++            'use_ipv6': False,
++            'use_threading': True,
++            'use_reloader': False,
++            'skip_checks': True,
++        }
++        
++        # Execute the parsing logic from handle()
++        import re
++        from django.core.management.commands.runserver import naiveip_re
++        
++        cmd.use_ipv6 = options["use_ipv6"]
++        cmd._raw_ipv6 = False
++        
++        m = re.match(naiveip_re, options["addrport"])
++        self.assertIsNotNone(m, "Regex should match '0:8000'")
++        
++        cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++        
++        # Before our fix, cmd.addr would be '0'
++        # Apply the fix logic
++        if cmd.addr:
++            if _ipv6:
++                cmd.addr = cmd.addr[1:-1]
++                cmd.use_ipv6 = True
++                cmd._raw_ipv6 = True
++            elif cmd.use_ipv6 and not _fqdn:
++                raise CommandError('"%s" is not a valid IPv6 address.' % cmd.addr)
++            # Handle the special case of "0" as shorthand for "0.0.0.0"
++            elif cmd.addr == "0":
++                cmd.addr = "0.0.0.0"
++        
++        # Verify the fix
++        self.assertEqual(cmd.addr, '0.0.0.0', "Address '0' should be converted to '0.0.0.0'")
++        self.assertEqual(cmd.port, '8000', "Port should be '8000'")
++    
++    def test_other_addresses_unchanged(self):
++        """Test that other address formats are not affected"""
++        test_cases = [
++            ('0.0.0.0:8000', '0.0.0.0', '8000'),
++            ('127.0.0.1:8000', '127.0.0.1', '8000'),
++            ('localhost:8000', 'localhost', '8000'),
++        ]
++        
++        for addrport, expected_addr, expected_port in test_cases:
++            with self.subTest(addrport=addrport):
++                cmd = Command()
++                options = {
++                    'addrport': addrport,
++                    'use_ipv6': False,
++                }
++                
++                import re
++                from django.core.management.commands.runserver import naiveip_re
++                
++                cmd.use_ipv6 = options["use_ipv6"]
++                cmd._raw_ipv6 = False
++                
++                m = re.match(naiveip_re, options["addrport"])
++                self.assertIsNotNone(m, f"Regex should match '{addrport}'")
++                
++                cmd.addr, _ipv4, _ipv6, _fqdn, cmd.port = m.groups()
++                
++                if cmd.addr:
++                    if _ipv6:
++                        cmd.addr = cmd.addr[1:-1]
++                        cmd.use_ipv6 = True
++                        cmd._raw_ipv6 = True
++                    elif cmd.use_ipv6 and not _fqdn:
++                        raise CommandError('"%s" is not a valid IPv6 address.' % cmd.addr)
++                    elif cmd.addr == "0":
++                        cmd.addr = "0.0.0.0"
++                
++                self.assertEqual(cmd.addr, expected_addr, f"Address should be '{expected_addr}'")
++                self.assertEqual(cmd.port, expected_port, f"Port should be '{expected_port}'")
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/test_zero_address.py b/test_zero_address.py
+new file mode 100644
+index 0000000000..3b044a3626
+--- /dev/null
++++ b/test_zero_address.py
+@@ -0,0 +1,90 @@
++#!/usr/bin/env python
++"""
++Test that verifies the fix for the issue where 'runserver 0:8000' 
++shows 'http://0:8000/' instead of 'http://0.0.0.0:8000/'
++"""
++import os
++import sys
++import tempfile
++import subprocess
++
++# Create a minimal Django project for testing
++test_dir = tempfile.mkdtemp()
++os.chdir(test_dir)
++
++# Create manage.py
++manage_py = """#!/usr/bin/env python
++import os
++import sys
++
++if __name__ == '__main__':
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(sys.argv)
++"""
++
++with open('manage.py', 'w') as f:
++    f.write(manage_py)
++
++# Create settings
++settings_py = """
++SECRET_KEY = 'test-key'
++DEBUG = True
++ALLOWED_HOSTS = ['*']
++INSTALLED_APPS = [
++    'django.contrib.staticfiles',
++]
++ROOT_URLCONF = 'test_urls'
++STATIC_URL = '/static/'
++"""
++
++with open('test_settings.py', 'w') as f:
++    f.write(settings_py)
++
++# Create urls
++urls_py = """
++from django.urls import path
++urlpatterns = []
++"""
++
++with open('test_urls.py', 'w') as f:
++    f.write(urls_py)
++
++# Test the runserver command with '0:8000'
++print("Testing 'python manage.py runserver 0:8000'...")
++proc = subprocess.Popen(
++    [sys.executable, 'manage.py', 'runserver', '0:8000', '--noreload'],
++    stdout=subprocess.PIPE,
++    stderr=subprocess.STDOUT,
++    text=True
++)
++
++# Read output until we see the server start message
++output_lines = []
++for _ in range(20):  # Read up to 20 lines
++    line = proc.stdout.readline()
++    if not line:
++        break
++    output_lines.append(line)
++    if "Starting development server at" in line:
++        break
++
++# Kill the process
++proc.terminate()
++proc.wait()
++
++# Check the output
++output = ''.join(output_lines)
++print("\nOutput:")
++print(output)
++
++# Verify the fix
++if "Starting development server at http://0.0.0.0:8000/" in output:
++    print("\n✓ SUCCESS: The server correctly shows 'http://0.0.0.0:8000/'")
++    sys.exit(0)
++elif "Starting development server at http://0:8000/" in output:
++    print("\n✗ FAILED: The server incorrectly shows 'http://0:8000/'")
++    sys.exit(1)
++else:
++    print("\n✗ FAILED: Could not find server start message in output")
++    sys.exit(1)

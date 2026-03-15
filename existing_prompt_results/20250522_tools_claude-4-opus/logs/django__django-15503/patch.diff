@@ -1,0 +1,608 @@
+diff --git a/debug_array_access.py b/debug_array_access.py
+new file mode 100644
+index 0000000000..a9d06b29a1
+--- /dev/null
++++ b/debug_array_access.py
+@@ -0,0 +1,70 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldTest)
++
++# Create test data
++obj1 = JsonFieldTest.objects.create(data=[1, 2, 3, 4])  # Array
++
++# Test array access with different approaches
++print("Testing array access:")
++
++# Direct array element access
++result = JsonFieldTest.objects.filter(data__1=2)
++print(f"\ndata__1=2: {list(result.values_list('data', flat=True))}")
++print(f"SQL: {result.query}")
++
++# Array element isnull check
++result = JsonFieldTest.objects.filter(data__1__isnull=False)
++print(f"\ndata__1__isnull=False: {list(result.values_list('data', flat=True))}")
++print(f"SQL: {result.query}")
++
++# Let's trace what's happening
++from django.db.models.fields.json import KeyTransform, KeyTransformIsNull, HasKey
++from django.db.models import Q
++
++# Create the lookup manually
++kt = KeyTransform('1', 'data')
++print(f"\nKeyTransform key_name: {kt.key_name}")
++
++# Check how the SQL is generated
++from django.db import connection
++with connection.cursor() as cursor:
++    # Test different JSON paths
++    cursor.execute("SELECT JSON_TYPE(data, '$[1]') FROM test_app_jsonfieldtest")
++    print(f"\nJSON_TYPE with $[1]: {cursor.fetchone()}")
++    
++    cursor.execute("SELECT JSON_TYPE(data, '$.\"1\"') FROM test_app_jsonfieldtest")  
++    print(f"JSON_TYPE with $.\"1\": {cursor.fetchone()}")
+diff --git a/debug_json_query.py b/debug_json_query.py
+new file mode 100644
+index 0000000000..45139bfa41
+--- /dev/null
++++ b/debug_json_query.py
+@@ -0,0 +1,86 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldHasKeyTest)
++
++# Create test data
++JsonFieldHasKeyTest.objects.create(data={'foo': 'bar'})
++JsonFieldHasKeyTest.objects.create(data={'1111': 'bar'})
++
++# Enable query logging
++from django.db import connection
++from django.conf import settings
++settings.DEBUG = True
++
++# Test queries
++print("Testing has_key='foo':")
++qs1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo')
++print(f"SQL: {qs1.query}")
++print(f"Count: {qs1.count()}")
++
++print("\nTesting has_key='1111':")
++qs2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111')
++print(f"SQL: {qs2.query}")
++print(f"Count: {qs2.count()}")
++
++# Let's check what compile_json_path produces
++from django.db.models.fields.json import compile_json_path
++
++print("\nTesting compile_json_path:")
++print(f"compile_json_path(['foo'], include_root=False): {compile_json_path(['foo'], include_root=False)}")
++print(f"compile_json_path(['1111'], include_root=False): {compile_json_path(['1111'], include_root=False)}")
++
++# Let's manually check the JSON paths
++with connection.cursor() as cursor:
++    cursor.execute("SELECT data FROM test_app_jsonfieldhaskeytest")
++    rows = cursor.fetchall()
++    print("\nData in database:")
++    for row in rows:
++        print(f"  {row[0]}")
++    
++    # Test JSON_TYPE with different paths
++    print("\nTesting JSON_TYPE with different paths:")
++    cursor.execute("SELECT data, JSON_TYPE(data, '$.foo') FROM test_app_jsonfieldhaskeytest WHERE JSON_TYPE(data, '$.foo') IS NOT NULL")
++    rows = cursor.fetchall()
++    print(f"  Results for '$.foo': {rows}")
++    
++    cursor.execute("SELECT data, JSON_TYPE(data, '$[1111]') FROM test_app_jsonfieldhaskeytest WHERE JSON_TYPE(data, '$[1111]') IS NOT NULL")
++    rows = cursor.fetchall()
++    print(f"  Results for '$[1111]': {rows}")
++    
++    cursor.execute("SELECT data, JSON_TYPE(data, '$.\"1111\"') FROM test_app_jsonfieldhaskeytest WHERE JSON_TYPE(data, '$.\"1111\"') IS NOT NULL")
++    rows = cursor.fetchall()
++    print(f"  Results for '$.\"1111\"': {rows}")
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..83e2a285a5 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -193,13 +193,27 @@ class HasKeyLookup(PostgresOperatorLookup):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
+             else:
+                 rhs_key_transforms = [key]
+-            rhs_params.append(
+-                "%s%s"
+-                % (
+-                    lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
+-                )
+-            )
++            # For has_key, has_keys, and has_any_keys lookups, only treat the final key as an object key
++            if hasattr(self, 'lookup_name') and self.lookup_name in ('has_key', 'has_keys', 'has_any_keys'):
++                # Compile the path, but treat the last key as an object key
++                json_path = []
++                for i, key_transform in enumerate(rhs_key_transforms):
++                    if i == len(rhs_key_transforms) - 1:
++                        # Last key - always treat as object key
++                        json_path.append(".")
++                        json_path.append(json.dumps(str(key_transform)))
++                    else:
++                        # Intermediate keys - use normal logic
++                        try:
++                            num = int(key_transform)
++                            json_path.append("[%s]" % num)
++                        except ValueError:
++                            json_path.append(".")
++                            json_path.append(json.dumps(key_transform))
++                json_path = "".join(json_path)
++            else:
++                json_path = compile_json_path(rhs_key_transforms, include_root=False)
++            rhs_params.append("%s%s" % (lhs_json_path, json_path))
+         # Add condition for each key.
+         if self.logical_operator:
+             sql = "(%s)" % self.logical_operator.join([sql] * len(rhs_params))
+@@ -401,11 +415,10 @@ class KeyTransformIsNull(lookups.IsNull):
+         template = "JSON_TYPE(%s, %%s) IS NULL"
+         if not self.rhs:
+             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
+-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
+-            compiler,
+-            connection,
+-            template=template,
+-        )
++        lhs, lhs_params, key_transforms = self.lhs.preprocess_lhs(compiler, connection)
++        json_path = compile_json_path(key_transforms)
++        sql = template % lhs
++        return sql, tuple(lhs_params) + (json_path,)
+ 
+ 
+ class KeyTransformIn(lookups.In):
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..6686c2291c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,98 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldTest)
++
++# Test edge cases
++test_data = [
++    # Object with numeric string keys
++    {'123': 'value1', '456': 'value2', 'abc': 'value3'},
++    # Array with objects containing numeric string keys
++    [{'789': 'value4'}, {'012': 'value5'}],
++    # Nested structure with numeric string keys
++    {'outer': {'111': 'nested1', '222': 'nested2'}},
++    # Mixed array and object with numeric keys
++    {'data': [{'333': 'array_obj1'}, {'444': 'array_obj2'}]},
++    # Edge case: key that looks like a float
++    {'3.14': 'pi', '2.71': 'e'},
++    # Edge case: key with leading zeros
++    {'0001': 'leading_zeros', '0000': 'all_zeros'},
++]
++
++for i, data in enumerate(test_data):
++    JsonFieldTest.objects.create(data=data)
++
++print("Testing edge cases:\n")
++
++# Test 1: Simple numeric string keys
++result = JsonFieldTest.objects.filter(data__has_key='123')
++print(f"1. Objects with key '123': {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 2: has_keys with multiple numeric strings
++result = JsonFieldTest.objects.filter(data__has_keys=['123', '456'])
++print(f"\n2. Objects with keys ['123', '456']: {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 3: Nested numeric string keys
++result = JsonFieldTest.objects.filter(data__outer__has_key='111')
++print(f"\n3. Objects with nested key outer.'111': {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 4: Array element with numeric string key
++result = JsonFieldTest.objects.filter(data__0__has_key='789')
++print(f"\n4. Objects with array[0] having key '789': {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 5: Float-like keys
++result = JsonFieldTest.objects.filter(data__has_key='3.14')
++print(f"\n5. Objects with key '3.14': {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 6: Keys with leading zeros
++result = JsonFieldTest.objects.filter(data__has_any_keys=['0001', '0000'])
++print(f"\n6. Objects with keys ['0001' or '0000']: {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test 7: Complex nested path with array and object
++result = JsonFieldTest.objects.filter(data__data__1__has_key='444')
++print(f"\n7. Objects with data[1] having key '444': {result.count()}")
++print(f"   Found: {list(result.values_list('data', flat=True))}")
++
++# Test SQL generation for a complex case
++print("\n8. SQL for complex query:")
++qs = JsonFieldTest.objects.filter(data__data__1__has_key='444')
++print(f"   {qs.query}")
+diff --git a/test_json_numeric_keys.py b/test_json_numeric_keys.py
+new file mode 100644
+index 0000000000..c9b211c8ae
+--- /dev/null
++++ b/test_json_numeric_keys.py
+@@ -0,0 +1,73 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.test import TestCase
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldHasKeyTest)
++
++# Run tests
++class JsonFieldHasKeyTestCase(TestCase):
++    def setUp(self):
++        # Create test data
++        JsonFieldHasKeyTest.objects.create(data={'foo': 'bar'})
++        JsonFieldHasKeyTest.objects.create(data={'1111': 'bar'})
++        JsonFieldHasKeyTest.objects.create(data={'nested': {'2222': 'value'}})
++        
++    def test_json_field_has_key(self):
++        # Test string key
++        c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++        print(f"Count for 'foo': {c1}")
++        self.assertEqual(c1, 1, "Should have found 1 entry with key 'foo'")
++        
++        # Test numeric string key
++        c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++        print(f"Count for '1111': {c2}")
++        self.assertEqual(c2, 1, "Should have found 1 entry with key '1111'")
++        
++        # Test has_keys with numeric string
++        c3 = JsonFieldHasKeyTest.objects.filter(data__has_keys=['1111']).count()
++        print(f"Count for has_keys ['1111']: {c3}")
++        self.assertEqual(c3, 1, "Should have found 1 entry with keys ['1111']")
++        
++        # Test has_any_keys with numeric string
++        c4 = JsonFieldHasKeyTest.objects.filter(data__has_any_keys=['1111', 'foo']).count()
++        print(f"Count for has_any_keys ['1111', 'foo']: {c4}")
++        self.assertEqual(c4, 2, "Should have found 2 entries with any of the keys")
++
++if __name__ == '__main__':
++    # Run the test
++    test = JsonFieldHasKeyTestCase()
++    test.setUp()
++    test.test_json_field_has_key()
+diff --git a/test_mysql_oracle_behavior.py b/test_mysql_oracle_behavior.py
+new file mode 100644
+index 0000000000..8bec31a520
+--- /dev/null
++++ b/test_mysql_oracle_behavior.py
+@@ -0,0 +1,99 @@
++"""
++Test to verify the fix works for MySQL and Oracle backends.
++This test simulates the behavior by checking the generated SQL.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the SQL generation for different backends
++from django.db.models.fields.json import HasKey, HasKeys, HasAnyKeys
++from django.db import connection
++from unittest.mock import Mock
++
++# Test data
++test_cases = [
++    ('has_key with numeric string', 'has_key', '1111'),
++    ('has_keys with numeric strings', 'has_keys', ['123', '456']),
++    ('has_any_keys with numeric strings', 'has_any_keys', ['1111', 'foo']),
++]
++
++print("Testing SQL generation for different backends:\n")
++
++for description, lookup_name, rhs_value in test_cases:
++    print(f"{description}:")
++    
++    # Create the lookup
++    if lookup_name == 'has_key':
++        lookup = HasKey(JsonFieldTest._meta.get_field('data'), rhs_value)
++    elif lookup_name == 'has_keys':
++        lookup = HasKeys(JsonFieldTest._meta.get_field('data'), rhs_value)
++    else:
++        lookup = HasAnyKeys(JsonFieldTest._meta.get_field('data'), rhs_value)
++    
++    # Mock compiler
++    compiler = Mock()
++    compiler.compile.return_value = ('"test_app_jsonfieldtest"."data"', [])
++    
++    # Test SQLite
++    sql, params = lookup.as_sqlite(compiler, connection)
++    print(f"  SQLite: {sql % params}")
++    
++    # Test MySQL
++    sql, params = lookup.as_mysql(compiler, connection)
++    print(f"  MySQL: {sql % params}")
++    
++    # Test Oracle
++    sql, params = lookup.as_oracle(compiler, connection)
++    print(f"  Oracle: {sql}")
++    
++    print()
++
++# Also test nested paths with numeric keys
++print("Testing nested paths:")
++from django.db.models.fields.json import KeyTransform
++
++# Create a key transform for data__nested, then check if it has key '1111'
++nested_kt = KeyTransform('nested', JsonFieldTest._meta.get_field('data'))
++lookup = HasKey(nested_kt, '1111')
++
++# Mock compiler
++compiler = Mock()
++def mock_compile(expr):
++    if hasattr(expr, 'key_name') and expr.key_name == 'nested':
++        return ('"test_app_jsonfieldtest"."data"', [])
++    return (str(expr), [])
++compiler.compile.side_effect = mock_compile
++
++# Test SQLite
++sql, params = lookup.as_sqlite(compiler, connection)
++print(f"  data__nested__has_key='1111' on SQLite: {sql % params}")
+diff --git a/test_numeric_keys_comprehensive.py b/test_numeric_keys_comprehensive.py
+new file mode 100644
+index 0000000000..2312835b87
+--- /dev/null
++++ b/test_numeric_keys_comprehensive.py
+@@ -0,0 +1,91 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++# Define test model
++class JsonFieldTest(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldTest)
++
++# Create test data
++obj1 = JsonFieldTest.objects.create(data={'1111': 'string_key'})  # Object with numeric string key
++obj2 = JsonFieldTest.objects.create(data=[1, 2, 3, 4])  # Array
++obj3 = JsonFieldTest.objects.create(data={'nested': {'2222': 'value'}})  # Nested object with numeric string key
++obj4 = JsonFieldTest.objects.create(data={'a': 'b', '123': 'numeric_string_key'})
++
++print("Test data created:")
++print(f"obj1: {obj1.data}")
++print(f"obj2: {obj2.data}")
++print(f"obj3: {obj3.data}")
++print(f"obj4: {obj4.data}")
++
++# Test queries
++print("\nTesting has_key lookups:")
++
++# Test 1: Object with numeric string key
++result = JsonFieldTest.objects.filter(data__has_key='1111')
++print(f"\ndata__has_key='1111': {list(result.values_list('data', flat=True))}")
++print(f"SQL: {result.query}")
++
++# Test 2: Array access (should work with numeric index)
++result = JsonFieldTest.objects.filter(data__1__isnull=False)
++print(f"\ndata__1__isnull=False (array access): {list(result.values_list('data', flat=True))}")
++print(f"SQL: {result.query}")
++
++# Test 3: Nested object with numeric string key
++result = JsonFieldTest.objects.filter(data__nested__has_key='2222')
++print(f"\ndata__nested__has_key='2222': {list(result.values_list('data', flat=True))}")
++
++# Test 4: has_keys with numeric string
++result = JsonFieldTest.objects.filter(data__has_keys=['123'])
++print(f"\ndata__has_keys=['123']: {list(result.values_list('data', flat=True))}")
++
++# Test 5: has_any_keys with numeric string
++result = JsonFieldTest.objects.filter(data__has_any_keys=['1111', 'a'])
++print(f"\ndata__has_any_keys=['1111', 'a']: {list(result.values_list('data', flat=True))}")
++
++# Direct SQL tests
++print("\n\nDirect SQL tests:")
++with connection.cursor() as cursor:
++    # Test different JSON path syntaxes
++    cursor.execute("""
++        SELECT data, 
++               JSON_TYPE(data, '$."1111"') as obj_key,
++               JSON_TYPE(data, '$[1]') as array_idx,
++               JSON_TYPE(data, '$.nested."2222"') as nested_obj_key
++        FROM test_app_jsonfieldtest
++    """)
++    
++    print("\nJSON path test results:")
++    print("data | $.'1111' | $[1] | $.nested.'2222'")
++    print("-" * 60)
++    for row in cursor.fetchall():
++        print(f"{row[0][:30]:30} | {row[1] or 'NULL':10} | {row[2] or 'NULL':10} | {row[3] or 'NULL':10}")

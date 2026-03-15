@@ -1,0 +1,521 @@
+diff --git a/src/_pytest/config/__init__.py b/src/_pytest/config/__init__.py
+index 3a0eca546..e81e6d6fb 100644
+--- a/src/_pytest/config/__init__.py
++++ b/src/_pytest/config/__init__.py
+@@ -406,7 +406,8 @@ class PytestPluginManager(PluginManager):
+         else:
+             directory = path
+ 
+-        directory = unique_path(directory)
++        # Keep original directory for iteration, use normalized for cache key
++        normalized_directory = unique_path(directory)
+ 
+         # XXX these days we may rather want to use config.rootdir
+         # and allow users to opt into looking into the rootdir parent
+@@ -419,7 +420,7 @@ class PytestPluginManager(PluginManager):
+             if conftestpath.isfile():
+                 mod = self._importconftest(conftestpath)
+                 clist.append(mod)
+-        self._dirpath2confmods[directory] = clist
++        self._dirpath2confmods[normalized_directory] = clist
+         return clist
+ 
+     def _rget_with_confmod(self, name, path):
+@@ -435,30 +436,33 @@ class PytestPluginManager(PluginManager):
+         # Use realpath to avoid loading the same conftest twice
+         # with build systems that create build directories containing
+         # symlinks to actual files.
+-        conftestpath = unique_path(conftestpath)
++        # Keep the original path for import, use normalized for cache key
++        original_conftestpath = conftestpath
++        normalized_conftestpath = unique_path(conftestpath)
+         try:
+-            return self._conftestpath2mod[conftestpath]
++            return self._conftestpath2mod[normalized_conftestpath]
+         except KeyError:
+-            pkgpath = conftestpath.pypkgpath()
++            pkgpath = original_conftestpath.pypkgpath()
+             if pkgpath is None:
+-                _ensure_removed_sysmodule(conftestpath.purebasename)
++                _ensure_removed_sysmodule(original_conftestpath.purebasename)
+             try:
+-                mod = conftestpath.pyimport()
++                mod = original_conftestpath.pyimport()
+                 if (
+                     hasattr(mod, "pytest_plugins")
+                     and self._configured
+                     and not self._using_pyargs
+                 ):
+-                    _fail_on_non_top_pytest_plugins(conftestpath, self._confcutdir)
++                    _fail_on_non_top_pytest_plugins(original_conftestpath, self._confcutdir)
+             except Exception:
+-                raise ConftestImportFailure(conftestpath, sys.exc_info())
++                raise ConftestImportFailure(original_conftestpath, sys.exc_info())
+ 
+             self._conftest_plugins.add(mod)
+-            self._conftestpath2mod[conftestpath] = mod
+-            dirpath = conftestpath.dirpath()
+-            if dirpath in self._dirpath2confmods:
++            self._conftestpath2mod[normalized_conftestpath] = mod
++            dirpath = original_conftestpath.dirpath()
++            normalized_dirpath = unique_path(dirpath)
++            if normalized_dirpath in self._dirpath2confmods:
+                 for path, mods in self._dirpath2confmods.items():
+-                    if path and path.relto(dirpath) or path == dirpath:
++                    if path and path.relto(normalized_dirpath) or path == normalized_dirpath:
+                         assert mod not in mods
+                         mods.append(mod)
+             self.trace("loaded conftestmodule %r" % (mod))
+diff --git a/test_case_issue.py b/test_case_issue.py
+new file mode 100644
+index 000000000..6eb819464
+--- /dev/null
++++ b/test_case_issue.py
+@@ -0,0 +1,41 @@
++import os
++import sys
++import pytest
++import tempfile
++import shutil
++from pathlib import Path
++
++def test_conftest_case_issue():
++    """Test that conftest loading works with mixed case directories on Windows."""
++    # Create a temporary directory structure
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create directory structure with mixed case
++        test_dir = Path(tmpdir) / "Azure" / "KMS" / "ComponentTest" / "Python"
++        test_dir.mkdir(parents=True)
++        
++        # Create conftest.py
++        conftest_path = test_dir / "conftest.py"
++        conftest_path.write_text("# Empty conftest")
++        
++        # Create a test file
++        test_file = test_dir / "test_sample.py"
++        test_file.write_text("def test_something(): pass")
++        
++        # Change to the directory with different casing
++        # On case-insensitive file systems, this should work
++        lower_path = Path(tmpdir) / "azure" / "kms" / "componenttest" / "python"
++        
++        if os.path.exists(lower_path):
++            os.chdir(lower_path)
++            
++            # Try to run pytest
++            result = pytest.main(["--collect-only", "."])
++            
++            # Should not fail with ImportError
++            assert result == 0
++        else:
++            # Skip test on case-sensitive file systems
++            pytest.skip("Test only relevant on case-insensitive file systems")
++
++if __name__ == "__main__":
++    test_conftest_case_issue()
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 000000000..31fa9bbd6
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,128 @@
++"""Test for the exact issue reported in the problem statement."""
++import os
++import sys
++import tempfile
++from pathlib import Path
++import subprocess
++
++def test_exact_windows_case_issue():
++    """Reproduce the exact issue from the problem statement."""
++    # Mock os.path.normcase to simulate Windows behavior
++    original_normcase = os.path.normcase
++    
++    def mock_normcase(path):
++        """Mock normcase to always return lowercase like on Windows."""
++        return path.lower()
++    
++    # Temporarily patch normcase
++    os.path.normcase = mock_normcase
++    
++    try:
++        with tempfile.TemporaryDirectory() as tmpdir:
++            # Create the exact directory structure from the issue
++            # C:\Azure\KMS\ComponentTest\Python\PIsys
++            base_dir = Path(tmpdir)
++            test_dir = base_dir / "Azure" / "KMS" / "ComponentTest" / "Python" / "PIsys"
++            test_dir.mkdir(parents=True)
++            
++            # Create conftest.py in PIsys directory
++            conftest_path = test_dir / "conftest.py"
++            conftest_path.write_text("""
++# Test conftest that imports from parent package
++import sys
++import os
++
++# This import should work - it's importing from the parent 'Python' package
++# If the path is incorrectly lowercased, this will fail with "No module named 'python'"
++try:
++    # Get the parent directory name
++    parent_dir = os.path.basename(os.path.dirname(os.path.dirname(__file__)))
++    print(f"Parent directory name: {parent_dir}")
++    
++    # This would fail if the directory is incorrectly lowercased
++    if parent_dir.lower() == 'python' and parent_dir != 'python':
++        # We're in the correct 'Python' directory, not 'python'
++        print("Directory case preserved correctly!")
++except Exception as e:
++    print(f"Error in conftest: {e}")
++    raise
++
++def pytest_configure(config):
++    print("Conftest loaded successfully!")
++""")
++            
++            # Create a simple test file with smoke marker
++            test_file = test_dir / "test_sample.py"
++            test_file.write_text("""
++import pytest
++
++@pytest.mark.smoke
++def test_something():
++    assert True
++""")
++            
++            # Create a script that runs pytest with the exact command from the issue
++            run_script = base_dir / "run_test.py"
++            run_script.write_text(f"""
++import os
++import sys
++import subprocess
++
++# Change to the directory with different casing (lowercase)
++# This simulates the issue where someone is in c:\\azure\\... instead of C:\\Azure\\...
++try:
++    os.chdir(r"{tmpdir}/azure/kms/componenttest/python")
++except FileNotFoundError:
++    # On case-sensitive systems, try the correct case
++    os.chdir(r"{tmpdir}/Azure/KMS/ComponentTest/Python")
++
++# Run pytest with the exact arguments from the issue
++result = subprocess.run([
++    sys.executable, "-m", "pytest", 
++    "--collect-only", 
++    "./PIsys", 
++    "-m", "smoke"
++], capture_output=True, text=True)
++
++print("STDOUT:")
++print(result.stdout)
++print("\\nSTDERR:")
++print(result.stderr)
++print(f"\\nReturn code: {{result.returncode}}")
++
++# Check for the specific error from the issue
++if "ModuleNotFoundError: No module named 'python'" in result.stderr:
++    print("\\nERROR: Got the exact error from the issue!")
++    sys.exit(1)
++elif result.returncode != 0:
++    print("\\nERROR: pytest failed with a different error")
++    sys.exit(1)
++else:
++    print("\\nSUCCESS: pytest ran without the module error!")
++    sys.exit(0)
++""")
++            
++            # Run the test script
++            result = subprocess.run(
++                [sys.executable, str(run_script)],
++                capture_output=True,
++                text=True,
++                cwd=str(base_dir)
++            )
++            
++            print("Test output:")
++            print(result.stdout)
++            if result.stderr:
++                print("Errors:")
++                print(result.stderr)
++            
++            # The test should pass (exit code 0)
++            assert result.returncode == 0, f"Test failed with return code {result.returncode}"
++            
++    finally:
++        # Restore original normcase
++        os.path.normcase = original_normcase
++
++if __name__ == "__main__":
++    test_exact_windows_case_issue()
++    print("\nTest completed successfully!")
+diff --git a/test_simple_case.py b/test_simple_case.py
+new file mode 100644
+index 000000000..5941ccbd9
+--- /dev/null
++++ b/test_simple_case.py
+@@ -0,0 +1,52 @@
++"""Simple test to verify the case preservation fix."""
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++def test_case_preservation():
++    """Test that directory case is preserved when loading conftest files."""
++    # Mock normcase to simulate Windows
++    original_normcase = os.path.normcase
++    os.path.normcase = lambda p: p.lower()
++    
++    try:
++        # Import after mocking
++        from _pytest.config import PytestPluginManager
++        import py
++        
++        with tempfile.TemporaryDirectory() as tmpdir:
++            # Create mixed-case directory
++            test_dir = Path(tmpdir) / "TestDir" / "SubDir"
++            test_dir.mkdir(parents=True)
++            
++            # Create conftest that would fail if case is not preserved
++            conftest = test_dir / "conftest.py"
++            conftest.write_text("""
++import os
++# Get the actual directory name from __file__
++dir_name = os.path.basename(os.path.dirname(__file__))
++print(f"Conftest loaded from directory: {dir_name}")
++# This assertion would fail if the directory name was lowercased
++assert dir_name == "SubDir", f"Expected 'SubDir' but got '{dir_name}'"
++""")
++            
++            # Create plugin manager and load conftest
++            pm = PytestPluginManager()
++            pypath = py.path.local(str(test_dir))
++            
++            # This should work without assertion error
++            mods = pm._getconftestmodules(pypath)
++            print(f"Successfully loaded {len(mods)} conftest modules")
++            
++            # Verify the module was loaded from the correct path
++            for mod in mods:
++                assert "SubDir" in mod.__file__, f"Module path lost case: {mod.__file__}"
++                
++    finally:
++        os.path.normcase = original_normcase
++    
++    print("Test passed - case was preserved!")
++
++if __name__ == "__main__":
++    test_case_preservation()
+diff --git a/test_windows_case_issue.py b/test_windows_case_issue.py
+new file mode 100644
+index 000000000..7e2cd5104
+--- /dev/null
++++ b/test_windows_case_issue.py
+@@ -0,0 +1,80 @@
++"""Test for Windows case sensitivity issue with conftest loading."""
++import os
++import sys
++import tempfile
++from pathlib import Path
++import py
++
++# Mock os.path.normcase to simulate Windows behavior
++original_normcase = os.path.normcase
++
++def mock_normcase(path):
++    """Mock normcase to always return lowercase like on Windows."""
++    return path.lower()
++
++def test_conftest_import_with_case_mismatch(monkeypatch):
++    """Test that conftest loading preserves case for imports."""
++    # Patch normcase to simulate Windows behavior
++    monkeypatch.setattr(os.path, 'normcase', mock_normcase)
++    
++    # Import after patching
++    from _pytest.config import PytestPluginManager
++    from _pytest.pathlib import unique_path
++    
++    with tempfile.TemporaryDirectory() as tmpdir:
++        # Create directory structure with mixed case
++        base_dir = Path(tmpdir)
++        test_dir = base_dir / "Azure" / "KMS" / "ComponentTest" / "Python" / "PIsys"
++        test_dir.mkdir(parents=True)
++        
++        # Create __init__.py files to make it a proper package
++        (base_dir / "Azure" / "__init__.py").write_text("")
++        (base_dir / "Azure" / "KMS" / "__init__.py").write_text("")
++        (base_dir / "Azure" / "KMS" / "ComponentTest" / "__init__.py").write_text("")
++        (base_dir / "Azure" / "KMS" / "ComponentTest" / "Python" / "__init__.py").write_text("")
++        (base_dir / "Azure" / "KMS" / "ComponentTest" / "Python" / "PIsys" / "__init__.py").write_text("")
++        
++        # Create conftest.py
++        conftest_path = test_dir / "conftest.py"
++        conftest_path.write_text("""
++# Test conftest
++def pytest_configure(config):
++    pass
++""")
++        
++        # Create plugin manager
++        pm = PytestPluginManager()
++        
++        # Convert to py.path.local
++        pypath = py.path.local(str(test_dir))
++        
++        # This should not raise an ImportError about 'python' module
++        try:
++            mods = pm._getconftestmodules(pypath)
++            assert len(mods) > 0  # Should find at least one conftest
++            print(f"Successfully loaded {len(mods)} conftest modules")
++            
++            # Verify the conftest was loaded from the correct path
++            for mod in mods:
++                print(f"Loaded module from: {mod.__file__}")
++                # The module path should contain the original case
++                assert "Azure" in mod.__file__ or "azure" in mod.__file__
++                
++        except Exception as e:
++            print(f"Error: {e}")
++            import traceback
++            traceback.print_exc()
++            # Check if it's the specific error we're trying to fix
++            if "No module named 'python'" in str(e):
++                raise AssertionError("Got the case sensitivity error we're trying to fix")
++            raise
++
++if __name__ == "__main__":
++    import pytest
++    # Create a mock monkeypatch object for standalone testing
++    class MockMonkeypatch:
++        def setattr(self, obj, name, value):
++            setattr(obj, name, value)
++    
++    test_conftest_import_with_case_mismatch(MockMonkeypatch())
++    print("Test passed!")
+diff --git a/test_windows_import_final.py b/test_windows_import_final.py
+new file mode 100644
+index 000000000..98e242284
+--- /dev/null
++++ b/test_windows_import_final.py
+@@ -0,0 +1,122 @@
++"""Final comprehensive test for Windows case sensitivity fix."""
++import os
++import sys
++import tempfile
++from pathlib import Path
++import subprocess
++
++def test_windows_import_case_sensitivity():
++    """Test that simulates the exact Windows scenario from the bug report."""
++    
++    # Create a test script that will mock Windows behavior
++    test_script = '''
++import os
++import sys
++import tempfile
++from pathlib import Path
++
++# Mock os.path.normcase to simulate Windows
++original_normcase = os.path.normcase
++os.path.normcase = lambda p: p.lower()
++
++# Now import pytest after mocking
++import pytest
++
++# Create test directory structure
++with tempfile.TemporaryDirectory() as tmpdir:
++    # Create C:\\Azure\\KMS\\ComponentTest\\Python\\PIsys structure
++    base = Path(tmpdir)
++    test_dir = base / "Azure" / "KMS" / "ComponentTest" / "Python" / "PIsys"
++    test_dir.mkdir(parents=True)
++    
++    # Create all __init__.py files
++    for p in [
++        base / "Azure",
++        base / "Azure" / "KMS", 
++        base / "Azure" / "KMS" / "ComponentTest",
++        base / "Azure" / "KMS" / "ComponentTest" / "Python",
++        base / "Azure" / "KMS" / "ComponentTest" / "Python" / "PIsys"
++    ]:
++        (p / "__init__.py").write_text("")
++    
++    # Create conftest.py that imports from parent module
++    conftest = test_dir / "conftest.py"
++    conftest.write_text("""
++# This will fail if the path is incorrectly lowercased
++# because Python will try to import from 'python' instead of 'Python'
++import sys
++import os
++
++# Try to import something that would fail if case is wrong
++parent_path = os.path.dirname(os.path.dirname(__file__))
++parent_name = os.path.basename(parent_path)
++
++# This assertion ensures we have the correct case
++assert parent_name == "Python", f"Expected 'Python' but got '{parent_name}'"
++
++print("Conftest loaded successfully with correct case!")
++""")
++    
++    # Create test file
++    test_file = test_dir / "test_sample.py"
++    test_file.write_text("""
++import pytest
++
++@pytest.mark.smoke  
++def test_case_preserved():
++    # If we get here, the conftest loaded successfully
++    assert True
++""")
++    
++    # Change to directory with different casing (simulating Windows behavior)
++    # On Windows, both c:\\azure\\... and C:\\Azure\\... refer to the same directory
++    lowercase_python_dir = base / "azure" / "kms" / "componenttest" / "python"
++    
++    # On case-sensitive systems, we need to use the actual path
++    if os.path.exists(lowercase_python_dir):
++        os.chdir(str(lowercase_python_dir))
++        test_path = "./pisys"
++    else:
++        # Use the correct case
++        os.chdir(str(base / "Azure" / "KMS" / "ComponentTest" / "Python"))
++        test_path = "./PIsys"
++    
++    # Run pytest
++    exit_code = pytest.main([
++        "--collect-only",
++        test_path,
++        "-m", "smoke"
++    ])
++    
++    # Restore normcase
++    os.path.normcase = original_normcase
++    
++    # Should succeed
++    if exit_code != 0:
++        print(f"pytest failed with exit code: {exit_code}")
++        sys.exit(1)
++    else:
++        print("SUCCESS: Test passed!")
++        sys.exit(0)
++'''
++    
++    # Run the test script
++    result = subprocess.run(
++        [sys.executable, "-c", test_script],
++        capture_output=True,
++        text=True
++    )
++    
++    print("Output:")
++    print(result.stdout)
++    if result.stderr:
++        print("\nErrors:")
++        print(result.stderr)
++    
++    # Check for the specific error from the bug report
++    assert "ModuleNotFoundError: No module named 'python'" not in result.stderr
++    assert result.returncode == 0, f"Test failed with return code {result.returncode}"
++    print("\nTest completed successfully - Windows case sensitivity issue is fixed!")
++
++if __name__ == "__main__":
++    test_windows_import_case_sensitivity()

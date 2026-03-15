@@ -1,0 +1,730 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index dafc11f995..f17e739a31 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -1185,8 +1185,14 @@ class ModelChoiceField(ChoiceField):
+                  required=True, widget=None, label=None, initial=None,
+                  help_text='', to_field_name=None, limit_choices_to=None,
+                  **kwargs):
++        # Import here to avoid circular import
++        from django.forms.widgets import RadioSelect
++        
+         if required and (initial is not None):
+             self.empty_label = None
++        elif required and widget is not None and isinstance(widget, RadioSelect):
++            # RadioSelect widget should not show empty choice when field is required
++            self.empty_label = None
+         else:
+             self.empty_label = empty_label
+ 
+diff --git a/test_patch_for_django.py b/test_patch_for_django.py
+new file mode 100644
+index 0000000000..436ef80391
+--- /dev/null
++++ b/test_patch_for_django.py
+@@ -0,0 +1,28 @@
++"""
++Test to add to Django's test suite for the RadioSelect empty label fix.
++This test should be added to model_forms.test_modelchoicefield.ModelChoiceFieldTests
++"""
++
++def test_radioselect_empty_label(self):
++    """
++    RadioSelect widget should not show empty label for required fields.
++    """
++    from django.forms import ModelChoiceField, RadioSelect
++    
++    # Required field with RadioSelect should not have empty option
++    f = ModelChoiceField(Category.objects.all(), widget=RadioSelect(), required=True)
++    self.assertEqual(len(f.choices), 3)  # Only the 3 categories, no empty option
++    choices = list(f.choices)
++    self.assertNotIn('', [c[0] for c in choices])
++    
++    # Optional field with RadioSelect should have empty option
++    f = ModelChoiceField(Category.objects.all(), widget=RadioSelect(), required=False)
++    self.assertEqual(len(f.choices), 4)  # 3 categories + empty option
++    choices = list(f.choices)
++    self.assertIn('', [c[0] for c in choices])
++    
++    # Required field with default widget (Select) should have empty option
++    f = ModelChoiceField(Category.objects.all(), required=True)
++    self.assertEqual(len(f.choices), 4)  # 3 categories + empty option
++    choices = list(f.choices)
++    self.assertIn('', [c[0] for c in choices])
+diff --git a/test_radioselect_comprehensive.py b/test_radioselect_comprehensive.py
+new file mode 100644
+index 0000000000..b205ccc37f
+--- /dev/null
++++ b/test_radioselect_comprehensive.py
+@@ -0,0 +1,155 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django components
++from django.db import models
++from django.forms import ModelForm, RadioSelect
++from django import forms
++
++# Define test models
++class BatchData(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++class TestModel(models.Model):
++    # Different field configurations
++    required_fk = models.ForeignKey(BatchData, on_delete=models.CASCADE, blank=False, related_name='required_fk')
++    optional_fk = models.ForeignKey(BatchData, on_delete=models.CASCADE, blank=True, related_name='optional_fk')
++    nullable_required_fk = models.ForeignKey(BatchData, on_delete=models.SET_NULL, null=True, blank=False, related_name='nullable_required_fk')
++    nullable_optional_fk = models.ForeignKey(BatchData, on_delete=models.SET_NULL, null=True, blank=True, related_name='nullable_optional_fk')
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(BatchData)
++    schema_editor.create_model(TestModel)
++
++# Create some test data
++batch1 = BatchData.objects.create(name="First Data File")
++batch2 = BatchData.objects.create(name="Second Data File")
++
++print("Testing RadioSelect with different field configurations...")
++print("=" * 80)
++
++# Test 1: Required ForeignKey (blank=False) with RadioSelect
++class TestForm1(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['required_fk']
++        widgets = {'required_fk': RadioSelect()}
++
++form1 = TestForm1()
++print("\n1. Required ForeignKey (blank=False) with RadioSelect:")
++print("   Should NOT have empty option")
++choices = list(form1.fields['required_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++print(f"   Choices: {choices}")
++
++# Test 2: Optional ForeignKey (blank=True) with RadioSelect
++class TestForm2(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['optional_fk']
++        widgets = {'optional_fk': RadioSelect()}
++
++form2 = TestForm2()
++print("\n2. Optional ForeignKey (blank=True) with RadioSelect:")
++print("   Should HAVE empty option")
++choices = list(form2.fields['optional_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++print(f"   Choices: {choices}")
++
++# Test 3: Nullable Required ForeignKey (null=True, blank=False) with RadioSelect
++class TestForm3(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['nullable_required_fk']
++        widgets = {'nullable_required_fk': RadioSelect()}
++
++form3 = TestForm3()
++print("\n3. Nullable Required ForeignKey (null=True, blank=False) with RadioSelect:")
++print("   Should NOT have empty option")
++choices = list(form3.fields['nullable_required_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++print(f"   Choices: {choices}")
++
++# Test 4: Nullable Optional ForeignKey (null=True, blank=True) with RadioSelect
++class TestForm4(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['nullable_optional_fk']
++        widgets = {'nullable_optional_fk': RadioSelect()}
++
++form4 = TestForm4()
++print("\n4. Nullable Optional ForeignKey (null=True, blank=True) with RadioSelect:")
++print("   Should HAVE empty option")
++choices = list(form4.fields['nullable_optional_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++print(f"   Choices: {choices}")
++
++# Test 5: Required field with initial value
++class TestForm5(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['required_fk']
++        widgets = {'required_fk': RadioSelect()}
++
++form5 = TestForm5(initial={'required_fk': batch1.pk})
++print("\n5. Required ForeignKey with initial value and RadioSelect:")
++print("   Should NOT have empty option")
++choices = list(form5.fields['required_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++print(f"   Initial value: {form5.initial.get('required_fk')}")
++
++# Test 6: Required field with Select widget (for comparison)
++class TestForm6(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['required_fk']
++        # No widget specified, will use default Select
++
++form6 = TestForm6()
++print("\n6. Required ForeignKey with default Select widget:")
++print("   Should HAVE empty option (standard behavior)")
++choices = list(form6.fields['required_fk'].choices)
++print(f"   Number of choices: {len(choices)}")
++print(f"   Has empty option: {'Yes' if any(c[0] == '' for c in choices) else 'No'}")
++
++print("\n" + "=" * 80)
++print("Summary: RadioSelect widgets should not show empty option for required fields,")
++print("while Select widgets should always show it for better UX.")
+diff --git a/test_radioselect_fix.py b/test_radioselect_fix.py
+new file mode 100644
+index 0000000000..fe8f5b5f2c
+--- /dev/null
++++ b/test_radioselect_fix.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python
++"""Test for RadioSelect widget not showing empty option when field is required."""
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.forms import ModelForm, RadioSelect, Select
++from django import forms
++
++# Define test models
++class Category(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Article(models.Model):
++    category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=False)
++    optional_category = models.ForeignKey(Category, on_delete=models.CASCADE, blank=True, related_name='optional_articles')
++    
++    class Meta:
++        app_label = 'test_app'
++
++class RadioSelectEmptyLabelTest(TestCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        # Create tables
++        from django.db import connection
++        from django.db.backends.sqlite3.schema import DatabaseSchemaEditor
++        
++        # Disable foreign key checks for SQLite
++        with connection.cursor() as cursor:
++            cursor.execute("PRAGMA foreign_keys = OFF")
++        
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(Category)
++            schema_editor.create_model(Article)
++        
++        with connection.cursor() as cursor:
++            cursor.execute("PRAGMA foreign_keys = ON")
++        
++        # Create test data
++        cls.cat1 = Category.objects.create(name="Category 1")
++        cls.cat2 = Category.objects.create(name="Category 2")
++    
++    def test_required_field_with_radioselect_no_empty_option(self):
++        """RadioSelect should not show empty option for required fields."""
++        class ArticleForm(ModelForm):
++            class Meta:
++                model = Article
++                fields = ['category']
++                widgets = {'category': RadioSelect()}
++        
++        form = ArticleForm()
++        choices = list(form.fields['category'].choices)
++        
++        # Should not have empty option
++        self.assertEqual(len(choices), 2)
++        self.assertNotIn('', [c[0] for c in choices])
++    
++    def test_optional_field_with_radioselect_has_empty_option(self):
++        """RadioSelect should show empty option for optional fields."""
++        class ArticleForm(ModelForm):
++            class Meta:
++                model = Article
++                fields = ['optional_category']
++                widgets = {'optional_category': RadioSelect()}
++        
++        form = ArticleForm()
++        choices = list(form.fields['optional_category'].choices)
++        
++        # Should have empty option
++        self.assertEqual(len(choices), 3)
++        self.assertIn('', [c[0] for c in choices])
++    
++    def test_required_field_with_select_has_empty_option(self):
++        """Select widget should show empty option even for required fields."""
++        class ArticleForm(ModelForm):
++            class Meta:
++                model = Article
++                fields = ['category']
++                # Using default Select widget
++        
++        form = ArticleForm()
++        choices = list(form.fields['category'].choices)
++        
++        # Should have empty option (standard behavior for Select)
++        self.assertEqual(len(choices), 3)
++        self.assertIn('', [c[0] for c in choices])
++    
++    def test_required_field_with_initial_and_radioselect_no_empty_option(self):
++        """RadioSelect should not show empty option when field has initial value."""
++        class ArticleForm(ModelForm):
++            class Meta:
++                model = Article
++                fields = ['category']
++                widgets = {'category': RadioSelect()}
++        
++        form = ArticleForm(initial={'category': self.cat1.pk})
++        choices = list(form.fields['category'].choices)
++        
++        # Should not have empty option
++        self.assertEqual(len(choices), 2)
++        self.assertNotIn('', [c[0] for c in choices])
++    
++    def test_modelchoicefield_directly_with_radioselect(self):
++        """Test ModelChoiceField directly with RadioSelect widget."""
++        field = forms.ModelChoiceField(
++            queryset=Category.objects.all(),
++            widget=RadioSelect(),
++            required=True
++        )
++        choices = list(field.choices)
++        
++        # Should not have empty option
++        self.assertEqual(len(choices), 2)
++        self.assertNotIn('', [c[0] for c in choices])
++    
++    def test_modelchoicefield_optional_with_radioselect(self):
++        """Test optional ModelChoiceField with RadioSelect widget."""
++        field = forms.ModelChoiceField(
++            queryset=Category.objects.all(),
++            widget=RadioSelect(),
++            required=False
++        )
++        choices = list(field.choices)
++        
++        # Should have empty option
++        self.assertEqual(len(choices), 3)
++        self.assertIn('', [c[0] for c in choices])
++
++if __name__ == '__main__':
++    # Run the tests
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2, interactive=True)
++    failures = test_runner.run_tests(['__main__'])
++    sys.exit(bool(failures))
+diff --git a/test_radioselect_issue.py b/test_radioselect_issue.py
+new file mode 100644
+index 0000000000..305f6eab79
+--- /dev/null
++++ b/test_radioselect_issue.py
+@@ -0,0 +1,96 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django components
++from django.db import models
++from django.forms import ModelForm, RadioSelect
++from django import forms
++
++# Define test models
++class BatchData(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++class TestRun(models.Model):
++    data_file = models.ForeignKey(BatchData, on_delete=models.SET_NULL, null=True, blank=False)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Define form
++class TestRunForm(ModelForm):
++    class Meta:
++        model = TestRun
++        fields = ['data_file']
++        widgets = {'data_file': RadioSelect()}
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(BatchData)
++    schema_editor.create_model(TestRun)
++
++# Create some test data
++batch1 = BatchData.objects.create(name="First Data File")
++batch2 = BatchData.objects.create(name="Second Data File")
++
++# Test the form
++print("Testing RadioSelect with blank=False on ForeignKey field...")
++print("=" * 60)
++
++form = TestRunForm()
++print("Form HTML for data_file field:")
++print(form['data_file'])
++print()
++
++# Check if empty option is present
++field_html = str(form['data_file'])
++if 'value=""' in field_html:
++    print("ISSUE FOUND: Empty option is present even though blank=False")
++    print("   The form includes a blank/empty radio option")
++else:
++    print("No empty option found (expected behavior)")
++
++# Also check the field's choices
++print("\nField choices:")
++for value, label in form.fields['data_file'].choices:
++    print(f"  Value: '{value}', Label: '{label}'")
++
++# Test with Select widget for comparison
++class TestRunFormSelect(ModelForm):
++    class Meta:
++        model = TestRun
++        fields = ['data_file']
++
++print("\n\nFor comparison, here's the same field with default Select widget:")
++print("=" * 60)
++form_select = TestRunFormSelect()
++print("Form HTML for data_file field (Select widget):")
++print(form_select['data_file'])
+diff --git a/test_radioselect_unit.py b/test_radioselect_unit.py
+new file mode 100644
+index 0000000000..e74df48d86
+--- /dev/null
++++ b/test_radioselect_unit.py
+@@ -0,0 +1,133 @@
++#!/usr/bin/env python
++"""Unit test for RadioSelect widget fix."""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import RadioSelect, Select
++
++# Test ModelChoiceField directly
++print("Testing ModelChoiceField with RadioSelect widget...")
++print("=" * 60)
++
++# Mock queryset
++class MockQuerySet:
++    def __init__(self, items):
++        self.items = items
++        self._prefetch_related_lookups = []
++    
++    def all(self):
++        return self
++    
++    def iterator(self):
++        return iter(self.items)
++    
++    def count(self):
++        return len(self.items)
++    
++    def exists(self):
++        return len(self.items) > 0
++
++# Mock model instances
++class MockModel:
++    def __init__(self, pk, name):
++        self.pk = pk
++        self.name = name
++    
++    def __str__(self):
++        return self.name
++
++# Create mock data
++mock_items = [MockModel(1, "Item 1"), MockModel(2, "Item 2")]
++mock_queryset = MockQuerySet(mock_items)
++
++# Test 1: Required field with RadioSelect - should NOT have empty option
++print("\nTest 1: Required ModelChoiceField with RadioSelect")
++field1 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=RadioSelect(),
++    required=True
++)
++choices1 = list(field1.choices)
++print(f"Number of choices: {len(choices1)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices1) else 'No'}")
++print(f"Expected: No empty option")
++print(f"Result: {'PASS' if len(choices1) == 2 else 'FAIL'}")
++
++# Test 2: Optional field with RadioSelect - should HAVE empty option
++print("\nTest 2: Optional ModelChoiceField with RadioSelect")
++field2 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=RadioSelect(),
++    required=False
++)
++choices2 = list(field2.choices)
++print(f"Number of choices: {len(choices2)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices2) else 'No'}")
++print(f"Expected: Has empty option")
++print(f"Result: {'PASS' if len(choices2) == 3 else 'FAIL'}")
++
++# Test 3: Required field with Select - should HAVE empty option
++print("\nTest 3: Required ModelChoiceField with Select (default)")
++field3 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    required=True
++)
++choices3 = list(field3.choices)
++print(f"Number of choices: {len(choices3)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices3) else 'No'}")
++print(f"Expected: Has empty option (standard Select behavior)")
++print(f"Result: {'PASS' if len(choices3) == 3 else 'FAIL'}")
++
++# Test 4: Required field with initial value and RadioSelect
++print("\nTest 4: Required ModelChoiceField with initial value and RadioSelect")
++field4 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=RadioSelect(),
++    required=True,
++    initial=1
++)
++choices4 = list(field4.choices)
++print(f"Number of choices: {len(choices4)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices4) else 'No'}")
++print(f"Expected: No empty option")
++print(f"Result: {'PASS' if len(choices4) == 2 else 'FAIL'}")
++
++# Test 5: Test with explicit Select widget
++print("\nTest 5: Required ModelChoiceField with explicit Select widget")
++field5 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=Select(),
++    required=True
++)
++choices5 = list(field5.choices)
++print(f"Number of choices: {len(choices5)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices5) else 'No'}")
++print(f"Expected: Has empty option")
++print(f"Result: {'PASS' if len(choices5) == 3 else 'FAIL'}")
++
++# Summary
++print("\n" + "=" * 60)
++print("Summary:")
++print("- RadioSelect widgets should NOT show empty option for required fields")
++print("- RadioSelect widgets should show empty option for optional fields")
++print("- Select widgets should always show empty option (standard behavior)")
+diff --git a/test_widget_instance.py b/test_widget_instance.py
+new file mode 100644
+index 0000000000..bb23c47784
+--- /dev/null
++++ b/test_widget_instance.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++"""Test RadioSelect widget instance."""
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django import forms
++from django.forms.widgets import RadioSelect
++
++# Mock queryset
++class MockQuerySet:
++    def __init__(self, items):
++        self.items = items
++        self._prefetch_related_lookups = []
++    
++    def all(self):
++        return self
++    
++    def iterator(self):
++        return iter(self.items)
++    
++    def count(self):
++        return len(self.items)
++    
++    def exists(self):
++        return len(self.items) > 0
++
++# Mock model instances
++class MockModel:
++    def __init__(self, pk, name):
++        self.pk = pk
++        self.name = name
++    
++    def __str__(self):
++        return self.name
++
++# Create mock data
++mock_items = [MockModel(1, "Item 1"), MockModel(2, "Item 2")]
++mock_queryset = MockQuerySet(mock_items)
++
++print("Testing with widget instances (not classes)...")
++print("=" * 60)
++
++# Test with widget instance
++print("\nTest: Required field with RadioSelect() instance")
++field = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=RadioSelect(),  # Instance, not class
++    required=True
++)
++choices = list(field.choices)
++print(f"Number of choices: {len(choices)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices) else 'No'}")
++print(f"Result: {'PASS' if len(choices) == 2 else 'FAIL'}")
++
++# Test with widget instance with attrs
++print("\nTest: Required field with RadioSelect(attrs={...}) instance")
++field2 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=RadioSelect(attrs={'class': 'custom-radio'}),
++    required=True
++)
++choices2 = list(field2.choices)
++print(f"Number of choices: {len(choices2)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices2) else 'No'}")
++print(f"Result: {'PASS' if len(choices2) == 2 else 'FAIL'}")
++
++# Test subclass of RadioSelect
++class CustomRadioSelect(RadioSelect):
++    pass
++
++print("\nTest: Required field with custom RadioSelect subclass")
++field3 = forms.ModelChoiceField(
++    queryset=mock_queryset,
++    widget=CustomRadioSelect(),
++    required=True
++)
++choices3 = list(field3.choices)
++print(f"Number of choices: {len(choices3)}")
++print(f"Has empty option: {'Yes' if any(str(c[0]) == '' for c in choices3) else 'No'}")
++print(f"Result: {'PASS' if len(choices3) == 2 else 'FAIL'}")

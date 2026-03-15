@@ -1,0 +1,120 @@
+diff --git a/django/contrib/messages/storage/base.py b/django/contrib/messages/storage/base.py
+index 01422066a6..8cdbbd92c7 100644
+--- a/django/contrib/messages/storage/base.py
++++ b/django/contrib/messages/storage/base.py
+@@ -1,8 +1,6 @@
+ from django.conf import settings
+ from django.contrib.messages import constants, utils
+ 
+-LEVEL_TAGS = utils.get_level_tags()
+-
+ 
+ class Message:
+     """
+@@ -38,7 +36,7 @@ class Message:
+ 
+     @property
+     def level_tag(self):
+-        return LEVEL_TAGS.get(self.level, '')
++        return utils.get_level_tags().get(self.level, '')
+ 
+ 
+ class BaseStorage:
+diff --git a/tests/messages_tests/base.py b/tests/messages_tests/base.py
+index 9dad08e6c7..912713cc94 100644
+--- a/tests/messages_tests/base.py
++++ b/tests/messages_tests/base.py
+@@ -23,17 +23,10 @@ def add_level_messages(storage):
+ 
+ 
+ class override_settings_tags(override_settings):
+-    def enable(self):
+-        super().enable()
+-        # LEVEL_TAGS is a constant defined in the
+-        # django.contrib.messages.storage.base module, so after changing
+-        # settings.MESSAGE_TAGS, update that constant also.
+-        self.old_level_tags = base.LEVEL_TAGS
+-        base.LEVEL_TAGS = utils.get_level_tags()
+-
+-    def disable(self):
+-        super().disable()
+-        base.LEVEL_TAGS = self.old_level_tags
++    # With the fix for dynamic LEVEL_TAGS, we no longer need to manually
++    # update any module-level constant. The override_settings decorator
++    # will handle MESSAGE_TAGS changes automatically.
++    pass
+ 
+ 
+ class BaseTests:
+diff --git a/tests/messages_tests/tests.py b/tests/messages_tests/tests.py
+index eea07c9c41..393ace94ee 100644
+--- a/tests/messages_tests/tests.py
++++ b/tests/messages_tests/tests.py
+@@ -2,7 +2,7 @@ from unittest import mock
+ 
+ from django.contrib.messages import constants
+ from django.contrib.messages.storage.base import Message
+-from django.test import SimpleTestCase
++from django.test import SimpleTestCase, override_settings
+ 
+ 
+ class MessageTests(SimpleTestCase):
+@@ -15,3 +15,58 @@ class MessageTests(SimpleTestCase):
+         self.assertNotEqual(msg_1, msg_2)
+         self.assertNotEqual(msg_1, msg_3)
+         self.assertNotEqual(msg_2, msg_3)
++        
++    def test_level_tag_default(self):
++        """Test that level_tag works with default tags"""
++        msg = Message(constants.INFO, "Test message")
++        self.assertEqual(msg.level_tag, 'info')
++        
++    @override_settings(MESSAGE_TAGS={constants.INFO: 'custom-info'})
++    def test_level_tag_with_override(self):
++        """Test that level_tag should work with @override_settings"""
++        msg = Message(constants.INFO, "Test message")
++        self.assertEqual(msg.level_tag, 'custom-info')
++        
++    @override_settings(MESSAGE_TAGS={
++        constants.DEBUG: 'custom-debug',
++        constants.INFO: 'custom-info',
++        constants.SUCCESS: 'custom-success',
++        constants.WARNING: 'custom-warning',
++        constants.ERROR: 'custom-error',
++    })
++    def test_level_tag_with_multiple_overrides(self):
++        """Test that all level tags work with @override_settings"""
++        debug_msg = Message(constants.DEBUG, "Debug")
++        info_msg = Message(constants.INFO, "Info")
++        success_msg = Message(constants.SUCCESS, "Success")
++        warning_msg = Message(constants.WARNING, "Warning")
++        error_msg = Message(constants.ERROR, "Error")
++        
++        self.assertEqual(debug_msg.level_tag, 'custom-debug')
++        self.assertEqual(info_msg.level_tag, 'custom-info')
++        self.assertEqual(success_msg.level_tag, 'custom-success')
++        self.assertEqual(warning_msg.level_tag, 'custom-warning')
++        self.assertEqual(error_msg.level_tag, 'custom-error')
++        
++    @override_settings(MESSAGE_TAGS={50: 'critical', 60: 'emergency'})
++    def test_level_tag_with_custom_levels(self):
++        """Test custom message levels with @override_settings"""
++        critical_msg = Message(50, "Critical")
++        emergency_msg = Message(60, "Emergency")
++        # Default tags should still work
++        info_msg = Message(constants.INFO, "Info")
++        
++        self.assertEqual(critical_msg.level_tag, 'critical')
++        self.assertEqual(emergency_msg.level_tag, 'emergency')
++        self.assertEqual(info_msg.level_tag, 'info')
++        
++    def test_level_tag_without_override_after_override(self):
++        """Test that level_tag returns to default after override context"""
++        # First with override
++        with self.settings(MESSAGE_TAGS={constants.INFO: 'custom-info'}):
++            msg = Message(constants.INFO, "Test message")
++            self.assertEqual(msg.level_tag, 'custom-info')
++        
++        # Then without override
++        msg = Message(constants.INFO, "Test message")
++        self.assertEqual(msg.level_tag, 'info')

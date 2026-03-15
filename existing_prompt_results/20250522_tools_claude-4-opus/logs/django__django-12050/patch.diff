@@ -1,0 +1,462 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index ea51912e8b..f093003708 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1073,7 +1073,8 @@ class Query(BaseExpression):
+                         ))
+                 else:
+                     resolved_values.append(sub_value)
+-            value = tuple(resolved_values)
++            # Preserve the original type (list or tuple)
++            value = type(value)(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/test_list_tuple_preservation.py b/test_list_tuple_preservation.py
+new file mode 100644
+index 0000000000..797cc0734a
+--- /dev/null
++++ b/test_list_tuple_preservation.py
+@@ -0,0 +1,126 @@
++"""
++Test to demonstrate that list/tuple types are preserved in query lookups.
++This is important for custom fields that depend on exact type matching.
++"""
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes'],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Q, F
++from django.db.models.sql.query import Query
++
++
++class CustomField(models.Field):
++    """
++    A custom field that tracks the exact type of values passed to lookups.
++    """
++    lookup_values = []
++    
++    def get_prep_value(self, value):
++        # Store the value and its type for inspection
++        self.__class__.lookup_values.append((value, type(value)))
++        return str(value)
++    
++    def get_internal_type(self):
++        return "CharField"
++
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    custom = CustomField(max_length=100)
++    
++    class Meta:
++        app_label = 'test'
++
++
++def test_query_preserves_list_tuple_types():
++    """Test that Query.resolve_lookup_value preserves list/tuple types."""
++    
++    # Direct test of resolve_lookup_value
++    print("=== Testing Query.resolve_lookup_value directly ===")
++    query = Query(TestModel)
++    
++    # Test list preservation
++    test_list = [1, 2, 3]
++    result = query.resolve_lookup_value(test_list, set(), True, False)
++    print(f"Input: {test_list} (type: {type(test_list).__name__})")
++    print(f"Output: {result} (type: {type(result).__name__})")
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    print("[PASS] List type preserved\n")
++    
++    # Test tuple preservation
++    test_tuple = (1, 2, 3)
++    result = query.resolve_lookup_value(test_tuple, set(), True, False)
++    print(f"Input: {test_tuple} (type: {type(test_tuple).__name__})")
++    print(f"Output: {result} (type: {type(result).__name__})")
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    print("[PASS] Tuple type preserved\n")
++    
++    # Test with expressions in list
++    test_list_with_f = [F('name'), 'literal', 42]
++    result = query.resolve_lookup_value(test_list_with_f, set(), True, False)
++    print(f"Input with F: {test_list_with_f}")
++    print(f"Output type: {type(result).__name__}")
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    print("[PASS] List with F expressions preserved\n")
++    
++    # Test with expressions in tuple
++    test_tuple_with_f = (F('name'), 'literal', 42)
++    result = query.resolve_lookup_value(test_tuple_with_f, set(), True, False)
++    print(f"Input with F: {test_tuple_with_f}")
++    print(f"Output type: {type(result).__name__}")
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    print("[PASS] Tuple with F expressions preserved\n")
++    
++    # Test that the types are preserved through the ORM query chain
++    print("=== Testing type preservation in ORM queries ===")
++    
++    # Clear the tracking list
++    CustomField.lookup_values = []
++    
++    # Create a queryset with list value
++    qs = TestModel.objects.filter(custom__in=[1, 2, 3])
++    # Force evaluation of the query to trigger value preparation
++    sql, params = qs.query.get_compiler('default').as_sql()
++    
++    # Check what types were passed to get_prep_value
++    print("\nValues passed to CustomField.get_prep_value:")
++    for value, value_type in CustomField.lookup_values:
++        print(f"  Value: {value}, Type: {value_type.__name__}")
++    
++    # The individual values should be passed, not the list itself
++    assert len(CustomField.lookup_values) == 3, f"Expected 3 values, got {len(CustomField.lookup_values)}"
++    print("[PASS] IN lookup correctly processes list values\n")
++    
++    # Test with exact lookup using list
++    CustomField.lookup_values = []
++    test_list = ['a', 'b', 'c']
++    qs = TestModel.objects.filter(custom=test_list)
++    sql, params = qs.query.get_compiler('default').as_sql()
++    
++    print("Values for exact lookup with list:")
++    for value, value_type in CustomField.lookup_values:
++        print(f"  Value: {value}, Type: {value_type.__name__}")
++    
++    # For exact lookup, the list should be passed as-is
++    if CustomField.lookup_values:
++        assert CustomField.lookup_values[0][1] == list, f"Expected list type, got {CustomField.lookup_values[0][1]}"
++        print("[PASS] Exact lookup preserves list type\n")
++    
++    print("[ALL PASS] All tests passed!")
++
++
++if __name__ == "__main__":
++    test_query_preserves_list_tuple_types()
+diff --git a/test_pickled_field_scenario.py b/test_pickled_field_scenario.py
+new file mode 100644
+index 0000000000..67c4026213
+--- /dev/null
++++ b/test_pickled_field_scenario.py
+@@ -0,0 +1,113 @@
++"""
++Test to demonstrate the fix for PickledField-like fields that depend on exact type matching.
++"""
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db import models, connection
++from django.db.models import Q
++import pickle
++
++
++class PickledField(models.TextField):
++    """
++    A simple PickledField implementation that stores Python objects as pickled data.
++    This field type depends on exact type matching for lookups.
++    """
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return value
++        return pickle.loads(value.encode('latin1'))
++    
++    def to_python(self, value):
++        if isinstance(value, (bytes, str)):
++            return pickle.loads(value.encode('latin1') if isinstance(value, str) else value)
++        return value
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return value
++        return pickle.dumps(value).decode('latin1')
++    
++    def get_db_prep_value(self, value, connection, prepared=False):
++        value = self.get_prep_value(value)
++        return value
++
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    data = PickledField()
++    
++    class Meta:
++        app_label = 'test'
++        db_table = 'test_model'
++
++
++def test_pickled_field_with_list():
++    """Test that list values in queries are preserved as lists."""
++    # Create the table
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    
++    # Create test data
++    list_data = [1, 2, 3]
++    tuple_data = (4, 5, 6)
++    
++    obj1 = TestModel.objects.create(name='list_obj', data=list_data)
++    obj2 = TestModel.objects.create(name='tuple_obj', data=tuple_data)
++    
++    print("Created objects:")
++    print(f"  obj1: name='{obj1.name}', data={obj1.data} (type: {type(obj1.data)})")
++    print(f"  obj2: name='{obj2.name}', data={obj2.data} (type: {type(obj2.data)})")
++    
++    # Test exact lookup with list
++    print("\nTesting exact lookup with list value...")
++    result = TestModel.objects.filter(data=list_data)
++    assert result.count() == 1, f"Expected 1 result, got {result.count()}"
++    assert result.first().name == 'list_obj'
++    print("[PASS] List lookup works correctly")
++    
++    # Test exact lookup with tuple
++    print("\nTesting exact lookup with tuple value...")
++    result = TestModel.objects.filter(data=tuple_data)
++    assert result.count() == 1, f"Expected 1 result, got {result.count()}"
++    assert result.first().name == 'tuple_obj'
++    print("[PASS] Tuple lookup works correctly")
++    
++    # Test that list doesn't match tuple (type sensitivity)
++    print("\nTesting type sensitivity...")
++    result = TestModel.objects.filter(data=(1, 2, 3))  # tuple version of list_data
++    assert result.count() == 0, f"Expected 0 results (list != tuple), got {result.count()}"
++    print("[PASS] List does not match tuple (type sensitive)")
++    
++    result = TestModel.objects.filter(data=[4, 5, 6])  # list version of tuple_data
++    assert result.count() == 0, f"Expected 0 results (tuple != list), got {result.count()}"
++    print("[PASS] Tuple does not match list (type sensitive)")
++    
++    # Test with Q objects
++    print("\nTesting with Q objects...")
++    result = TestModel.objects.filter(Q(data=list_data) | Q(data=tuple_data))
++    assert result.count() == 2, f"Expected 2 results, got {result.count()}"
++    print("[PASS] Q object queries work correctly")
++    
++    # Clean up
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(TestModel)
++    
++    print("\n[ALL PASS] All PickledField tests passed!")
++
++
++if __name__ == "__main__":
++    test_pickled_field_with_list()
+diff --git a/test_resolve_lookup_value.py b/test_resolve_lookup_value.py
+new file mode 100644
+index 0000000000..ef9b06911b
+--- /dev/null
++++ b/test_resolve_lookup_value.py
+@@ -0,0 +1,55 @@
++"""
++Test script to reproduce the issue with resolve_lookup_value coercing lists to tuples.
++"""
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db.models.sql.query import Query
++from django.db import models
++
++
++class TestModel(models.Model):
++    class Meta:
++        app_label = 'test'
++
++
++def test_resolve_lookup_value_preserves_list_type():
++    """Test that resolve_lookup_value preserves list type."""
++    query = Query(TestModel)
++    
++    # Test with a list
++    list_value = [1, 2, 3]
++    result = query.resolve_lookup_value(list_value, None, True, False)
++    print(f"Input type: {type(list_value)}, Output type: {type(result)}")
++    print(f"Input: {list_value}, Output: {result}")
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    
++    # Test with a tuple
++    tuple_value = (1, 2, 3)
++    result = query.resolve_lookup_value(tuple_value, None, True, False)
++    print(f"Input type: {type(tuple_value)}, Output type: {type(result)}")
++    print(f"Input: {tuple_value}, Output: {result}")
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    
++    # Test with nested structures
++    nested_list = [1, [2, 3], 4]
++    result = query.resolve_lookup_value(nested_list, None, True, False)
++    print(f"Nested list - Input type: {type(nested_list)}, Output type: {type(result)}")
++    print(f"Input: {nested_list}, Output: {result}")
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++
++
++if __name__ == "__main__":
++    test_resolve_lookup_value_preserves_list_type()
+diff --git a/test_resolve_lookup_value_comprehensive.py b/test_resolve_lookup_value_comprehensive.py
+new file mode 100644
+index 0000000000..a14f0f2ad1
+--- /dev/null
++++ b/test_resolve_lookup_value_comprehensive.py
+@@ -0,0 +1,130 @@
++"""
++Comprehensive test for resolve_lookup_value to ensure it preserves input types.
++"""
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth'],
++    USE_TZ=True,
++)
++django.setup()
++
++from django.db.models.sql.query import Query
++from django.db import models
++from django.db.models import F, Q, OuterRef, Subquery
++from django.contrib.auth.models import User
++
++
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++
++def test_resolve_lookup_value_comprehensive():
++    """Comprehensive test for resolve_lookup_value."""
++    query = Query(TestModel)
++    
++    # Test 1: Simple list
++    print("Test 1: Simple list")
++    list_value = [1, 2, 3]
++    result = query.resolve_lookup_value(list_value, None, True, False)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert result == [1, 2, 3]
++    print("[PASS] Simple list preserved".encode('utf-8').decode('utf-8'))
++    
++    # Test 2: Simple tuple
++    print("\nTest 2: Simple tuple")
++    tuple_value = (1, 2, 3)
++    result = query.resolve_lookup_value(tuple_value, None, True, False)
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    assert result == (1, 2, 3)
++    print("[PASS] Simple tuple preserved")
++    
++    # Test 3: Empty list
++    print("\nTest 3: Empty list")
++    empty_list = []
++    result = query.resolve_lookup_value(empty_list, None, True, False)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert result == []
++    print("[PASS] Empty list preserved")
++    
++    # Test 4: Empty tuple
++    print("\nTest 4: Empty tuple")
++    empty_tuple = ()
++    result = query.resolve_lookup_value(empty_tuple, None, True, False)
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    assert result == ()
++    print("[PASS] Empty tuple preserved")
++    
++    # Test 5: List with F expressions
++    print("\nTest 5: List with F expressions")
++    f_list = [F('name'), F('value'), 'literal']
++    result = query.resolve_lookup_value(f_list, set(), True, False)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert len(result) == 3
++    # Check that F expressions were resolved
++    assert hasattr(result[0], 'target') and hasattr(result[1], 'target')
++    assert result[2] == 'literal'
++    print("[PASS] List with F expressions preserved type")
++    
++    # Test 6: Tuple with F expressions
++    print("\nTest 6: Tuple with F expressions")
++    f_tuple = (F('name'), F('value'), 'literal')
++    result = query.resolve_lookup_value(f_tuple, set(), True, False)
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    assert len(result) == 3
++    # Check that F expressions were resolved
++    assert hasattr(result[0], 'target') and hasattr(result[1], 'target')
++    assert result[2] == 'literal'
++    print("[PASS] Tuple with F expressions preserved type")
++    
++    # Test 7: Non-list/tuple values should pass through unchanged
++    print("\nTest 7: Non-list/tuple values")
++    string_value = "test"
++    result = query.resolve_lookup_value(string_value, None, True, False)
++    assert result == "test"
++    print("[PASS] String value passed through")
++    
++    int_value = 42
++    result = query.resolve_lookup_value(int_value, None, True, False)
++    assert result == 42
++    print("[PASS] Integer value passed through")
++    
++    # Test 8: Single F expression (not in list/tuple)
++    print("\nTest 8: Single F expression")
++    f_expr = F('name')
++    result = query.resolve_lookup_value(f_expr, set(), True, False)
++    assert hasattr(result, 'target')
++    print("[PASS] Single F expression resolved")
++    
++    # Test 9: Mixed types in list
++    print("\nTest 9: Mixed types in list")
++    mixed_list = [1, 'two', 3.0, None, True]
++    result = query.resolve_lookup_value(mixed_list, None, True, False)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert result == [1, 'two', 3.0, None, True]
++    print("[PASS] Mixed types in list preserved")
++    
++    # Test 10: Nested lists
++    print("\nTest 10: Nested lists")
++    nested_list = [1, [2, 3], [4, [5, 6]]]
++    result = query.resolve_lookup_value(nested_list, None, True, False)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert result == [1, [2, 3], [4, [5, 6]]]
++    print("[PASS] Nested lists preserved")
++    
++    print("\n[ALL PASS] All tests passed!")
++
++
++if __name__ == "__main__":
++    test_resolve_lookup_value_comprehensive()

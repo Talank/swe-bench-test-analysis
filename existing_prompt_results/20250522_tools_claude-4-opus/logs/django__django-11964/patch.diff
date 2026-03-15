@@ -1,0 +1,527 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index d610dc86f0..30495f08a3 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -1008,7 +1008,14 @@ class CharField(Field):
+         return "CharField"
+ 
+     def to_python(self, value):
+-        if isinstance(value, str) or value is None:
++        if value is None:
++            return value
++        # Handle enum values - check for Enum before str check since
++        # TextChoices/IntegerChoices inherit from str/int
++        if hasattr(value, '_value_') and hasattr(value, '_name_'):
++            # This is an enum value, return the actual value not the enum instance
++            return value.value if hasattr(value, 'value') else value._value_
++        if isinstance(value, str):
+             return value
+         return str(value)
+ 
+diff --git a/django/db/models/query_utils.py b/django/db/models/query_utils.py
+index 189fb4fa44..1f485a02d9 100644
+--- a/django/db/models/query_utils.py
++++ b/django/db/models/query_utils.py
+@@ -150,6 +150,16 @@ class DeferredAttribute:
+             return getattr(instance, link_field.attname)
+         return None
+ 
++    def __set__(self, instance, value):
++        """
++        Set the value, converting enum values to their actual value.
++        """
++        # Only convert enum values to avoid changing validation behavior
++        if hasattr(value, '_value_') and hasattr(value, '_name_'):
++            # This is an enum value, convert it to its actual value
++            value = value.value if hasattr(value, 'value') else value._value_
++        instance.__dict__[self.field.attname] = value
++
+ 
+ class RegisterLookupMixin:
+ 
+diff --git a/test_choices_issue.py b/test_choices_issue.py
+new file mode 100644
+index 0000000000..4d3fc24f0a
+--- /dev/null
++++ b/test_choices_issue.py
+@@ -0,0 +1,49 @@
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++from django.test import TestCase
++import os
++import django
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++class MyChoice(models.TextChoices):
++    FIRST_CHOICE = "first", _("The first choice, it is")
++    SECOND_CHOICE = "second", _("The second choice, it is")
++
++class MyIntChoice(models.IntegerChoices):
++    ONE = 1, _("One")
++    TWO = 2, _("Two")
++
++class MyObject(models.Model):
++    my_str_value = models.CharField(max_length=10, choices=MyChoice.choices)
++    my_int_value = models.IntegerField(choices=MyIntChoice.choices, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyObject)
++
++# Test the issue
++obj = MyObject(my_str_value=MyChoice.FIRST_CHOICE, my_int_value=MyIntChoice.ONE)
++print(f"Before save - my_str_value type: {type(obj.my_str_value)}, value: {obj.my_str_value}, str: {str(obj.my_str_value)}")
++print(f"Before save - my_int_value type: {type(obj.my_int_value)}, value: {obj.my_int_value}, str: {str(obj.my_int_value)}")
++
++obj.save()
++print(f"\nAfter save - my_str_value type: {type(obj.my_str_value)}, value: {obj.my_str_value}, str: {str(obj.my_str_value)}")
++print(f"After save - my_int_value type: {type(obj.my_int_value)}, value: {obj.my_int_value}, str: {str(obj.my_int_value)}")
++
++# Retrieve from database
++obj2 = MyObject.objects.get(pk=obj.pk)
++print(f"\nRetrieved - my_str_value type: {type(obj2.my_str_value)}, value: {obj2.my_str_value}, str: {str(obj2.my_str_value)}")
++print(f"Retrieved - my_int_value type: {type(obj2.my_int_value)}, value: {obj2.my_int_value}, str: {str(obj2.my_int_value)}")
++
++# Test isinstance
++print(f"\nIs obj.my_str_value a str? {isinstance(obj.my_str_value, str)}")
++print(f"Is obj2.my_str_value a str? {isinstance(obj2.my_str_value, str)}")
++print(f"Is obj.my_int_value an int? {isinstance(obj.my_int_value, int)}")
++print(f"Is obj2.my_int_value an int? {isinstance(obj2.my_int_value, int)}")
+diff --git a/test_choices_issue2.py b/test_choices_issue2.py
+new file mode 100644
+index 0000000000..83f18d198b
+--- /dev/null
++++ b/test_choices_issue2.py
+@@ -0,0 +1,74 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define models
++class MyChoice(models.TextChoices):
++    FIRST_CHOICE = "first", _("The first choice, it is")
++    SECOND_CHOICE = "second", _("The second choice, it is")
++
++class MyIntChoice(models.IntegerChoices):
++    ONE = 1, _("One")
++    TWO = 2, _("Two")
++
++class MyObject(models.Model):
++    my_str_value = models.CharField(max_length=10, choices=MyChoice.choices)
++    my_int_value = models.IntegerField(choices=MyIntChoice.choices, null=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++from django.core.management.color import no_style
++from django.db import models as django_models
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyObject)
++
++# Test the issue
++obj = MyObject(my_str_value=MyChoice.FIRST_CHOICE, my_int_value=MyIntChoice.ONE)
++print(f"Before save - my_str_value type: {type(obj.my_str_value)}, value: {repr(obj.my_str_value)}, str: {str(obj.my_str_value)}")
++print(f"Before save - my_int_value type: {type(obj.my_int_value)}, value: {repr(obj.my_int_value)}, str: {str(obj.my_int_value)}")
++
++obj.save()
++print(f"\nAfter save - my_str_value type: {type(obj.my_str_value)}, value: {repr(obj.my_str_value)}, str: {str(obj.my_str_value)}")
++print(f"After save - my_int_value type: {type(obj.my_int_value)}, value: {repr(obj.my_int_value)}, str: {str(obj.my_int_value)}")
++
++# Retrieve from database
++obj2 = MyObject.objects.get(pk=obj.pk)
++print(f"\nRetrieved - my_str_value type: {type(obj2.my_str_value)}, value: {repr(obj2.my_str_value)}, str: {str(obj2.my_str_value)}")
++print(f"Retrieved - my_int_value type: {type(obj2.my_int_value)}, value: {repr(obj2.my_int_value)}, str: {str(obj2.my_int_value)}")
++
++# Test isinstance
++print(f"\nIs obj.my_str_value a str? {isinstance(obj.my_str_value, str)}")
++print(f"Is obj2.my_str_value a str? {isinstance(obj2.my_str_value, str)}")
++print(f"Is obj.my_int_value an int? {isinstance(obj.my_int_value, int)}")
++print(f"Is obj2.my_int_value an int? {isinstance(obj2.my_int_value, int)}")
++
++# Test __str__ output
++print(f"\nobj.my_str_value.__str__() = '{obj.my_str_value}'")
++print(f"obj2.my_str_value.__str__() = '{obj2.my_str_value}'")
+diff --git a/test_comprehensive_enums.py b/test_comprehensive_enums.py
+new file mode 100644
+index 0000000000..fedeeb7584
+--- /dev/null
++++ b/test_comprehensive_enums.py
+@@ -0,0 +1,101 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define various enum types
++class TextChoicesExample(models.TextChoices):
++    OPTION_A = "a", _("Option A")
++    OPTION_B = "b", _("Option B")
++    EMPTY = "", _("Empty option")
++
++class IntChoicesExample(models.IntegerChoices):
++    ZERO = 0, _("Zero")
++    ONE = 1, _("One")
++    NEGATIVE = -1, _("Negative One")
++
++class MyModel(models.Model):
++    text_field = models.CharField(max_length=10, choices=TextChoicesExample.choices)
++    int_field = models.IntegerField(choices=IntChoicesExample.choices)
++    nullable_text = models.CharField(max_length=10, choices=TextChoicesExample.choices, null=True, blank=True)
++    nullable_int = models.IntegerField(choices=IntChoicesExample.choices, null=True, blank=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++# Test various scenarios
++print("=== Test 1: Basic assignment and save ===")
++obj = MyModel(text_field=TextChoicesExample.OPTION_A, int_field=IntChoicesExample.ONE)
++print(f"Before save - text_field: {obj.text_field!r} (type: {type(obj.text_field).__name__})")
++print(f"Before save - int_field: {obj.int_field!r} (type: {type(obj.int_field).__name__})")
++obj.save()
++print(f"After save - text_field: {obj.text_field!r} (type: {type(obj.text_field).__name__})")
++print(f"After save - int_field: {obj.int_field!r} (type: {type(obj.int_field).__name__})")
++
++print("\n=== Test 2: Empty string enum ===")
++obj2 = MyModel(text_field=TextChoicesExample.EMPTY, int_field=IntChoicesExample.ZERO)
++print(f"Empty string enum - text_field: {obj2.text_field!r} (type: {type(obj2.text_field).__name__})")
++print(f"Zero enum - int_field: {obj2.int_field!r} (type: {type(obj2.int_field).__name__})")
++obj2.save()
++
++print("\n=== Test 3: Direct value assignment (not enum) ===")
++obj3 = MyModel(text_field="a", int_field=1)
++print(f"Direct string - text_field: {obj3.text_field!r} (type: {type(obj3.text_field).__name__})")
++print(f"Direct int - int_field: {obj3.int_field!r} (type: {type(obj3.int_field).__name__})")
++
++print("\n=== Test 4: Updating existing object ===")
++obj.text_field = TextChoicesExample.OPTION_B
++obj.int_field = IntChoicesExample.NEGATIVE
++print(f"After update - text_field: {obj.text_field!r} (type: {type(obj.text_field).__name__})")
++print(f"After update - int_field: {obj.int_field!r} (type: {type(obj.int_field).__name__})")
++obj.save()
++
++print("\n=== Test 5: Nullable fields ===")
++obj4 = MyModel(text_field="a", int_field=0, nullable_text=None, nullable_int=None)
++print(f"Null text: {obj4.nullable_text!r}")
++print(f"Null int: {obj4.nullable_int!r}")
++obj4.save()
++
++# Now assign enum values to nullable fields
++obj4.nullable_text = TextChoicesExample.OPTION_A
++obj4.nullable_int = IntChoicesExample.ONE
++print(f"After enum assignment - nullable_text: {obj4.nullable_text!r} (type: {type(obj4.nullable_text).__name__})")
++print(f"After enum assignment - nullable_int: {obj4.nullable_int!r} (type: {type(obj4.nullable_int).__name__})")
++
++print("\n=== Test 6: Retrieve from database ===")
++retrieved = MyModel.objects.get(pk=obj.pk)
++print(f"Retrieved - text_field: {retrieved.text_field!r} (type: {type(retrieved.text_field).__name__})")
++print(f"Retrieved - int_field: {retrieved.int_field!r} (type: {type(retrieved.int_field).__name__})")
++
++print("\n=== Test 7: Comparison operations ===")
++print(f"obj.text_field == 'b': {obj.text_field == 'b'}")
++print(f"obj.text_field == TextChoicesExample.OPTION_B: {obj.text_field == TextChoicesExample.OPTION_B}")
++print(f"obj.int_field == -1: {obj.int_field == -1}")
++print(f"obj.int_field == IntChoicesExample.NEGATIVE: {obj.int_field == IntChoicesExample.NEGATIVE}")
++
++print("\n=== All tests completed successfully! ===")
+diff --git a/test_enum_behavior.py b/test_enum_behavior.py
+new file mode 100644
+index 0000000000..3995351f7f
+--- /dev/null
++++ b/test_enum_behavior.py
+@@ -0,0 +1,29 @@
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++class MyChoice(models.TextChoices):
++    FIRST_CHOICE = "first", _("The first choice, it is")
++    SECOND_CHOICE = "second", _("The second choice, it is")
++
++class MyIntChoice(models.IntegerChoices):
++    ONE = 1, _("One")
++    TWO = 2, _("Two")
++
++# Test enum behavior
++enum_val = MyChoice.FIRST_CHOICE
++print(f"Enum value: {enum_val!r}")
++print(f"Type: {type(enum_val)}")
++print(f"isinstance(enum_val, str): {isinstance(enum_val, str)}")
++print(f"str(enum_val): {str(enum_val)}")
++print(f"enum_val.value: {enum_val.value}")
++print(f"enum_val == 'first': {enum_val == 'first'}")
++
++print("\n--- Integer enum ---")
++int_val = MyIntChoice.ONE
++print(f"Enum value: {int_val!r}")
++print(f"Type: {type(int_val)}")
++print(f"isinstance(int_val, int): {isinstance(int_val, int)}")
++print(f"str(int_val): {str(int_val)}")
++print(f"int(int_val): {int(int_val)}")
++print(f"int_val.value: {int_val.value}")
++print(f"int_val == 1: {int_val == 1}")
+diff --git a/test_field_flow.py b/test_field_flow.py
+new file mode 100644
+index 0000000000..e7430dbc7b
+--- /dev/null
++++ b/test_field_flow.py
+@@ -0,0 +1,70 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define models
++class MyChoice(models.TextChoices):
++    FIRST_CHOICE = "first", _("The first choice, it is")
++    SECOND_CHOICE = "second", _("The second choice, it is")
++
++# Patch CharField to see when methods are called
++original_to_python = models.CharField.to_python
++original_get_prep_value = models.CharField.get_prep_value
++
++def patched_to_python(self, value):
++    result = original_to_python(self, value)
++    print(f"CharField.to_python called: {value!r} -> {result!r}")
++    return result
++
++def patched_get_prep_value(self, value):
++    result = original_get_prep_value(self, value)
++    print(f"CharField.get_prep_value called: {value!r} -> {result!r}")
++    return result
++
++models.CharField.to_python = patched_to_python
++models.CharField.get_prep_value = patched_get_prep_value
++
++class MyObject(models.Model):
++    my_str_value = models.CharField(max_length=10, choices=MyChoice.choices)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyObject)
++
++# Test the flow
++print("=== Creating object ===")
++obj = MyObject(my_str_value=MyChoice.FIRST_CHOICE)
++print(f"After creation: type={type(obj.my_str_value)}, value={obj.my_str_value!r}")
++
++print("\n=== Saving object ===")
++obj.save()
++print(f"After save: type={type(obj.my_str_value)}, value={obj.my_str_value!r}")
++
++print("\n=== Retrieving object ===")
++obj2 = MyObject.objects.get(pk=obj.pk)
++print(f"Retrieved: type={type(obj2.my_str_value)}, value={obj2.my_str_value!r}")
+diff --git a/test_int_enum.py b/test_int_enum.py
+new file mode 100644
+index 0000000000..7945828fcd
+--- /dev/null
++++ b/test_int_enum.py
+@@ -0,0 +1,52 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++class MyIntChoice(models.IntegerChoices):
++    ONE = 1, _("One")
++    TWO = 2, _("Two")
++
++class MyObject(models.Model):
++    my_int_value = models.IntegerField(choices=MyIntChoice.choices)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyObject)
++
++# Test the flow
++print("=== Creating object with IntegerChoices ===")
++obj = MyObject(my_int_value=MyIntChoice.ONE)
++print(f"After creation: type={type(obj.my_int_value)}, value={obj.my_int_value!r}, str={str(obj.my_int_value)}")
++
++print("\n=== Saving object ===")
++obj.save()
++print(f"After save: type={type(obj.my_int_value)}, value={obj.my_int_value!r}, str={str(obj.my_int_value)}")
++
++print("\n=== Retrieving object ===")
++obj2 = MyObject.objects.get(pk=obj.pk)
++print(f"Retrieved: type={type(obj2.my_int_value)}, value={obj2.my_int_value!r}, str={str(obj2.my_int_value)}")
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..7aa6c14b15
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,69 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test import TestCase
++from django.db import models
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++class MyChoice(models.TextChoices):
++    FIRST_CHOICE = "first", _("The first choice, it is")
++    SECOND_CHOICE = "second", _("The second choice, it is")
++
++class MyObject(models.Model):
++    my_str_value = models.CharField(max_length=10, choices=MyChoice.choices)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyObject)
++
++class EnumTest(TestCase):
++    def setUp(self) -> None:
++        self.my_object = MyObject.objects.create(my_str_value=MyChoice.FIRST_CHOICE)
++
++    def test_created_object_is_str(self):
++        my_object = self.my_object
++        self.assertIsInstance(my_object.my_str_value, str)
++        self.assertEqual(str(my_object.my_str_value), "first")
++
++    def test_retrieved_object_is_str(self):
++        my_object = MyObject.objects.last()
++        self.assertIsInstance(my_object.my_str_value, str)
++        self.assertEqual(str(my_object.my_str_value), "first")
++
++# Run the tests
++test = EnumTest()
++test.setUp()
++try:
++    test.test_created_object_is_str()
++    print("PASS: test_created_object_is_str passed")
++except AssertionError as e:
++    print(f"FAIL: test_created_object_is_str failed: {e}")
++
++try:
++    test.test_retrieved_object_is_str()
++    print("PASS: test_retrieved_object_is_str passed")
++except AssertionError as e:
++    print(f"FAIL: test_retrieved_object_is_str failed: {e}")

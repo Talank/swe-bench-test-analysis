@@ -1,0 +1,410 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..6bc51dd0f
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,36 @@
++import pandas as pd
++from sklearn.base import BaseEstimator, TransformerMixin
++from sklearn import set_config
++from sklearn.pipeline import make_union
++from typing import Optional
++
++index = pd.date_range(start="2020-01-01", end="2020-01-05", inclusive="left", freq="h")
++data = pd.DataFrame(index=index, data=[10] * len(index), columns=["value"])
++data["date"] = index.date
++
++
++class MyTransformer(BaseEstimator, TransformerMixin):
++    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
++        return X["value"].groupby(X["date"]).sum()
++
++
++# This works.
++set_config(transform_output="default")
++print("With default output:")
++result1 = make_union(MyTransformer()).fit_transform(data)
++print(f"Result shape: {result1.shape}")
++print(f"Result type: {type(result1)}")
++print()
++
++# This does not work.
++set_config(transform_output="pandas")
++print("With pandas output:")
++try:
++    result2 = make_union(MyTransformer()).fit_transform(data)
++    print(f"Result shape: {result2.shape}")
++    print(f"Result type: {type(result2)}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 94d9465d7..a225397f0 100644
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -28,7 +28,7 @@ from .utils.validation import check_memory
+ from .utils.validation import check_is_fitted
+ from .utils import check_pandas_support
+ from .utils._param_validation import HasMethods, Hidden
+-from .utils._set_output import _safe_set_output, _get_output_config
++from .utils._set_output import _safe_set_output, _get_output_config, _wrap_in_pandas_container
+ from .utils.parallel import delayed, Parallel
+ from .exceptions import NotFittedError
+ 
+@@ -1278,9 +1278,23 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
+ 
+     def _hstack(self, Xs):
+         config = _get_output_config("transform", self)
+-        if config["dense"] == "pandas" and all(hasattr(X, "iloc") for X in Xs):
++        if config["dense"] == "pandas":
+             pd = check_pandas_support("transform")
+-            return pd.concat(Xs, axis=1)
++            # Convert all Xs to DataFrames if they aren't already
++            dfs = []
++            for X in Xs:
++                if hasattr(X, "iloc"):
++                    # Already a DataFrame
++                    dfs.append(X)
++                else:
++                    # Convert to DataFrame - use default index since transformers
++                    # may have changed the number of samples
++                    if hasattr(X, "shape") and len(X.shape) == 1:
++                        # 1D array, make it a column
++                        X = X.reshape(-1, 1)
++                    df = pd.DataFrame(X)
++                    dfs.append(df)
++            return pd.concat(dfs, axis=1)
+ 
+         if any(sparse.issparse(f) for f in Xs):
+             Xs = sparse.hstack(Xs).tocsr()
+diff --git a/sklearn/utils/_set_output.py b/sklearn/utils/_set_output.py
+index 335773c6a..7e788c39b 100644
+--- a/sklearn/utils/_set_output.py
++++ b/sklearn/utils/_set_output.py
+@@ -56,7 +56,10 @@ def _wrap_in_pandas_container(
+         if columns is not None:
+             data_to_wrap.columns = columns
+         if index is not None:
+-            data_to_wrap.index = index
++            # Only set index if the lengths match
++            # This handles cases where transformers aggregate data
++            if len(data_to_wrap.index) == len(index):
++                data_to_wrap.index = index
+         return data_to_wrap
+ 
+     return pd.DataFrame(data_to_wrap, index=index, columns=columns)
+diff --git a/test_complex_case.py b/test_complex_case.py
+new file mode 100644
+index 000000000..9e02cefc1
+--- /dev/null
++++ b/test_complex_case.py
+@@ -0,0 +1,96 @@
++import pandas as pd
++import numpy as np
++from sklearn.base import BaseEstimator, TransformerMixin
++from sklearn import set_config
++from sklearn.pipeline import FeatureUnion
++from sklearn.preprocessing import StandardScaler
++from typing import Optional
++
++# Create test data
++index = pd.date_range(start="2020-01-01", end="2020-01-05", inclusive="left", freq="h")
++data = pd.DataFrame(index=index, data=np.random.rand(len(index), 2), columns=["value1", "value2"])
++data["date"] = index.date
++
++print(f"Input data shape: {data.shape}")
++
++class AggregatingTransformer(BaseEstimator, TransformerMixin):
++    """Transformer that aggregates data by date."""
++    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
++        return X[["value1", "value2"]].groupby(X["date"]).sum()
++
++class IdentityTransformer(BaseEstimator, TransformerMixin):
++    """Transformer that returns data as-is."""
++    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
++        return X[["value1", "value2"]]
++
++# Test 1: Mix of aggregating and non-aggregating transformers
++print("\n=== Test 1: Mixed transformers ===")
++set_config(transform_output="pandas")
++
++# This should fail without the fix because one transformer aggregates and one doesn't
++fu1 = FeatureUnion([
++    ("agg", AggregatingTransformer()),
++    ("identity", IdentityTransformer())
++])
++
++try:
++    result1 = fu1.fit_transform(data)
++    print(f"Result shape: {result1.shape}")
++    print(f"Result type: {type(result1)}")
++    print("Success! Mixed transformers work.")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test 2: Multiple aggregating transformers
++print("\n=== Test 2: Multiple aggregating transformers ===")
++fu2 = FeatureUnion([
++    ("agg1", AggregatingTransformer()),
++    ("agg2", AggregatingTransformer())
++])
++
++try:
++    result2 = fu2.fit_transform(data)
++    print(f"Result shape: {result2.shape}")
++    print(f"Result type: {type(result2)}")
++    print("Success! Multiple aggregating transformers work.")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test 3: With StandardScaler (doesn't change shape)
++print("\n=== Test 3: With StandardScaler ===")
++
++class ValueOnlyTransformer(BaseEstimator, TransformerMixin):
++    """Transformer that only uses value columns."""
++    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
++        if hasattr(X, 'iloc'):
++            return X[["value1", "value2"]]
++        else:
++            return X
++
++fu3 = FeatureUnion([
++    ("values", ValueOnlyTransformer()),
++    ("agg", AggregatingTransformer())
++])
++
++try:
++    result3 = fu3.fit_transform(data)
++    print(f"Result shape: {result3.shape}")
++    print(f"Result type: {type(result3)}")
++    print("Success! Non-aggregating with aggregating transformer works.")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test 4: Verify column names are preserved
++print("\n=== Test 4: Column names ===")
++fu4 = FeatureUnion([("agg", AggregatingTransformer())])
++result4 = fu4.fit_transform(data)
++print(f"Columns: {list(result4.columns)}")
+diff --git a/test_feature_union_aggregating.py b/test_feature_union_aggregating.py
+new file mode 100644
+index 000000000..541702162
+--- /dev/null
++++ b/test_feature_union_aggregating.py
+@@ -0,0 +1,112 @@
++"""Test for FeatureUnion with aggregating transformers and pandas output."""
++import pytest
++import pandas as pd
++import numpy as np
++from sklearn.base import BaseEstimator, TransformerMixin
++from sklearn import set_config
++from sklearn.pipeline import FeatureUnion
++
++
++class AggregatingTransformer(BaseEstimator, TransformerMixin):
++    """Transformer that aggregates data, changing the number of samples."""
++    def fit(self, X, y=None):
++        return self
++
++    def transform(self, X):
++        # For pandas DataFrame, group by a derived feature
++        if hasattr(X, 'iloc'):
++            # Create groups of 10 rows
++            n_groups = max(1, len(X) // 10)
++            groups = np.repeat(np.arange(n_groups), len(X) // n_groups)[:len(X)]
++            result = X.groupby(groups).mean()
++            return result
++        else:
++            # For numpy array, aggregate every 10 rows
++            n_groups = max(1, X.shape[0] // 10)
++            result = []
++            for i in range(n_groups):
++                start = i * 10
++                end = min((i + 1) * 10, X.shape[0])
++                result.append(X[start:end].mean(axis=0))
++            return np.array(result)
++
++
++def test_feature_union_pandas_output_with_aggregating_transformer():
++    """Test that FeatureUnion works with pandas output when transformers change sample count."""
++    pd = pytest.importorskip("pandas")
++    
++    # Create test data
++    n_samples = 100
++    X = pd.DataFrame({
++        'feature1': np.random.rand(n_samples),
++        'feature2': np.random.rand(n_samples),
++    })
++    
++    # Create a FeatureUnion with an aggregating transformer
++    fu = FeatureUnion([
++        ('agg', AggregatingTransformer()),
++    ])
++    
++    # Test with pandas output
++    set_config(transform_output="pandas")
++    result = fu.fit_transform(X)
++    
++    # Check that result is a DataFrame
++    assert isinstance(result, pd.DataFrame)
++    
++    # Check that the number of rows has changed (aggregated)
++    assert len(result) == 10  # 100 samples / 10 = 10 groups
++    
++    # Check that columns are preserved
++    assert result.shape[1] == 2
++    
++    # Reset config
++    set_config(transform_output="default")
++
++
++def test_feature_union_mixed_aggregating_transformers():
++    """Test FeatureUnion with mix of aggregating and non-aggregating transformers."""
++    pd = pytest.importorskip("pandas")
++    
++    class IdentityTransformer(BaseEstimator, TransformerMixin):
++        """Transformer that returns data as-is."""
++        def fit(self, X, y=None):
++            return self
++        
++        def transform(self, X):
++            return X
++    
++    # Create test data
++    n_samples = 50
++    X = pd.DataFrame({
++        'feature1': np.random.rand(n_samples),
++        'feature2': np.random.rand(n_samples),
++    })
++    
++    # Create a FeatureUnion with both aggregating and non-aggregating transformers
++    fu = FeatureUnion([
++        ('identity', IdentityTransformer()),
++        ('agg', AggregatingTransformer()),
++    ])
++    
++    # Test with pandas output
++    set_config(transform_output="pandas")
++    result = fu.fit_transform(X)
++    
++    # The result should have as many rows as the maximum of both transformer outputs
++    # since FeatureUnion concatenates horizontally (axis=1), not vertically
++    assert isinstance(result, pd.DataFrame)
++    print(f"Result shape: {result.shape}")
++    # When concatenating horizontally with different row counts, pandas aligns by index
++    # So we get the union of all indices
++    
++    # Reset config
++    set_config(transform_output="default")
++
++
++if __name__ == "__main__":
++    test_feature_union_pandas_output_with_aggregating_transformer()
++    print("test_feature_union_pandas_output_with_aggregating_transformer passed!")
++    
++    test_feature_union_mixed_aggregating_transformers()
++    print("test_feature_union_mixed_aggregating_transformers passed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 000000000..a499b3a1f
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,48 @@
++import pandas as pd
++import numpy as np
++from sklearn.base import BaseEstimator, TransformerMixin
++from sklearn import set_config
++from sklearn.pipeline import make_union, FeatureUnion
++from typing import Optional
++
++# Create test data
++index = pd.date_range(start="2020-01-01", end="2020-01-05", inclusive="left", freq="h")
++data = pd.DataFrame(index=index, data=[10] * len(index), columns=["value"])
++data["date"] = index.date
++
++print(f"Input data shape: {data.shape}")
++print(f"Input index length: {len(data.index)}")
++print(f"Unique dates: {data['date'].nunique()}")
++print()
++
++class MyTransformer(BaseEstimator, TransformerMixin):
++    def fit(self, X: pd.DataFrame, y: Optional[pd.Series] = None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
++        result = X["value"].groupby(X["date"]).sum()
++        print(f"MyTransformer output shape: {result.shape}")
++        print(f"MyTransformer output type: {type(result)}")
++        return result
++
++# Test with default output
++set_config(transform_output="default")
++print("=== Testing with default output ===")
++fu = FeatureUnion([("my", MyTransformer())])
++result = fu.fit_transform(data)
++print(f"FeatureUnion result shape: {result.shape}")
++print(f"FeatureUnion result type: {type(result)}")
++print()
++
++# Test with pandas output
++set_config(transform_output="pandas")
++print("=== Testing with pandas output ===")
++fu = FeatureUnion([("my", MyTransformer())])
++try:
++    result = fu.fit_transform(data)
++    print(f"FeatureUnion result shape: {result.shape}")
++    print(f"FeatureUnion result type: {type(result)}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_original_issue.py b/test_original_issue.py
+new file mode 100644
+index 000000000..6fb0e12e0
+--- /dev/null
++++ b/test_original_issue.py
+@@ -0,0 +1,33 @@
++"""Test for the original issue reported in the problem statement."""
++import pandas as pd
++from sklearn.base import BaseEstimator, TransformerMixin
++from sklearn import set_config
++from sklearn.pipeline import make_union
++
++index = pd.date_range(start="2020-01-01", end="2020-01-05", inclusive="left", freq="h")
++data = pd.DataFrame(index=index, data=[10] * len(index), columns=["value"])
++data["date"] = index.date
++
++
++class MyTransformer(BaseEstimator, TransformerMixin):
++    def fit(self, X: pd.DataFrame, y=None, **kwargs):
++        return self
++
++    def transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
++        return X["value"].groupby(X["date"]).sum()
++
++
++# This works.
++set_config(transform_output="default")
++print("Testing with default output...")
++result1 = make_union(MyTransformer()).fit_transform(data)
++print(f"Success! Result shape: {result1.shape}, type: {type(result1)}")
++
++# This should now work with our fix.
++set_config(transform_output="pandas")
++print("\nTesting with pandas output...")
++result2 = make_union(MyTransformer()).fit_transform(data)
++print(f"Success! Result shape: {result2.shape}, type: {type(result2)}")
++
++# Verify the results have the expected values
++print(f"\nResult values match: {all(result1.flatten() == result2.values.flatten())}")

@@ -1,0 +1,460 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index a44adfc760..cbe12d229b 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -409,13 +409,16 @@ class SQLCompiler:
+ 
+     def get_combinator_sql(self, combinator, all):
+         features = self.connection.features
+-        compilers = [
+-            query.get_compiler(self.using, self.connection)
+-            for query in self.query.combined_queries if not query.is_empty()
+-        ]
++        compilers = []
++        for query in self.query.combined_queries:
++            if not query.is_empty():
++                # Clone the query to avoid modifying the original
++                query = query.clone()
++                compilers.append(query.get_compiler(self.using, self.connection))
++        
+         if not features.supports_slicing_ordering_in_compound:
+-            for query, compiler in zip(self.query.combined_queries, compilers):
+-                if query.low_mark or query.high_mark:
++            for compiler in compilers:
++                if compiler.query.low_mark or compiler.query.high_mark:
+                     raise DatabaseError('LIMIT/OFFSET not allowed in subqueries of compound statements.')
+                 if compiler.get_order_by():
+                     raise DatabaseError('ORDER BY not allowed in subqueries of compound statements.')
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..e52452bd00
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,58 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure test database
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.queries',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Import the model
++from tests.queries.models import ReservedName
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ReservedName)
++
++# Test the issue
++ReservedName.objects.create(name='a', order=2)
++qs1 = ReservedName.objects.all()
++
++# First test - should return ('a', 2)
++result1 = qs1.union(qs1).values_list('name', 'order').get()
++print(f"First test (values_list('name', 'order')): {result1}")
++assert result1 == ('a', 2), f"Expected ('a', 2), got {result1}"
++
++# Second test - should return (2,) but returns ('a', 2) due to the bug
++result2 = qs1.union(qs1).values_list('order').get()
++print(f"Second test (values_list('order')): {result2}")
++print(f"Expected: (2,), Got: {result2}")
++
++# The bug is that result2 should be (2,) but it returns ('a', 2)
++if result2 == ('a', 2):
++    print("BUG CONFIRMED: The second query returns the same columns as the first query!")
++else:
++    print("Bug seems to be fixed!")
+diff --git a/test_composed_values_list.py b/test_composed_values_list.py
+new file mode 100644
+index 0000000000..f9c9d0cfd5
+--- /dev/null
++++ b/test_composed_values_list.py
+@@ -0,0 +1,61 @@
++"""
++Test for the bug where composed queries cannot change the list of columns 
++with values()/values_list() when evaluated multiple times.
++"""
++from django.test import TestCase
++from tests.queries.models import ReservedName
++
++
++class ComposedQueriesValuesListTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        ReservedName.objects.create(name='a', order=2)
++        ReservedName.objects.create(name='b', order=1)
++
++    def test_union_values_list_changing_columns(self):
++        """
++        Test that composed queries can change the list of columns when
++        values_list() is evaluated multiple times.
++        """
++        qs1 = ReservedName.objects.filter(name='a')
++        union_qs = qs1.union(qs1)
++        
++        # First evaluation with two columns
++        result1 = union_qs.values_list('name', 'order').get()
++        self.assertEqual(result1, ('a', 2))
++        
++        # Second evaluation with one column - should return only that column
++        result2 = union_qs.values_list('order').get()
++        self.assertEqual(result2, (2,))
++        
++        # Third evaluation with different column
++        result3 = union_qs.values_list('name').get()
++        self.assertEqual(result3, ('a',))
++
++    def test_intersection_values_list_changing_columns(self):
++        """
++        Test intersection with changing values_list columns.
++        """
++        qs1 = ReservedName.objects.filter(order__lte=2)
++        qs2 = ReservedName.objects.filter(order__gte=2)
++        intersection_qs = qs1.intersection(qs2)
++        
++        result1 = intersection_qs.values_list('name', 'order').get()
++        self.assertEqual(result1, ('a', 2))
++        
++        result2 = intersection_qs.values_list('order').get()
++        self.assertEqual(result2, (2,))
++
++    def test_difference_values_list_changing_columns(self):
++        """
++        Test difference with changing values_list columns.
++        """
++        qs1 = ReservedName.objects.all()
++        qs2 = ReservedName.objects.filter(name='a')
++        difference_qs = qs1.difference(qs2)
++        
++        result1 = difference_qs.values_list('name', 'order').get()
++        self.assertEqual(result1, ('b', 1))
++        
++        result2 = difference_qs.values_list('order').get()
++        self.assertEqual(result2, (1,))
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..5831a77029
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,100 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure test database
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.queries',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Import the model
++from tests.queries.models import ReservedName
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ReservedName)
++
++# Create test data
++ReservedName.objects.create(name='a', order=1)
++ReservedName.objects.create(name='b', order=2)
++ReservedName.objects.create(name='c', order=3)
++
++print("Test 1: Union with changing values_list columns")
++qs1 = ReservedName.objects.filter(name='a')
++qs2 = ReservedName.objects.filter(name='b')
++union_qs = qs1.union(qs2)
++
++result1 = list(union_qs.values_list('name', 'order'))
++print(f"values_list('name', 'order'): {result1}")
++assert result1 == [('a', 1), ('b', 2)], f"Expected [('a', 1), ('b', 2)], got {result1}"
++
++result2 = list(union_qs.values_list('order'))
++print(f"values_list('order'): {result2}")
++assert result2 == [(1,), (2,)], f"Expected [(1,), (2,)], got {result2}"
++
++result3 = list(union_qs.values_list('name'))
++print(f"values_list('name'): {result3}")
++assert result3 == [('a',), ('b',)], f"Expected [('a',), ('b',)], got {result3}"
++
++print("\nTest 2: Union with self")
++qs = ReservedName.objects.filter(name='a')
++union_qs = qs.union(qs)
++
++result1 = union_qs.values_list('name', 'order').get()
++print(f"values_list('name', 'order'): {result1}")
++assert result1 == ('a', 1), f"Expected ('a', 1), got {result1}"
++
++result2 = union_qs.values_list('order').get()
++print(f"values_list('order'): {result2}")
++assert result2 == (1,), f"Expected (1,), got {result2}"
++
++print("\nTest 3: Intersection")
++qs1 = ReservedName.objects.filter(order__lte=2)
++qs2 = ReservedName.objects.filter(order__gte=2)
++intersection_qs = qs1.intersection(qs2)
++
++result1 = intersection_qs.values_list('name', 'order').get()
++print(f"intersection values_list('name', 'order'): {result1}")
++assert result1 == ('b', 2), f"Expected ('b', 2), got {result1}"
++
++result2 = intersection_qs.values_list('order').get()
++print(f"intersection values_list('order'): {result2}")
++assert result2 == (2,), f"Expected (2,), got {result2}"
++
++print("\nTest 4: Difference")
++qs1 = ReservedName.objects.all()
++qs2 = ReservedName.objects.filter(name='b')
++difference_qs = qs1.difference(qs2)
++
++result1 = list(difference_qs.values_list('name', 'order'))
++print(f"difference values_list('name', 'order'): {result1}")
++assert sorted(result1) == [('a', 1), ('c', 3)], f"Expected [('a', 1), ('c', 3)], got {sorted(result1)}"
++
++result2 = list(difference_qs.values_list('order'))
++print(f"difference values_list('order'): {result2}")
++assert sorted(result2) == [(1,), (3,)], f"Expected [(1,), (3,)], got {sorted(result2)}"
++
++print("\nAll tests passed!")
+diff --git a/test_performance.py b/test_performance.py
+new file mode 100644
+index 0000000000..d20a97bfb8
+--- /dev/null
++++ b/test_performance.py
+@@ -0,0 +1,81 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure test database
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.queries',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Import the model
++from tests.queries.models import ReservedName
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ReservedName)
++
++# Test the performance impact
++ReservedName.objects.create(name='a', order=1)
++ReservedName.objects.create(name='b', order=2)
++ReservedName.objects.create(name='c', order=3)
++
++# Monkey patch to count clones
++original_clone = None
++clone_count = 0
++
++def counting_clone(self):
++    global clone_count
++    clone_count += 1
++    return original_clone(self)
++
++from django.db.models.sql import query
++original_clone = query.Query.clone
++query.Query.clone = counting_clone
++
++# Test 1: Simple union
++clone_count = 0
++qs1 = ReservedName.objects.filter(name='a')
++qs2 = ReservedName.objects.filter(name='b')
++result = list(qs1.union(qs2).values_list('name'))
++print(f"Simple union - Clone count: {clone_count}")
++
++# Test 2: Union with self
++clone_count = 0
++qs = ReservedName.objects.filter(name='a')
++result = qs.union(qs).values_list('name').get()
++print(f"Union with self - Clone count: {clone_count}")
++
++# Test 3: Multiple evaluations
++clone_count = 0
++qs = ReservedName.objects.filter(name='a')
++union_qs = qs.union(qs)
++result1 = union_qs.values_list('name', 'order').get()
++result2 = union_qs.values_list('order').get()
++result3 = union_qs.values_list('name').get()
++print(f"Multiple evaluations - Clone count: {clone_count}")
++
++# Restore original
++query.Query.clone = original_clone
+diff --git a/test_understanding.py b/test_understanding.py
+new file mode 100644
+index 0000000000..26f0ce32a9
+--- /dev/null
++++ b/test_understanding.py
+@@ -0,0 +1,74 @@
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Add the testbed directory to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure test database
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.queries',
++        ],
++        USE_TZ=False,
++    )
++
++django.setup()
++
++# Import the model
++from tests.queries.models import ReservedName
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ReservedName)
++
++# Test the issue
++ReservedName.objects.create(name='a', order=2)
++qs1 = ReservedName.objects.all()
++
++# Let's check what happens to values_select
++print("Initial qs1.query.values_select:", qs1.query.values_select)
++
++# Create union query
++union_qs = qs1.union(qs1)
++print("union_qs.query.values_select:", union_qs.query.values_select)
++print("union_qs.query.combined_queries[0].values_select:", union_qs.query.combined_queries[0].values_select)
++print("union_qs.query.combined_queries[1].values_select:", union_qs.query.combined_queries[1].values_select)
++
++# First evaluation
++result1 = union_qs.values_list('name', 'order').get()
++print("\nAfter first evaluation with values_list('name', 'order'):")
++print("Result:", result1)
++print("union_qs.query.values_select:", union_qs.query.values_select)
++print("union_qs.query.combined_queries[0].values_select:", union_qs.query.combined_queries[0].values_select)
++print("union_qs.query.combined_queries[1].values_select:", union_qs.query.combined_queries[1].values_select)
++
++# Second evaluation
++result2 = union_qs.values_list('order').get()
++print("\nAfter second evaluation with values_list('order'):")
++print("Result:", result2)
++print("union_qs.query.values_select:", union_qs.query.values_select)
++print("union_qs.query.combined_queries[0].values_select:", union_qs.query.combined_queries[0].values_select)
++print("union_qs.query.combined_queries[1].values_select:", union_qs.query.combined_queries[1].values_select)
++
++# Check if they're the same object
++print("\nAre combined_queries[0] and combined_queries[1] the same object?", 
++      union_qs.query.combined_queries[0] is union_qs.query.combined_queries[1])
++print("Are they the same as qs1.query?",
++      union_qs.query.combined_queries[0] is qs1.query,
++      union_qs.query.combined_queries[1] is qs1.query)
+diff --git a/tests/queries/test_qs_combinators.py b/tests/queries/test_qs_combinators.py
+index 3902db59e2..c8a2168991 100644
+--- a/tests/queries/test_qs_combinators.py
++++ b/tests/queries/test_qs_combinators.py
+@@ -225,3 +225,24 @@ class QuerySetSetOperationTests(TestCase):
+         qs1 = Number.objects.all()
+         qs2 = Number.objects.intersection(Number.objects.filter(num__gt=1))
+         self.assertEqual(qs1.difference(qs2).count(), 2)
++
++    def test_union_values_list_changing_columns(self):
++        """
++        Composed queries can change the list of columns when values_list() is
++        evaluated multiple times.
++        """
++        ReservedName.objects.create(name='a', order=2)
++        qs1 = ReservedName.objects.all()
++        union_qs = qs1.union(qs1)
++        
++        # First evaluation with two columns
++        result1 = union_qs.values_list('name', 'order').get()
++        self.assertEqual(result1, ('a', 2))
++        
++        # Second evaluation with one column - should return only that column
++        result2 = union_qs.values_list('order').get()
++        self.assertEqual(result2, (2,))
++        
++        # Third evaluation with different column
++        result3 = union_qs.values_list('name').get()
++        self.assertEqual(result3, ('a',))

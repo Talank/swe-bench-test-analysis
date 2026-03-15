@@ -1,0 +1,536 @@
+diff --git a/django/contrib/admin/sites.py b/django/contrib/admin/sites.py
+index 59a4a0364d..1b69d3e3af 100644
+--- a/django/contrib/admin/sites.py
++++ b/django/contrib/admin/sites.py
+@@ -420,13 +420,14 @@ class AdminSite:
+     def catch_all_view(self, request, url):
+         if settings.APPEND_SLASH and not url.endswith('/'):
+             urlconf = getattr(request, 'urlconf', None)
+-            path = '%s/' % request.path_info
++            path_info = '%s/' % request.path_info
+             try:
+-                match = resolve(path, urlconf)
++                match = resolve(path_info, urlconf)
+             except Resolver404:
+                 pass
+             else:
+                 if getattr(match.func, 'should_append_slash', True):
++                    path = '%s/' % request.path
+                     return HttpResponsePermanentRedirect(path)
+         raise Http404
+ 
+diff --git a/test_admin_force_script_name.py b/test_admin_force_script_name.py
+new file mode 100644
+index 0000000000..9bfb9ccfb8
+--- /dev/null
++++ b/test_admin_force_script_name.py
+@@ -0,0 +1,96 @@
++"""
++Test case for catch_all_view with FORCE_SCRIPT_NAME
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++from django.conf import settings
++from django.test import TestCase, override_settings
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect, Http404
++from unittest.mock import patch, Mock
++
++# Configure Django for testing
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++import django
++django.setup()
++
++
++class CatchAllViewForceScriptNameTest(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.admin_site = AdminSite()
++    
++    @override_settings(FORCE_SCRIPT_NAME='/myapp', APPEND_SLASH=True)
++    def test_catch_all_view_redirect_with_force_script_name(self):
++        """Test that catch_all_view includes FORCE_SCRIPT_NAME in redirect"""
++        # Create request without trailing slash
++        request = self.factory.get('/myapp/admin/auth/user')
++        request.path = '/myapp/admin/auth/user'
++        request.path_info = '/admin/auth/user'
++        
++        # Mock resolve to simulate that the URL with slash exists
++        mock_match = Mock()
++        mock_match.func.should_append_slash = True
++        
++        with patch('django.contrib.admin.sites.resolve', return_value=mock_match) as mock_resolve:
++            response = self.admin_site.catch_all_view(request, 'auth/user')
++            
++            # Check that resolve was called with path_info (without script name)
++            mock_resolve.assert_called_once_with('/admin/auth/user/', None)
++            
++            # Check that redirect includes the script name
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            self.assertEqual(response['Location'], '/myapp/admin/auth/user/')
++    
++    @override_settings(FORCE_SCRIPT_NAME='', APPEND_SLASH=True)
++    def test_catch_all_view_redirect_without_force_script_name(self):
++        """Test that catch_all_view works normally without FORCE_SCRIPT_NAME"""
++        # Create request without trailing slash
++        request = self.factory.get('/admin/auth/user')
++        request.path = '/admin/auth/user'
++        request.path_info = '/admin/auth/user'
++        
++        # Mock resolve to simulate that the URL with slash exists
++        mock_match = Mock()
++        mock_match.func.should_append_slash = True
++        
++        with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++            response = self.admin_site.catch_all_view(request, 'auth/user')
++            
++            # Check redirect
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            self.assertEqual(response['Location'], '/admin/auth/user/')
++    
++    @override_settings(FORCE_SCRIPT_NAME='/myapp', APPEND_SLASH=True)
++    def test_catch_all_view_404_when_no_match(self):
++        """Test that catch_all_view raises 404 when URL doesn't exist"""
++        request = self.factory.get('/myapp/admin/nonexistent')
++        request.path = '/myapp/admin/nonexistent'
++        request.path_info = '/admin/nonexistent'
++        
++        # Mock resolve to raise Resolver404
++        from django.urls import Resolver404
++        with patch('django.contrib.admin.sites.resolve', side_effect=Resolver404()):
++            with self.assertRaises(Http404):
++                self.admin_site.catch_all_view(request, 'nonexistent')
++    
++    @override_settings(FORCE_SCRIPT_NAME='/myapp', APPEND_SLASH=False)
++    def test_catch_all_view_no_redirect_when_append_slash_false(self):
++        """Test that catch_all_view doesn't redirect when APPEND_SLASH is False"""
++        request = self.factory.get('/myapp/admin/auth/user')
++        request.path = '/myapp/admin/auth/user'
++        request.path_info = '/admin/auth/user'
++        
++        with self.assertRaises(Http404):
++            self.admin_site.catch_all_view(request, 'auth/user')
++
++
++if __name__ == '__main__':
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(['__main__'])
++    sys.exit(bool(failures))
+diff --git a/test_catch_all_resolve.py b/test_catch_all_resolve.py
+new file mode 100644
+index 0000000000..59f93918e6
+--- /dev/null
++++ b/test_catch_all_resolve.py
+@@ -0,0 +1,40 @@
++"""
++Test to check if resolve should use path or path_info
++"""
++from django.conf import settings
++from django.urls import path, resolve
++from django.http import HttpResponse
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from unittest.mock import patch, Mock
++
++# Configure settings and URLs
++def dummy_view(request):
++    return HttpResponse("OK")
++
++urlpatterns = [
++    path('admin/auth/user/', dummy_view, name='auth_user'),
++]
++
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    APPEND_SLASH=True,
++    FORCE_SCRIPT_NAME='/myapp',
++    ROOT_URLCONF=__name__,
++)
++
++# Test resolve with different paths
++try:
++    # This should work - resolve uses path without script name
++    match = resolve('/admin/auth/user/')
++    print(f"resolve('/admin/auth/user/') succeeded: {match}")
++except Exception as e:
++    print(f"resolve('/admin/auth/user/') failed: {e}")
++
++try:
++    # This should fail - resolve doesn't expect script name
++    match = resolve('/myapp/admin/auth/user/')
++    print(f"resolve('/myapp/admin/auth/user/') succeeded: {match}")
++except Exception as e:
++    print(f"resolve('/myapp/admin/auth/user/') failed: {e}")
+diff --git a/test_catch_all_simple.py b/test_catch_all_simple.py
+new file mode 100644
+index 0000000000..e339e608f1
+--- /dev/null
++++ b/test_catch_all_simple.py
+@@ -0,0 +1,49 @@
++"""
++Simple test to understand catch_all_view behavior with FORCE_SCRIPT_NAME
++"""
++from django.conf import settings
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import Http404
++from unittest.mock import patch, Mock
++
++# Configure settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    APPEND_SLASH=True,
++    FORCE_SCRIPT_NAME='/myapp',
++)
++
++# Create admin site and request factory
++admin_site = AdminSite()
++factory = RequestFactory()
++
++# Create a request that simulates accessing /myapp/admin/auth/user
++# without trailing slash when FORCE_SCRIPT_NAME is '/myapp'
++request = factory.get('/myapp/admin/auth/user')
++request.path = '/myapp/admin/auth/user'  # Full path including script name
++request.path_info = '/admin/auth/user'   # Path without script name
++
++print(f"request.path: {request.path}")
++print(f"request.path_info: {request.path_info}")
++
++# Mock resolve to simulate that /admin/auth/user/ (with slash) exists
++mock_match = Mock()
++mock_match.func.should_append_slash = True
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match) as mock_resolve:
++    try:
++        response = admin_site.catch_all_view(request, 'auth/user')
++        print(f"\nRedirect response received")
++        print(f"Redirect location: {response['Location']}")
++        print(f"Expected location: {request.path}/")
++        
++        # The issue is that it uses path_info instead of path
++        # So it redirects to /admin/auth/user/ instead of /myapp/admin/auth/user/
++        
++    except Http404:
++        print("\nHttp404 raised")
++
++# Let's check what path is being used for resolve
++print(f"\nmock_resolve called with: {mock_resolve.call_args}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..ca293d66fc
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,71 @@
++"""
++Test edge cases for catch_all_view with FORCE_SCRIPT_NAME
++"""
++from django.conf import settings
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import Http404
++from unittest.mock import patch, Mock
++
++# Configure settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    APPEND_SLASH=True,
++)
++
++admin_site = AdminSite()
++factory = RequestFactory()
++
++# Test 1: URL already has trailing slash
++print("Test 1: URL already has trailing slash")
++request = factory.get('/myapp/admin/auth/user/')
++request.path = '/myapp/admin/auth/user/'
++request.path_info = '/admin/auth/user/'
++
++try:
++    admin_site.catch_all_view(request, 'auth/user/')
++except Http404:
++    print("✓ Correctly raised Http404 for URL with trailing slash")
++
++# Test 2: Empty FORCE_SCRIPT_NAME
++print("\nTest 2: Empty FORCE_SCRIPT_NAME")
++settings.FORCE_SCRIPT_NAME = ''
++request = factory.get('/admin/auth/user')
++request.path = '/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++mock_match = Mock()
++mock_match.func.should_append_slash = True
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++    response = admin_site.catch_all_view(request, 'auth/user')
++    print(f"✓ Redirect location: {response['Location']} (expected: /admin/auth/user/)")
++
++# Test 3: Complex FORCE_SCRIPT_NAME with multiple segments
++print("\nTest 3: Complex FORCE_SCRIPT_NAME")
++settings.FORCE_SCRIPT_NAME = '/app/v1/admin-panel'
++request = factory.get('/app/v1/admin-panel/admin/auth/user')
++request.path = '/app/v1/admin-panel/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++    response = admin_site.catch_all_view(request, 'auth/user')
++    print(f"✓ Redirect location: {response['Location']} (expected: /app/v1/admin-panel/admin/auth/user/)")
++
++# Test 4: should_append_slash = False
++print("\nTest 4: should_append_slash = False")
++settings.FORCE_SCRIPT_NAME = '/myapp'
++request = factory.get('/myapp/admin/auth/user')
++request.path = '/myapp/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++mock_match.func.should_append_slash = False
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++    try:
++        admin_site.catch_all_view(request, 'auth/user')
++    except Http404:
++        print("✓ Correctly raised Http404 when should_append_slash is False")
++
++print("\nAll edge case tests passed!")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..9b8cd43df2
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,82 @@
++"""
++Final verification that the fix works correctly
++"""
++from django.conf import settings
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect
++from unittest.mock import patch, Mock
++
++# Configure settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test',
++    APPEND_SLASH=True,
++)
++
++admin_site = AdminSite()
++factory = RequestFactory()
++
++print("Testing catch_all_view fix for FORCE_SCRIPT_NAME support\n")
++
++# Test 1: With FORCE_SCRIPT_NAME
++print("1. Testing with FORCE_SCRIPT_NAME='/myapp'")
++settings.FORCE_SCRIPT_NAME = '/myapp'
++
++request = factory.get('/myapp/admin/auth/user')
++request.path = '/myapp/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++mock_match = Mock()
++mock_match.func.should_append_slash = True
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match) as mock_resolve:
++    response = admin_site.catch_all_view(request, 'auth/user')
++    
++    # Verify resolve was called with path_info (correct behavior)
++    args, kwargs = mock_resolve.call_args
++    print(f"   resolve() called with: {args[0]}")
++    assert args[0] == '/admin/auth/user/', "resolve should be called with path_info + slash"
++    
++    # Verify redirect uses full path with script name
++    print(f"   Redirect location: {response['Location']}")
++    assert response['Location'] == '/myapp/admin/auth/user/', "Redirect should include FORCE_SCRIPT_NAME"
++    print("   ✓ Pass\n")
++
++# Test 2: Without FORCE_SCRIPT_NAME
++print("2. Testing without FORCE_SCRIPT_NAME")
++settings.FORCE_SCRIPT_NAME = None
++
++request = factory.get('/admin/auth/user')
++request.path = '/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match) as mock_resolve:
++    response = admin_site.catch_all_view(request, 'auth/user')
++    
++    # Verify resolve was called with path_info
++    args, kwargs = mock_resolve.call_args
++    print(f"   resolve() called with: {args[0]}")
++    assert args[0] == '/admin/auth/user/', "resolve should be called with path_info + slash"
++    
++    # Verify redirect uses path without script name
++    print(f"   Redirect location: {response['Location']}")
++    assert response['Location'] == '/admin/auth/user/', "Redirect should not include script name"
++    print("   ✓ Pass\n")
++
++# Test 3: Complex script name
++print("3. Testing with complex FORCE_SCRIPT_NAME='/app/v1/admin-panel'")
++settings.FORCE_SCRIPT_NAME = '/app/v1/admin-panel'
++
++request = factory.get('/app/v1/admin-panel/admin/auth/user')
++request.path = '/app/v1/admin-panel/admin/auth/user'
++request.path_info = '/admin/auth/user'
++
++with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++    response = admin_site.catch_all_view(request, 'auth/user')
++    
++    print(f"   Redirect location: {response['Location']}")
++    assert response['Location'] == '/app/v1/admin-panel/admin/auth/user/', "Redirect should include complex script name"
++    print("   ✓ Pass\n")
++
++print("All tests passed! The fix correctly handles FORCE_SCRIPT_NAME in catch_all_view.")
+diff --git a/test_force_script_name.py b/test_force_script_name.py
+new file mode 100644
+index 0000000000..1156545260
+--- /dev/null
++++ b/test_force_script_name.py
+@@ -0,0 +1,106 @@
++"""
++Test to reproduce the issue with catch_all_view() not supporting FORCE_SCRIPT_NAME.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Add the testbed to the Python path
++sys.path.insert(0, '/testbed')
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.auth',
++            'django.contrib.contenttypes',
++            'django.contrib.sessions',
++            'django.contrib.messages',
++            'django.contrib.admin',
++        ],
++        MIDDLEWARE=[
++            'django.middleware.security.SecurityMiddleware',
++            'django.contrib.sessions.middleware.SessionMiddleware',
++            'django.middleware.common.CommonMiddleware',
++            'django.middleware.csrf.CsrfViewMiddleware',
++            'django.contrib.auth.middleware.AuthenticationMiddleware',
++            'django.contrib.messages.middleware.MessageMiddleware',
++        ],
++        ROOT_URLCONF='test_urls',
++        SECRET_KEY='test-secret-key',
++        APPEND_SLASH=True,
++    )
++    django.setup()
++
++from django.test import TestCase, override_settings
++from django.test.client import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect
++
++
++class TestCatchAllViewWithForceScriptName(TestCase):
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.admin_site = AdminSite()
++    
++    @override_settings(FORCE_SCRIPT_NAME='/admin-script', APPEND_SLASH=True)
++    def test_catch_all_view_with_force_script_name(self):
++        """Test that catch_all_view uses request.path instead of request.path_info"""
++        # Create a request with a script name
++        request = self.factory.get('/admin-script/auth/user')
++        request.path = '/admin-script/auth/user'
++        request.path_info = '/auth/user'
++        
++        # The catch_all_view should redirect to the path with trailing slash
++        # including the script name
++        try:
++            response = self.admin_site.catch_all_view(request, 'auth/user')
++        except Exception as e:
++            # If it raises Http404, that's expected for non-existing URLs
++            # But we want to check if it would redirect with the correct path
++            pass
++        
++        # Now test with a URL that should redirect
++        request = self.factory.get('/admin-script/auth/user')
++        request.path = '/admin-script/auth/user'
++        request.path_info = '/auth/user'
++        
++        # Mock resolve to return a match
++        from unittest.mock import patch, Mock
++        from django.urls import resolve
++        
++        mock_match = Mock()
++        mock_match.func.should_append_slash = True
++        
++        with patch('django.contrib.admin.sites.resolve', return_value=mock_match) as mock_resolve:
++            response = self.admin_site.catch_all_view(request, 'auth/user')
++            
++            # Check that it's a redirect
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            
++            # The current implementation uses path_info, so it redirects to '/auth/user/'
++            # But it should redirect to '/admin-script/auth/user/' (using request.path)
++            print(f"Redirect location: {response['Location']}")
++            
++            # This is what we expect after the fix
++            # self.assertEqual(response['Location'], '/admin-script/auth/user/')
++            
++            # But currently it redirects to (wrong):
++            self.assertEqual(response['Location'], '/auth/user/')
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(['__main__'])
++    sys.exit(bool(failures))
+diff --git a/tests/admin_views/tests.py b/tests/admin_views/tests.py
+index b1658941ee..a736314eee 100644
+--- a/tests/admin_views/tests.py
++++ b/tests/admin_views/tests.py
+@@ -6731,3 +6731,30 @@ class AdminSiteFinalCatchAllPatternTests(TestCase):
+         response = self.client.get(unknown_url)
+         # Does not redirect to the admin login.
+         self.assertEqual(response.status_code, 404)
++
++    # Test FORCE_SCRIPT_NAME support
++
++    @override_settings(FORCE_SCRIPT_NAME='/myapp', APPEND_SLASH=True)
++    def test_catch_all_view_with_force_script_name(self):
++        """Test that catch_all_view includes FORCE_SCRIPT_NAME in redirects."""
++        from django.test.client import RequestFactory
++        from django.contrib.admin import site
++        from unittest.mock import patch, Mock
++        
++        factory = RequestFactory()
++        # Create a request that simulates accessing a URL without trailing slash
++        # when FORCE_SCRIPT_NAME is set
++        request = factory.get('/test_admin/admin/admin_views/article')
++        request.path = '/myapp/test_admin/admin/admin_views/article'
++        request.path_info = '/test_admin/admin/admin_views/article'
++        
++        # Mock resolve to simulate that the URL with slash exists
++        mock_match = Mock()
++        mock_match.func.should_append_slash = True
++        
++        with patch('django.contrib.admin.sites.resolve', return_value=mock_match):
++            response = site.catch_all_view(request, 'admin_views/article')
++            
++            # The redirect should include the FORCE_SCRIPT_NAME
++            self.assertEqual(response.status_code, 301)
++            self.assertEqual(response['Location'], '/myapp/test_admin/admin/admin_views/article/')

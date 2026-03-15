@@ -1,0 +1,760 @@
+diff --git a/django/core/management/base.py b/django/core/management/base.py
+index e6cbf8c64f..14c54c1ff1 100644
+--- a/django/core/management/base.py
++++ b/django/core/management/base.py
+@@ -149,6 +149,9 @@ class OutputWrapper(TextIOBase):
+             msg += ending
+         style_func = style_func or self.style_func
+         self._out.write(style_func(msg))
++        # Ensure the output is flushed immediately
++        if hasattr(self._out, 'flush'):
++            self._out.flush()
+ 
+ 
+ class BaseCommand:
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/management/__init__.py b/test_app/management/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/management/commands/__init__.py b/test_app/management/commands/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/management/commands/test_flush.py b/test_app/management/commands/test_flush.py
+new file mode 100644
+index 0000000000..0d512e1d20
+--- /dev/null
++++ b/test_app/management/commands/test_flush.py
+@@ -0,0 +1,22 @@
++from django.core.management.base import BaseCommand
++import time
++
++
++class Command(BaseCommand):
++    help = 'Test flush behavior'
++
++    def handle(self, *args, **options):
++        self.stdout.write("Starting operation...", ending="")
++        self.stdout.flush()
++        
++        # Simulate work
++        time.sleep(2)
++        
++        self.stdout.write(" OK")
++        
++        self.stdout.write("Another operation...", ending="")
++        self.stdout.flush()
++        
++        time.sleep(1)
++        
++        self.stdout.write(" DONE")
+diff --git a/test_buffering_issue.py b/test_buffering_issue.py
+new file mode 100644
+index 0000000000..c320a84fee
+--- /dev/null
++++ b/test_buffering_issue.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++"""Test script to check buffering behavior."""
++
++import io
++import sys
++import time
++from django.core.management.base import OutputWrapper
++
++
++def test_buffering_issue():
++    """Test if the issue is related to buffering."""
++    
++    # Test 1: Check if sys.stdout is line-buffered
++    print(f"sys.stdout is a tty: {sys.stdout.isatty()}")
++    print(f"sys.stdout buffering: {getattr(sys.stdout, 'line_buffering', 'unknown')}")
++    
++    # Test 2: Create OutputWrapper with different outputs
++    print("\nTest with different output streams:")
++    
++    # Regular stdout
++    print("1. Regular stdout:")
++    wrapper = OutputWrapper(sys.stdout)
++    wrapper.write("Should appear immediately...", ending="")
++    wrapper.flush()
++    time.sleep(1)
++    wrapper.write(" OK")
++    
++    # Buffered StringIO
++    print("\n2. StringIO (always buffered):")
++    buffer = io.StringIO()
++    wrapper = OutputWrapper(buffer)
++    wrapper.write("In buffer...", ending="")
++    wrapper.flush()
++    print(f"Buffer content: '{buffer.getvalue()}'")
++    
++    # Test with explicit unbuffered output
++    print("\n3. Testing with explicit flush in write:")
++    
++    class FlushingOutputWrapper(OutputWrapper):
++        def write(self, msg='', style_func=None, ending=None):
++            super().write(msg, style_func, ending)
++            self._out.flush()
++    
++    wrapper = FlushingOutputWrapper(sys.stdout)
++    wrapper.write("This flushes automatically...", ending="")
++    time.sleep(1)
++    wrapper.write(" OK")
++
++
++if __name__ == "__main__":
++    test_buffering_issue()
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..90e0401784
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,113 @@
++#!/usr/bin/env python
++"""Verify that the flush fix works correctly."""
++
++import io
++import sys
++import time
++import os
++import select
++from django.core.management.base import OutputWrapper
++
++
++def test_immediate_flush():
++    """Test that output is flushed immediately."""
++    print("=== Testing immediate flush with pipe ===")
++    
++    # Create a pipe
++    r, w = os.pipe()
++    
++    # Make read end non-blocking
++    import fcntl
++    flags = fcntl.fcntl(r, fcntl.F_GETFL)
++    fcntl.fcntl(r, fcntl.F_SETFL, flags | os.O_NONBLOCK)
++    
++    # Create file object for writing
++    write_file = os.fdopen(w, 'w')
++    
++    # Create OutputWrapper
++    wrapper = OutputWrapper(write_file)
++    
++    # Write without newline
++    wrapper.write("Testing immediate flush...", ending="")
++    
++    # Check if data is available immediately
++    ready, _, _ = select.select([r], [], [], 0.1)
++    
++    if ready:
++        data = os.read(r, 1024).decode('utf-8')
++        print(f"[PASS] Data available immediately: '{data}'")
++    else:
++        print("[FAIL] No data available (flush not working)")
++    
++    # Write more data
++    wrapper.write(" OK")
++    
++    # Read remaining data
++    ready, _, _ = select.select([r], [], [], 0.1)
++    if ready:
++        data = os.read(r, 1024).decode('utf-8')
++        print(f"[PASS] Final data: '{data}'")
++    
++    # Cleanup
++    write_file.close()
++    os.close(r)
++
++
++def test_stringio_compatibility():
++    """Test that StringIO still works (no flush method)."""
++    print("\n=== Testing StringIO compatibility ===")
++    
++    buffer = io.StringIO()
++    wrapper = OutputWrapper(buffer)
++    
++    try:
++        wrapper.write("Testing StringIO...", ending="")
++        wrapper.write(" OK")
++        print(f"[PASS] StringIO works: '{buffer.getvalue()}'")
++    except Exception as e:
++        print(f"[FAIL] StringIO failed: {e}")
++
++
++def test_real_stdout():
++    """Test with real stdout."""
++    print("\n=== Testing real stdout ===")
++    
++    wrapper = OutputWrapper(sys.stdout)
++    
++    print("You should see 'Loading' immediately, then dots appear one by one:")
++    wrapper.write("Loading", ending="")
++    
++    for i in range(5):
++        time.sleep(0.5)
++        wrapper.write(".", ending="")
++    
++    wrapper.write(" Done!")
++
++
++def test_no_flush_method():
++    """Test with object that doesn't have flush method."""
++    print("\n=== Testing object without flush method ===")
++    
++    class NoFlushWriter:
++        def __init__(self):
++            self.content = []
++        
++        def write(self, msg):
++            self.content.append(msg)
++    
++    writer = NoFlushWriter()
++    wrapper = OutputWrapper(writer)
++    
++    try:
++        wrapper.write("Test", ending="")
++        wrapper.write(" message")
++        print(f"[PASS] No flush object works: {writer.content}")
++    except Exception as e:
++        print(f"[FAIL] No flush object failed: {e}")
++
++
++if __name__ == "__main__":
++    test_immediate_flush()
++    test_stringio_compatibility()
++    test_no_flush_method()
++    test_real_stdout()
+diff --git a/test_flush_issue.py b/test_flush_issue.py
+new file mode 100644
+index 0000000000..57c199b43a
+--- /dev/null
++++ b/test_flush_issue.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python
++"""Test script to reproduce the flush issue with management commands."""
++
++import io
++import sys
++import time
++from django.core.management.base import BaseCommand, OutputWrapper
++
++
++def test_output_wrapper_flush():
++    """Test that OutputWrapper properly flushes output."""
++    # Create a StringIO buffer to capture output
++    buffer = io.StringIO()
++    
++    # Create an OutputWrapper around the buffer
++    wrapper = OutputWrapper(buffer)
++    
++    # Write without ending
++    wrapper.write("Testing...", ending="")
++    
++    # Try to flush
++    wrapper.flush()
++    
++    # Check if content is in buffer
++    content = buffer.getvalue()
++    print(f"Content after flush: '{content}'")
++    print(f"Has content: {bool(content)}")
++    
++    # Write more content
++    wrapper.write(" OK")
++    
++    # Check final content
++    final_content = buffer.getvalue()
++    print(f"Final content: '{final_content}'")
++
++
++def test_real_stdout_flush():
++    """Test flush behavior with real stdout."""
++    print("\nTesting with real stdout:")
++    wrapper = OutputWrapper(sys.stdout)
++    
++    wrapper.write("This should appear immediately...", ending="")
++    wrapper.flush()
++    
++    time.sleep(1)
++    
++    wrapper.write(" OK")
++
++
++def test_migrate_style_output():
++    """Test output in the style of migrate command."""
++    print("\n\nTesting migrate-style output:")
++    
++    buffer = io.StringIO()
++    wrapper = OutputWrapper(buffer)
++    
++    # Simulate migrate command output
++    wrapper.write("  Applying myapp.0001_initial...", ending="")
++    wrapper.flush()
++    
++    print(f"Buffer after first write and flush: '{buffer.getvalue()}'")
++    
++    # Simulate work being done
++    time.sleep(0.5)
++    
++    # Write completion
++    wrapper.write(" OK")
++    
++    print(f"Final buffer: '{buffer.getvalue()}'")
++
++
++if __name__ == "__main__":
++    test_output_wrapper_flush()
++    test_real_stdout_flush()
++    test_migrate_style_output()
+diff --git a/test_flush_reproduce.py b/test_flush_reproduce.py
+new file mode 100644
+index 0000000000..983b7cd65e
+--- /dev/null
++++ b/test_flush_reproduce.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python
++"""Reproduce the flush issue as described in the problem statement."""
++
++import io
++import sys
++import time
++import subprocess
++import threading
++from django.core.management.base import OutputWrapper
++
++
++def test_direct_flush():
++    """Test that shows the issue with OutputWrapper not flushing properly."""
++    print("=== Testing OutputWrapper flush behavior ===")
++    
++    # Create a pipe to simulate non-tty output (like when output is redirected)
++    import os
++    r, w = os.pipe()
++    
++    # Create file objects from the pipe
++    read_file = os.fdopen(r, 'r')
++    write_file = os.fdopen(w, 'w')
++    
++    # Create OutputWrapper around the write end
++    wrapper = OutputWrapper(write_file)
++    
++    # Start a thread to read from the pipe
++    output = []
++    def reader():
++        while True:
++            char = read_file.read(1)
++            if not char:
++                break
++            output.append(char)
++            sys.stdout.write(char)
++            sys.stdout.flush()
++    
++    reader_thread = threading.Thread(target=reader)
++    reader_thread.daemon = True
++    reader_thread.start()
++    
++    print("\nExpected: 'Applying migration...' appears immediately, then ' OK' after delay")
++    print("Actual output:")
++    
++    # Write like the migrate command does
++    wrapper.write("  Applying myapp.0001_initial...", ending="")
++    wrapper.flush()
++    
++    # Simulate migration work
++    time.sleep(2)
++    
++    # Write completion
++    wrapper.write(" OK")
++    
++    # Close the write end to signal EOF
++    write_file.close()
++    reader_thread.join(timeout=1)
++    
++    print("\n\nOutput received in real-time:", ''.join(output))
++
++
++def test_with_real_command():
++    """Test with a real Django command."""
++    print("\n\n=== Testing with subprocess (simulates piped output) ===")
++    
++    # Create a test script that uses Django management command
++    test_script = '''
++import sys
++import time
++from django.core.management.base import OutputWrapper
++
++# Simulate non-tty environment
++wrapper = OutputWrapper(sys.stdout)
++
++wrapper.write("  Applying myapp.0001_initial...", ending="")
++wrapper.flush()
++
++time.sleep(2)
++
++wrapper.write(" OK")
++'''
++    
++    # Run the script and capture output in real-time
++    proc = subprocess.Popen(
++        [sys.executable, '-c', test_script],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        universal_newlines=True,
++        bufsize=0  # Unbuffered
++    )
++    
++    print("Output from subprocess:")
++    output_parts = []
++    while True:
++        char = proc.stdout.read(1)
++        if not char:
++            break
++        output_parts.append(char)
++        sys.stdout.write(char)
++        sys.stdout.flush()
++    
++    proc.wait()
++    print("\n\nComplete output:", ''.join(output_parts))
++
++
++if __name__ == "__main__":
++    test_direct_flush()
++    test_with_real_command()
+diff --git a/test_management_command.py b/test_management_command.py
+new file mode 100644
+index 0000000000..547defc2f4
+--- /dev/null
++++ b/test_management_command.py
+@@ -0,0 +1,58 @@
++#!/usr/bin/env python
++"""Test management command to reproduce flush issue."""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.core.management.base import BaseCommand
++from django.core.management import call_command
++import time
++
++
++class TestFlushCommand(BaseCommand):
++    help = 'Test flush behavior'
++
++    def handle(self, *args, **options):
++        self.stdout.write("Starting operation...", ending="")
++        self.stdout.flush()
++        
++        # Simulate work
++        time.sleep(2)
++        
++        self.stdout.write(" OK")
++        
++        self.stdout.write("Another operation...", ending="")
++        self.stdout.flush()
++        
++        time.sleep(1)
++        
++        self.stdout.write(" DONE")
++
++
++# Register the command
++from django.core.management import _commands
++_commands['test_flush'] = TestFlushCommand()
++
++# Run the command
++print("Running test command:")
++call_command('test_flush')
+diff --git a/test_output_wrapper_flush.py b/test_output_wrapper_flush.py
+new file mode 100644
+index 0000000000..f4323b4106
+--- /dev/null
++++ b/test_output_wrapper_flush.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python
++"""
++Test for OutputWrapper flush functionality.
++This test verifies that the fix for the flush issue works correctly.
++"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++import unittest
++import io
++import time
++import threading
++from django.core.management.base import OutputWrapper
++
++
++class OutputWrapperFlushTests(unittest.TestCase):
++    """Test that OutputWrapper properly flushes output."""
++    
++    def test_flush_with_pipe(self):
++        """Test that flush works with pipes (non-tty output)."""
++        # Create a pipe
++        r, w = os.pipe()
++        
++        # Create file objects
++        read_file = os.fdopen(r, 'r')
++        write_file = os.fdopen(w, 'w')
++        
++        # Create OutputWrapper
++        wrapper = OutputWrapper(write_file)
++        
++        # Collect output in a thread
++        output = []
++        output_times = []
++        
++        def reader():
++            start_time = time.time()
++            while True:
++                char = read_file.read(1)
++                if not char:
++                    break
++                output.append(char)
++                output_times.append(time.time() - start_time)
++        
++        reader_thread = threading.Thread(target=reader)
++        reader_thread.daemon = True
++        reader_thread.start()
++        
++        # Write first part
++        wrapper.write("Part 1...", ending="")
++        
++        # Small delay to ensure the reader thread can process
++        time.sleep(0.1)
++        
++        # Check that output was received
++        self.assertTrue(len(output) > 0, "No output received after first write")
++        first_output = ''.join(output)
++        self.assertEqual(first_output, "Part 1...")
++        
++        # Wait a bit then write second part
++        time.sleep(0.5)
++        wrapper.write(" Part 2")
++        
++        # Close write end and wait for reader
++        write_file.close()
++        reader_thread.join(timeout=1)
++        
++        # Check complete output
++        complete_output = ''.join(output)
++        self.assertEqual(complete_output, "Part 1... Part 2\n")
++        
++        # Verify timing - first part should arrive quickly
++        if output_times:
++            self.assertLess(output_times[0], 0.2, 
++                          "First character took too long to arrive")
++        
++        read_file.close()
++    
++    def test_flush_with_stringio(self):
++        """Test that flush works with StringIO (no flush method)."""
++        buffer = io.StringIO()
++        wrapper = OutputWrapper(buffer)
++        
++        # This should not raise an exception
++        wrapper.write("Test", ending="")
++        wrapper.write(" message")
++        
++        self.assertEqual(buffer.getvalue(), "Test message\n")
++    
++    def test_flush_with_custom_stream(self):
++        """Test with custom stream object without flush method."""
++        class CustomStream:
++            def __init__(self):
++                self.content = []
++            
++            def write(self, text):
++                self.content.append(text)
++        
++        stream = CustomStream()
++        wrapper = OutputWrapper(stream)
++        
++        # Should not raise exception
++        wrapper.write("Hello", ending="")
++        wrapper.write(" World")
++        
++        self.assertEqual(stream.content, ["Hello", " World\n"])
++    
++    def test_migrate_style_output(self):
++        """Test output pattern similar to migrate command."""
++        # Use a pipe to simulate non-tty environment
++        r, w = os.pipe()
++        read_file = os.fdopen(r, 'r')
++        write_file = os.fdopen(w, 'w')
++        
++        wrapper = OutputWrapper(write_file)
++        
++        # Collect output
++        output_chunks = []
++        
++        def reader():
++            while True:
++                chunk = read_file.read(1024)
++                if not chunk:
++                    break
++                output_chunks.append((time.time(), chunk))
++        
++        reader_thread = threading.Thread(target=reader)
++        reader_thread.daemon = True
++        reader_thread.start()
++        
++        # Simulate migrate command output
++        start_time = time.time()
++        wrapper.write("  Applying myapp.0001_initial...", ending="")
++        
++        # Wait to ensure output is available
++        time.sleep(0.1)
++        
++        # Simulate migration work
++        time.sleep(0.5)
++        
++        # Write completion
++        wrapper.write(" OK")
++        
++        # Close and wait
++        write_file.close()
++        reader_thread.join(timeout=1)
++        
++        # Verify output was received
++        self.assertGreaterEqual(len(output_chunks), 1, 
++                              "No output received")
++        
++        # Check complete output
++        complete_output = ''.join(chunk[1] for chunk in output_chunks)
++        self.assertEqual(complete_output, "  Applying myapp.0001_initial... OK\n")
++        
++        read_file.close()
++
++
++if __name__ == '__main__':
++    unittest.main(verbosity=2)
+diff --git a/test_real_migrate.py b/test_real_migrate.py
+new file mode 100644
+index 0000000000..5f67921c53
+--- /dev/null
++++ b/test_real_migrate.py
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python
++"""Test real migrate command with our fix."""
++
++import subprocess
++import sys
++import time
++import threading
++
++def test_real_migrate():
++    """Test that migrate command shows progress in real-time."""
++    
++    # Create a simple Django project setup
++    setup_script = '''
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': 'test_migrate.db',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Run migrate command
++from django.core.management import call_command
++call_command('migrate', verbosity=1)
++'''
++    
++    # Run the script and capture output in real-time
++    print("Running migrate command and monitoring output...")
++    print("Expected: Progress messages appear as migrations are applied")
++    print("-" * 60)
++    
++    proc = subprocess.Popen(
++        [sys.executable, '-c', setup_script],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        universal_newlines=True,
++        bufsize=1  # Line buffered
++    )
++    
++    output_times = []
++    start_time = time.time()
++    
++    # Read output line by line
++    for line in proc.stdout:
++        current_time = time.time() - start_time
++        output_times.append((current_time, line.rstrip()))
++        print(f"[{current_time:.2f}s] {line.rstrip()}")
++    
++    proc.wait()
++    
++    print("-" * 60)
++    print(f"\nTotal output lines: {len(output_times)}")
++    if output_times:
++        print(f"First line appeared at: {output_times[0][0]:.2f}s")
++        print(f"Last line appeared at: {output_times[-1][0]:.2f}s")
++    
++    # Clean up
++    import os
++    if os.path.exists('test_migrate.db'):
++        os.remove('test_migrate.db')
++
++
++if __name__ == "__main__":
++    test_real_migrate()

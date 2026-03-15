@@ -1,0 +1,427 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index d913658291..e3fc2ab086 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -435,6 +435,50 @@ class CombinedExpression(SQLiteNumericMixin, Expression):
+ 
+     def __str__(self):
+         return "{} {} {}".format(self.lhs, self.connector, self.rhs)
++    
++    def _resolve_output_field(self):
++        """
++        Attempt to infer the output type of the combined expression.
++        """
++        # Get the output fields from both sides
++        try:
++            lhs_field = self.lhs.output_field
++        except FieldError:
++            lhs_field = None
++        
++        try:
++            rhs_field = self.rhs.output_field
++        except FieldError:
++            rhs_field = None
++        
++        # Handle temporal subtraction - when subtracting two temporal fields of the same type,
++        # the result is a DurationField
++        if self.connector == self.SUB and lhs_field and rhs_field:
++            lhs_type = lhs_field.get_internal_type()
++            rhs_type = rhs_field.get_internal_type()
++            datetime_fields = {'DateField', 'DateTimeField', 'TimeField'}
++            if lhs_type in datetime_fields and lhs_type == rhs_type:
++                return fields.DurationField()
++        
++        # For operations involving DurationField, try to determine the output type
++        if lhs_field and rhs_field:
++            lhs_type = lhs_field.get_internal_type()
++            rhs_type = rhs_field.get_internal_type()
++            
++            # If both sides are DurationField, result is DurationField
++            if lhs_type == 'DurationField' and rhs_type == 'DurationField':
++                return fields.DurationField()
++            
++            # If one side is a temporal field and the other is a duration,
++            # and we're adding/subtracting, the result is the temporal field type
++            if self.connector in (self.ADD, self.SUB):
++                if lhs_type in {'DateField', 'DateTimeField', 'TimeField'} and rhs_type == 'DurationField':
++                    return lhs_field
++                elif rhs_type in {'DateField', 'DateTimeField', 'TimeField'} and lhs_type == 'DurationField':
++                    return rhs_field
++        
++        # Fall back to the default implementation
++        return super()._resolve_output_field()
+ 
+     def get_source_expressions(self):
+         return [self.lhs, self.rhs]
+diff --git a/test_temporal_comprehensive.py b/test_temporal_comprehensive.py
+new file mode 100644
+index 0000000000..b2371166b2
+--- /dev/null
++++ b/test_temporal_comprehensive.py
+@@ -0,0 +1,117 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Value, DurationField, ExpressionWrapper
++import datetime
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define the model
++class Experiment(models.Model):
++    start = models.DateTimeField()
++    end = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create test data
++Experiment.objects.create(
++    start=datetime.datetime(2023, 1, 1, 10, 0, 0),
++    end=datetime.datetime(2023, 1, 1, 12, 0, 0)
++)
++
++print("Test 1: F('end') - F('start') + Value(timedelta)")
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 2: F('end') - F('start') + Value(timedelta(hours=1))")
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') + Value(datetime.timedelta(hours=1), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 3: Value(timedelta(hours=1)) + (F('end') - F('start'))")
++try:
++    result = Experiment.objects.annotate(
++        delta=Value(datetime.timedelta(hours=1), output_field=DurationField()) + (F('end') - F('start'))
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 4: F('end') - F('start') - Value(timedelta(minutes=30))")
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') - Value(datetime.timedelta(minutes=30), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 5: Just F('end') - F('start') (should already work)")
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start')
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 6: F('start') + Value(timedelta(hours=3)) (datetime + duration)")
++try:
++    result = Experiment.objects.annotate(
++        new_time=F('start') + Value(datetime.timedelta(hours=3), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"  Success! New time: {exp.new_time}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
++
++print("\nTest 7: Compare with ExpressionWrapper (should work before and after fix)")
++try:
++    result = Experiment.objects.annotate(
++        delta=ExpressionWrapper(
++            F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField()),
++            output_field=DurationField()
++        )
++    )
++    for exp in result:
++        print(f"  Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"  Error: {type(e).__name__}: {e}")
+diff --git a/test_temporal_subtraction.py b/test_temporal_subtraction.py
+new file mode 100644
+index 0000000000..749eaa7aff
+--- /dev/null
++++ b/test_temporal_subtraction.py
+@@ -0,0 +1,55 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Value, DurationField
++import datetime
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define the model
++class Experiment(models.Model):
++    start = models.DateTimeField()
++    end = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create test data
++Experiment.objects.create(
++    start=datetime.datetime(2023, 1, 1, 10, 0, 0),
++    end=datetime.datetime(2023, 1, 1, 12, 0, 0)
++)
++
++# Try the problematic query
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++    )
++    print("Query succeeded!")
++    for exp in result:
++        print(f"Delta: {exp.delta}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_temporal_subtraction_fix.py b/test_temporal_subtraction_fix.py
+new file mode 100644
+index 0000000000..086973f38b
+--- /dev/null
++++ b/test_temporal_subtraction_fix.py
+@@ -0,0 +1,54 @@
++"""
++Test for temporal subtraction without ExpressionWrapper
++"""
++import datetime
++from django.test import TestCase
++from django.db import models
++from django.db.models import F, Value, DurationField
++
++
++class TemporalSubtractionModel(models.Model):
++    start = models.DateTimeField()
++    end = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test_temporal_subtraction'
++
++
++class TemporalSubtractionTests(TestCase):
++    @classmethod
++    def setUpTestData(cls):
++        cls.obj = TemporalSubtractionModel.objects.create(
++            start=datetime.datetime(2023, 1, 1, 10, 0, 0),
++            end=datetime.datetime(2023, 1, 1, 12, 0, 0)
++        )
++    
++    def test_temporal_subtraction_with_duration_addition(self):
++        """
++        Test that temporal subtraction works with duration addition without ExpressionWrapper.
++        This addresses the issue where F('end') - F('start') + Value(timedelta()) 
++        raised FieldError about mixed types.
++        """
++        # Test with empty timedelta
++        result = TemporalSubtractionModel.objects.annotate(
++            delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++        ).first()
++        self.assertEqual(result.delta, datetime.timedelta(hours=2))
++        
++        # Test with non-empty timedelta
++        result = TemporalSubtractionModel.objects.annotate(
++            delta=F('end') - F('start') + Value(datetime.timedelta(hours=1), output_field=DurationField())
++        ).first()
++        self.assertEqual(result.delta, datetime.timedelta(hours=3))
++        
++        # Test subtraction
++        result = TemporalSubtractionModel.objects.annotate(
++            delta=F('end') - F('start') - Value(datetime.timedelta(minutes=30), output_field=DurationField())
++        ).first()
++        self.assertEqual(result.delta, datetime.timedelta(hours=1, minutes=30))
++        
++        # Test reversed order
++        result = TemporalSubtractionModel.objects.annotate(
++            delta=Value(datetime.timedelta(hours=1), output_field=DurationField()) + (F('end') - F('start'))
++        ).first()
++        self.assertEqual(result.delta, datetime.timedelta(hours=3))
+diff --git a/test_without_fix.py b/test_without_fix.py
+new file mode 100644
+index 0000000000..898e1bc753
+--- /dev/null
++++ b/test_without_fix.py
+@@ -0,0 +1,80 @@
++"""
++Test to verify that without our fix, the issue would occur
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Value, DurationField
++from django.db.models.expressions import CombinedExpression, BaseExpression
++import datetime
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Define the model
++class Experiment(models.Model):
++    start = models.DateTimeField()
++    end = models.DateTimeField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Experiment)
++
++# Create test data
++Experiment.objects.create(
++    start=datetime.datetime(2023, 1, 1, 10, 0, 0),
++    end=datetime.datetime(2023, 1, 1, 12, 0, 0)
++)
++
++# Save the original _resolve_output_field method
++original_resolve_output_field = CombinedExpression._resolve_output_field
++
++# Remove our fix to test that it would fail without it
++if hasattr(CombinedExpression, '_resolve_output_field'):
++    # Use BaseExpression's implementation
++    CombinedExpression._resolve_output_field = BaseExpression._resolve_output_field
++
++# Try the problematic query
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"Without fix - Delta: {exp.delta}")
++    print("ERROR: Query succeeded when it should have failed!")
++except Exception as e:
++    print(f"Without fix - Expected error: {type(e).__name__}: {e}")
++
++# Restore our fix
++CombinedExpression._resolve_output_field = original_resolve_output_field
++
++# Try again with the fix
++try:
++    result = Experiment.objects.annotate(
++        delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++    )
++    for exp in result:
++        print(f"With fix - Success! Delta: {exp.delta}")
++except Exception as e:
++    print(f"With fix - Unexpected error: {type(e).__name__}: {e}")
+diff --git a/tests/expressions/tests.py b/tests/expressions/tests.py
+index 72f95f0194..a0cd6782a2 100644
+--- a/tests/expressions/tests.py
++++ b/tests/expressions/tests.py
+@@ -1670,6 +1670,37 @@ class FTimeDeltaTests(TestCase):
+         e0 = Experiment.objects.get(name='e0')
+         self.assertEqual(e0.start, expected_start)
+ 
++    def test_temporal_subtraction_with_duration_addition(self):
++        """
++        Test that temporal subtraction works with duration addition without ExpressionWrapper.
++        This addresses the issue where F('end') - F('start') + Value(timedelta()) 
++        raised FieldError about mixed types.
++        """
++        # Test with empty timedelta
++        result = Experiment.objects.annotate(
++            delta=F('end') - F('start') + Value(datetime.timedelta(), output_field=DurationField())
++        ).first()
++        self.assertEqual(result.delta, self.deltas[0])
++        
++        # Test with non-empty timedelta
++        result = Experiment.objects.annotate(
++            delta=F('end') - F('start') + Value(datetime.timedelta(hours=1), output_field=DurationField())
++        ).first()
++        self.assertEqual(result.delta, self.deltas[0] + datetime.timedelta(hours=1))
++        
++        # Test subtraction
++        result = Experiment.objects.annotate(
++            delta=F('end') - F('start') - Value(datetime.timedelta(minutes=30), output_field=DurationField())
++        ).first()
++        expected = self.deltas[0] - datetime.timedelta(minutes=30)
++        self.assertEqual(result.delta, expected)
++        
++        # Test reversed order
++        result = Experiment.objects.annotate(
++            delta=Value(datetime.timedelta(hours=1), output_field=DurationField()) + (F('end') - F('start'))
++        ).first()
++        self.assertEqual(result.delta, datetime.timedelta(hours=1) + self.deltas[0])
++
+ 
+ class ValueTests(TestCase):
+     def test_update_TimeField_using_Value(self):

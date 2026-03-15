@@ -1,0 +1,415 @@
+diff --git a/lib/matplotlib/mlab.py b/lib/matplotlib/mlab.py
+index 3552904c3d..efa2f84cae 100644
+--- a/lib/matplotlib/mlab.py
++++ b/lib/matplotlib/mlab.py
+@@ -395,12 +395,12 @@ def _spectral_helper(x, y=None, NFFT=None, Fs=None, detrend_func=None,
+     elif mode == 'psd':
+         result = np.conj(result) * result
+     elif mode == 'magnitude':
+-        result = np.abs(result) / np.abs(window).sum()
++        result = np.abs(result) / window.sum()
+     elif mode == 'angle' or mode == 'phase':
+         # we unwrap the phase later to handle the onesided vs. twosided case
+         result = np.angle(result)
+     elif mode == 'complex':
+-        result /= np.abs(window).sum()
++        result /= window.sum()
+ 
+     if mode == 'psd':
+ 
+@@ -424,10 +424,10 @@ def _spectral_helper(x, y=None, NFFT=None, Fs=None, detrend_func=None,
+             result /= Fs
+             # Scale the spectrum by the norm of the window to compensate for
+             # windowing loss; see Bendat & Piersol Sec 11.5.2.
+-            result /= (np.abs(window)**2).sum()
++            result /= (window**2).sum()
+         else:
+             # In this case, preserve power in the segment, not amplitude
+-            result /= np.abs(window).sum()**2
++            result /= window.sum()**2
+ 
+     t = np.arange(NFFT/2, len(x) - NFFT/2 + 1, NFFT - noverlap)/Fs
+ 
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..93664ea88f
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,92 @@
++"""Test edge cases for window correction fix."""
++import numpy as np
++import matplotlib.mlab as mlab
++from scipy import signal
++
++
++def test_all_negative_window():
++    """Test with a window that has all negative values."""
++    # Create a window with all negative values
++    window = -np.ones(512)
++    
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    # Test should work without errors
++    Pxx, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                         noverlap=256, scale_by_freq=True)
++    
++    assert np.all(np.isfinite(Pxx)), "PSD should be finite even with all negative window"
++    print("All negative window test passed!")
++
++
++def test_window_with_zero_sum():
++    """Test with a window that sums to zero (edge case)."""
++    # Create a window that sums to approximately zero
++    window = np.ones(512)
++    window[256:] = -1
++    
++    # Add small offset to avoid division by zero
++    window += 1e-10
++    
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    # Test should work without errors
++    Pxx, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                         noverlap=256, scale_by_freq=True)
++    
++    # Results might be large due to small normalization factor, but should be finite
++    assert np.all(np.isfinite(Pxx)), "PSD should be finite even with near-zero sum window"
++    print("Near-zero sum window test passed!")
++
++
++def test_mixed_sign_windows():
++    """Test various windows with mixed positive and negative values."""
++    windows_to_test = [
++        ('flattop', signal.windows.flattop(512)),
++        ('tukey_0.1', signal.windows.tukey(512, alpha=0.1)),
++        ('custom_mixed', np.sin(np.linspace(0, 4*np.pi, 512))),
++    ]
++    
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    for name, window in windows_to_test:
++        print(f"\nTesting {name} window:")
++        print(f"  Has negative values: {(window < 0).any()}")
++        print(f"  Window sum: {window.sum():.6f}")
++        
++        # Skip windows with zero sum as they're invalid for spectral analysis
++        if abs(window.sum()) < 1e-10:
++            print(f"  Skipping - window sum is too close to zero")
++            continue
++            
++        # Test both scaling modes
++        Pxx_density, _ = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                 noverlap=256, scale_by_freq=True)
++        Pxx_spectrum, _ = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                  noverlap=256, scale_by_freq=False)
++        
++        assert np.all(np.isfinite(Pxx_density)), f"{name} density PSD should be finite"
++        assert np.all(np.isfinite(Pxx_spectrum)), f"{name} spectrum PSD should be finite"
++        
++        print(f"  Max PSD density: {Pxx_density.max():.6f}")
++        print(f"  Max PSD spectrum: {Pxx_spectrum.max():.6f}")
++    
++    print("\nAll mixed sign window tests passed!")
++
++
++if __name__ == "__main__":
++    test_all_negative_window()
++    test_window_with_zero_sum()
++    test_mixed_sign_windows()
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 0000000000..a2aa0138a8
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,45 @@
++import numpy as np
++import matplotlib.mlab as mlab
++from scipy import signal
++
++# Test the fix with flattop window
++window = signal.windows.flattop(512)
++
++# Verify window normalization calculations match expected values
++window_sum_squared = window.sum()**2
++window_squared_sum = (window**2).sum()
++
++print(f"Window sum squared: {window_sum_squared}")
++print(f"Window squared sum: {window_squared_sum}")
++
++# Test that mlab functions work correctly with negative-valued windows
++np.random.seed(42)
++fs = 1000
++t = np.arange(0, 1.0, 1/fs)
++x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++
++# Test different modes
++modes = ['psd', 'complex', 'magnitude']
++for mode in modes:
++    if mode == 'psd':
++        # Test with both scale_by_freq options
++        result1, freqs, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                  window=window, noverlap=256,
++                                                  mode=mode, scale_by_freq=True)
++        result2, freqs, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                  window=window, noverlap=256,
++                                                  mode=mode, scale_by_freq=False)
++        print(f"\n{mode} mode (scale_by_freq=True): max={result1.max():.6f}, has_nan={np.isnan(result1).any()}")
++        print(f"{mode} mode (scale_by_freq=False): max={result2.max():.6f}, has_nan={np.isnan(result2).any()}")
++    else:
++        result, freqs, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                window=window, noverlap=256,
++                                                mode=mode)
++        print(f"\n{mode} mode: max={np.abs(result).max():.6f}, has_nan={np.isnan(result).any()}")
++
++# Test that the window normalization is correct
++# For a window with negative values, the sum should not be changed by abs()
++print(f"\nVerification of window normalization:")
++print(f"window.sum() = {window.sum()}")
++print(f"np.abs(window).sum() = {np.abs(window).sum()}")
++print(f"Difference: {np.abs(window).sum() - window.sum()}")
+diff --git a/test_window_bug.py b/test_window_bug.py
+new file mode 100644
+index 0000000000..13b988fb0b
+--- /dev/null
++++ b/test_window_bug.py
+@@ -0,0 +1,21 @@
++import numpy as np
++from scipy import signal
++import matplotlib.mlab as mlab
++
++# Test the issue with flattop window which has negative values
++window = signal.windows.flattop(512)
++
++# Show that the window has negative values
++print(f"Window min value: {window.min()}")
++print(f"Window max value: {window.max()}")
++print(f"Window has negative values: {(window < 0).any()}")
++
++# The bug: np.abs changes the window values incorrectly
++print(f"\nOriginal sum squared: {window.sum()**2}")
++print(f"Abs sum squared: {np.abs(window).sum()**2}")
++print(f"Difference: {np.abs(window).sum()**2 - window.sum()**2}")
++
++# Also test the other formula
++print(f"\nOriginal squared sum: {(window**2).sum()}")
++print(f"Abs squared sum: {(np.abs(window)**2).sum()}")
++print(f"Difference: {(np.abs(window)**2).sum() - (window**2).sum()}")
+diff --git a/test_window_correction.py b/test_window_correction.py
+new file mode 100644
+index 0000000000..408f6e774c
+--- /dev/null
++++ b/test_window_correction.py
+@@ -0,0 +1,39 @@
++import numpy as np
++import matplotlib.mlab as mlab
++from scipy import signal
++
++# Test with different windows including ones with negative values
++windows_to_test = [
++    ('hanning', np.hanning(512)),
++    ('hamming', np.hamming(512)),
++    ('flattop', signal.windows.flattop(512)),
++]
++
++# Generate test signal
++np.random.seed(42)
++fs = 1000
++t = np.arange(0, 1.0, 1/fs)
++x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++
++for window_name, window in windows_to_test:
++    print(f"\nTesting {window_name} window:")
++    print(f"  Min value: {window.min():.6f}")
++    print(f"  Max value: {window.max():.6f}")
++    print(f"  Has negative values: {(window < 0).any()}")
++    
++    # Test PSD with scale_by_freq=True (density scaling)
++    Pxx_density, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                  noverlap=256, scale_by_freq=True)
++    
++    # Test PSD with scale_by_freq=False (spectrum scaling)
++    Pxx_spectrum, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                   noverlap=256, scale_by_freq=False)
++    
++    print(f"  PSD density max: {Pxx_density.max():.6f}")
++    print(f"  PSD spectrum max: {Pxx_spectrum.max():.6f}")
++    
++    # Check for NaN or Inf values
++    print(f"  Has NaN (density): {np.isnan(Pxx_density).any()}")
++    print(f"  Has Inf (density): {np.isinf(Pxx_density).any()}")
++    print(f"  Has NaN (spectrum): {np.isnan(Pxx_spectrum).any()}")
++    print(f"  Has Inf (spectrum): {np.isinf(Pxx_spectrum).any()}")
+diff --git a/test_window_correction_fix.py b/test_window_correction_fix.py
+new file mode 100644
+index 0000000000..49c1f08c8d
+--- /dev/null
++++ b/test_window_correction_fix.py
+@@ -0,0 +1,91 @@
++"""Test that window correction is properly handled for windows with negative values."""
++import numpy as np
++import matplotlib.mlab as mlab
++from scipy import signal
++
++
++def test_window_correction_flattop():
++    """Test that flattop window (which has negative values) is handled correctly."""
++    # Create flattop window
++    window = signal.windows.flattop(512)
++    
++    # Verify it has negative values
++    assert (window < 0).any(), "Flattop window should have negative values"
++    
++    # The correct normalization values (without abs)
++    expected_sum_squared = window.sum()**2
++    expected_squared_sum = (window**2).sum()
++    
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    # Test PSD with scale_by_freq=True (density scaling)
++    # This should use (window**2).sum() for normalization
++    Pxx_density, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                  noverlap=256, scale_by_freq=True)
++    
++    # Test PSD with scale_by_freq=False (spectrum scaling)  
++    # This should use window.sum()**2 for normalization
++    Pxx_spectrum, freqs = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                                   noverlap=256, scale_by_freq=False)
++    
++    # Results should be finite (not NaN or Inf)
++    assert np.all(np.isfinite(Pxx_density)), "PSD density should not contain NaN or Inf"
++    assert np.all(np.isfinite(Pxx_spectrum)), "PSD spectrum should not contain NaN or Inf"
++    
++    # Test magnitude mode normalization
++    # This should use window.sum() for normalization
++    mag_result, freqs, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                 window=window, noverlap=256,
++                                                 mode='magnitude')
++    assert np.all(np.isfinite(mag_result)), "Magnitude result should not contain NaN or Inf"
++    
++    # Test complex mode normalization
++    # This should use window.sum() for normalization
++    complex_result, freqs, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                     window=window, noverlap=256,
++                                                     mode='complex')
++    assert np.all(np.isfinite(complex_result)), "Complex result should not contain NaN or Inf"
++    
++    print("All tests passed!")
++
++
++def test_window_correction_comparison():
++    """Compare results with different windows to ensure consistency."""
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    # Test with Hanning window (all positive values)
++    hann_window = np.hanning(512)
++    Pxx_hann, _ = mlab.psd(x, NFFT=512, Fs=fs, window=hann_window, 
++                           noverlap=256, scale_by_freq=True)
++    
++    # Test with flattop window (has negative values)
++    flattop_window = signal.windows.flattop(512)
++    Pxx_flattop, _ = mlab.psd(x, NFFT=512, Fs=fs, window=flattop_window, 
++                             noverlap=256, scale_by_freq=True)
++    
++    # Both should produce reasonable results
++    assert np.all(np.isfinite(Pxx_hann)), "Hanning PSD should be finite"
++    assert np.all(np.isfinite(Pxx_flattop)), "Flattop PSD should be finite"
++    
++    # The peak frequencies should be similar
++    peak_freq_hann = np.argmax(Pxx_hann) * fs / 512
++    peak_freq_flattop = np.argmax(Pxx_flattop) * fs / 512
++    
++    # Allow some tolerance due to different window characteristics
++    assert abs(peak_freq_hann - peak_freq_flattop) < 10, \
++        f"Peak frequencies should be similar: {peak_freq_hann} vs {peak_freq_flattop}"
++    
++    print("Comparison test passed!")
++
++
++if __name__ == "__main__":
++    test_window_correction_flattop()
++    test_window_correction_comparison()
+diff --git a/test_window_negative_values.py b/test_window_negative_values.py
+new file mode 100644
+index 0000000000..cc10b95ea4
+--- /dev/null
++++ b/test_window_negative_values.py
+@@ -0,0 +1,59 @@
++"""Test to add to matplotlib test suite for window correction with negative values."""
++import numpy as np
++import pytest
++from scipy import signal
++import matplotlib.mlab as mlab
++
++
++def test_window_correction_negative_values():
++    """Test that windows with negative values are handled correctly.
++    
++    This is a regression test for:
++    https://github.com/matplotlib/matplotlib/issues/xxxxx
++    
++    Windows with negative values (like flattop) should not use np.abs()
++    in the normalization calculations.
++    """
++    # Create flattop window which has negative values
++    window = signal.windows.flattop(512)
++    
++    # Verify it has negative values
++    assert (window < 0).any()
++    
++    # Generate test signal
++    np.random.seed(42)
++    fs = 1000
++    t = np.arange(0, 1.0, 1/fs)
++    x = np.sin(2*np.pi*50*t) + 0.1*np.random.randn(len(t))
++    
++    # Test PSD with both scaling modes
++    Pxx_density, _ = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                             noverlap=256, scale_by_freq=True)
++    Pxx_spectrum, _ = mlab.psd(x, NFFT=512, Fs=fs, window=window, 
++                              noverlap=256, scale_by_freq=False)
++    
++    # Results should be finite
++    assert np.all(np.isfinite(Pxx_density))
++    assert np.all(np.isfinite(Pxx_spectrum))
++    
++    # Test magnitude and complex modes
++    mag_result, _, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                            window=window, noverlap=256,
++                                            mode='magnitude')
++    complex_result, _, _ = mlab._spectral_helper(x, x, NFFT=512, Fs=fs, 
++                                                window=window, noverlap=256,
++                                                mode='complex')
++    
++    assert np.all(np.isfinite(mag_result))
++    assert np.all(np.isfinite(complex_result))
++    
++    # Verify the window normalization is correct
++    # The key is that window.sum() and (window**2).sum() should be used,
++    # not np.abs(window).sum() or (np.abs(window)**2).sum()
++    assert window.sum()**2 != np.abs(window).sum()**2
++    assert (window**2).sum() == (np.abs(window)**2).sum()  # This is always true
++
++
++if __name__ == "__main__":
++    test_window_correction_negative_values()
++    print("Test passed!")

@@ -1,0 +1,570 @@
+diff --git a/debug_test.py b/debug_test.py
+new file mode 100644
+index 00000000..ce8bd18b
+--- /dev/null
++++ b/debug_test.py
+@@ -0,0 +1,32 @@
++import xarray as xr
++import numpy as np
++
++# Non-monotonic coordinate that doesn't vary
++shared_coord = [5, 2, 8, 1]
++
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(2, 4))
++    ),
++    coords=dict(
++        x=[1, 2],
++        y=shared_coord
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(3, 4))
++    ),
++    coords = dict(
++        x=[3, 4, 5],
++        y=shared_coord
++    )
++)
++
++# Should work because y doesn't vary between datasets
++result = xr.combine_by_coords((ds1, ds2))
++print("Result dimensions:", result.dims)
++print("Result x values:", result.x.values)
++print("Result y values:", result.y.values)
++print("Expected x:", [1, 2, 3, 4, 5])
+diff --git a/final_validation.py b/final_validation.py
+new file mode 100644
+index 00000000..c5a6e813
+--- /dev/null
++++ b/final_validation.py
+@@ -0,0 +1,99 @@
++import xarray as xr
++import numpy as np
++
++print("Final validation of the fix for combine_by_coords with non-monotonic identical coordinates")
++print("="*80)
++
++# Test 1: Original failing case
++print("\n1. Original failing case from the issue:")
++yCoord = ['a', 'c', 'b']
++ds1 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y'], np.random.rand(3, 3))),
++    coords=dict(x=[1, 2, 3], y=yCoord)
++)
++ds2 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y'], np.random.rand(4, 3))),
++    coords=dict(x=[4, 5, 6, 7], y=yCoord)
++)
++result = xr.combine_by_coords((ds1, ds2))
++print(f"✓ Success: Combined datasets with non-monotonic y=['a', 'c', 'b']")
++
++# Test 2: Numeric non-monotonic coordinates
++print("\n2. Numeric non-monotonic coordinates:")
++yCoord = [5, 1, 3]
++ds1 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y'], np.random.rand(2, 3))),
++    coords=dict(x=[1, 2], y=yCoord)
++)
++ds2 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y'], np.random.rand(3, 3))),
++    coords=dict(x=[3, 4, 5], y=yCoord)
++)
++result = xr.combine_by_coords((ds1, ds2))
++print(f"✓ Success: Combined datasets with non-monotonic y=[5, 1, 3]")
++
++# Test 3: Multiple non-monotonic dimensions
++print("\n3. Multiple non-monotonic dimensions:")
++yCoord = ['z', 'a', 'm']
++zCoord = [100, 10, 50]
++ds1 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y', 'z'], np.random.rand(2, 3, 3))),
++    coords=dict(x=[1, 2], y=yCoord, z=zCoord)
++)
++ds2 = xr.Dataset(
++    data_vars=dict(data=(['x', 'y', 'z'], np.random.rand(2, 3, 3))),
++    coords=dict(x=[3, 4], y=yCoord, z=zCoord)
++)
++result = xr.combine_by_coords((ds1, ds2))
++print(f"✓ Success: Combined datasets with multiple non-monotonic dimensions")
++
++# Test 4: Ensure varying dimensions still need to be monotonic
++print("\n4. Varying dimensions must still be monotonic:")
++try:
++    ds1 = xr.Dataset(
++        data_vars=dict(data=(['x'], [1, 2, 3])),
++        coords=dict(x=[1, 3, 2])  # Non-monotonic varying coordinate
++    )
++    ds2 = xr.Dataset(
++        data_vars=dict(data=(['x'], [4, 5, 6])),
++        coords=dict(x=[4, 6, 5])  # Non-monotonic varying coordinate
++    )
++    result = xr.combine_by_coords((ds1, ds2))
++    print("✗ Error: Should have failed for non-monotonic varying coordinates")
++except ValueError as e:
++    if "monotonic" in str(e):
++        print("✓ Success: Correctly raised error for non-monotonic varying coordinates")
++
++# Test 5: Complex case with mixed monotonic/non-monotonic coords
++print("\n5. Complex case with mixed monotonic/non-monotonic coordinates:")
++ds1 = xr.Dataset(
++    data_vars=dict(
++        temp=(['time', 'lat', 'lon'], np.random.rand(3, 2, 4)),
++        pressure=(['time', 'lat', 'lon'], np.random.rand(3, 2, 4))
++    ),
++    coords=dict(
++        time=[1, 2, 3],  # Monotonic, will vary
++        lat=[45.0, 30.0],  # Non-monotonic, identical
++        lon=[120, 110, 130, 100]  # Non-monotonic, identical
++    )
++)
++ds2 = xr.Dataset(
++    data_vars=dict(
++        temp=(['time', 'lat', 'lon'], np.random.rand(2, 2, 4)),
++        pressure=(['time', 'lat', 'lon'], np.random.rand(2, 2, 4))
++    ),
++    coords=dict(
++        time=[4, 5],  # Monotonic, will vary
++        lat=[45.0, 30.0],  # Non-monotonic, identical
++        lon=[120, 110, 130, 100]  # Non-monotonic, identical
++    )
++)
++result = xr.combine_by_coords((ds1, ds2))
++print(f"✓ Success: Combined complex dataset")
++print(f"  Dimensions: {dict(result.dims)}")
++print(f"  Time (concatenated): {list(result.time.values)}")
++print(f"  Lat (unchanged): {list(result.lat.values)}")
++print(f"  Lon (unchanged): {list(result.lon.values)}")
++
++print("\n" + "="*80)
++print("All tests passed! The fix correctly handles non-monotonic identical coordinates.")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 00000000..a5fc5b1d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,62 @@
++import xarray as xr
++import numpy as np
++
++# Test case 1: monotonic coordinates (should work)
++print("Test 1: Monotonic coordinates")
++yCoord = ['a', 'b', 'c']  # works without error
++
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(3, 3))
++    ),
++    coords=dict(
++        x=[1, 2, 3],
++        y=yCoord
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(4, 3))
++    ),
++    coords = dict(
++        x=[4, 5, 6, 7],
++        y=yCoord
++    )
++)
++
++try:
++    ds3 = xr.combine_by_coords((ds1, ds2))
++    print("Success: Combined datasets with monotonic coordinates")
++except Exception as e:
++    print(f"Error: {e}")
++
++# Test case 2: non-monotonic coordinates (currently raises error)
++print("\nTest 2: Non-monotonic coordinates")
++yCoord = ['a', 'c', 'b']  # raises ValueError on combine
++
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(3, 3))
++    ),
++    coords=dict(
++        x=[1, 2, 3],
++        y=yCoord
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(4, 3))
++    ),
++    coords = dict(
++        x=[4, 5, 6, 7],
++        y=yCoord
++    )
++)
++
++try:
++    ds3 = xr.combine_by_coords((ds1, ds2))
++    print("Success: Combined datasets with non-monotonic coordinates")
++except Exception as e:
++    print(f"Error: {e}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 00000000..fa88d5d7
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,119 @@
++import xarray as xr
++import numpy as np
++import pytest
++
++# Test 1: Ensure non-monotonic coordinates that don't vary work
++print("Test 1: Non-monotonic identical coordinates should work")
++yCoord = ['a', 'c', 'b']  # Non-monotonic
++
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(3, 3))
++    ),
++    coords=dict(
++        x=[1, 2, 3],
++        y=yCoord
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(4, 3))
++    ),
++    coords = dict(
++        x=[4, 5, 6, 7],
++        y=yCoord
++    )
++)
++
++try:
++    result = xr.combine_by_coords((ds1, ds2))
++    print("✓ Success: Combined datasets with non-monotonic identical coordinates")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++# Test 2: Ensure that non-monotonic varying coordinates still fail
++print("\nTest 2: Non-monotonic varying coordinates should fail")
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x'], [1, 2, 3])
++    ),
++    coords=dict(
++        x=[1, 3, 2]  # Non-monotonic
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x'], [4, 5, 6])
++    ),
++    coords = dict(
++        x=[4, 6, 5]  # Non-monotonic
++    )
++)
++
++try:
++    result = xr.combine_by_coords((ds1, ds2))
++    print("✗ Failed: Should have raised an error for non-monotonic varying coordinates")
++except ValueError as e:
++    if "monotonic" in str(e):
++        print("✓ Success: Correctly raised error for non-monotonic varying coordinates")
++    else:
++        print(f"✗ Failed with unexpected error: {e}")
++
++# Test 3: Ensure that the resulting combined dataset has monotonic coordinates for concatenated dims
++print("\nTest 3: Result should have monotonic coordinates for concatenated dimensions")
++ds1 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(3, 3))
++    ),
++    coords=dict(
++        x=[1, 2, 3],
++        y=['z', 'a', 'b']  # Non-monotonic but identical across datasets
++    )
++)
++
++ds2 = xr.Dataset(
++    data_vars=dict(
++        data=(['x', 'y'], np.random.rand(2, 3))
++    ),
++    coords = dict(
++        x=[4, 5],
++        y=['z', 'a', 'b']  # Same non-monotonic coordinates
++    )
++)
++
++try:
++    result = xr.combine_by_coords((ds1, ds2))
++    # Check that x is monotonic (it was concatenated)
++    x_monotonic = all(result.x.values[i] <= result.x.values[i+1] for i in range(len(result.x.values)-1))
++    # Check that y remains non-monotonic (it wasn't concatenated)
++    y_values = list(result.y.values)
++    
++    print(f"✓ Success: x is monotonic: {x_monotonic}, x values: {list(result.x.values)}")
++    print(f"✓ Success: y remains as-is: {y_values}")
++except Exception as e:
++    print(f"✗ Failed: {e}")
++
++# Test 4: Multiple datasets with non-monotonic identical coordinates
++print("\nTest 4: Multiple datasets with non-monotonic identical coordinates")
++datasets = []
++for i in range(4):
++    ds = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(2, 4))
++        ),
++        coords=dict(
++            x=[i*2, i*2+1],
++            y=[10, 5, 15, 3]  # Non-monotonic
++        )
++    )
++    datasets.append(ds)
++
++try:
++    result = xr.combine_by_coords(datasets)
++    print(f"✓ Success: Combined {len(datasets)} datasets with non-monotonic identical coordinates")
++    print(f"  Result dimensions: {dict(result.dims)}")
++    print(f"  y coordinate values: {list(result.y.values)}")
++except Exception as e:
++    print(f"✗ Failed: {e}")
+diff --git a/test_fix_comprehensive.py b/test_fix_comprehensive.py
+new file mode 100644
+index 00000000..c53d6e5e
+--- /dev/null
++++ b/test_fix_comprehensive.py
+@@ -0,0 +1,170 @@
++import xarray as xr
++import numpy as np
++import pytest
++
++def test_combine_by_coords_non_monotonic_identical():
++    """Test that combine_by_coords works with non-monotonic identical coordinates"""
++    # Test case 1: Non-monotonic string coordinates
++    yCoord = ['a', 'c', 'b']
++    
++    ds1 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(3, 3))
++        ),
++        coords=dict(
++            x=[1, 2, 3],
++            y=yCoord
++        )
++    )
++    
++    ds2 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(4, 3))
++        ),
++        coords = dict(
++            x=[4, 5, 6, 7],
++            y=yCoord
++        )
++    )
++    
++    # This should work without error
++    result = xr.combine_by_coords((ds1, ds2))
++    assert result.dims == {'x': 7, 'y': 3}
++    assert list(result.y.values) == yCoord
++    
++    # Test case 2: Non-monotonic numeric coordinates
++    yCoord_numeric = [1, 3, 2]
++    
++    ds1 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(3, 3))
++        ),
++        coords=dict(
++            x=[1, 2, 3],
++            y=yCoord_numeric
++        )
++    )
++    
++    ds2 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(4, 3))
++        ),
++        coords = dict(
++            x=[4, 5, 6, 7],
++            y=yCoord_numeric
++        )
++    )
++    
++    # This should also work without error
++    result = xr.combine_by_coords((ds1, ds2))
++    assert result.dims == {'x': 7, 'y': 3}
++    assert list(result.y.values) == yCoord_numeric
++    
++    # Test case 3: Multiple non-monotonic identical dimensions
++    zCoord = [10, 5, 15]
++    
++    ds1 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y', 'z'], np.random.rand(3, 3, 3))
++        ),
++        coords=dict(
++            x=[1, 2, 3],
++            y=yCoord,
++            z=zCoord
++        )
++    )
++    
++    ds2 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y', 'z'], np.random.rand(4, 3, 3))
++        ),
++        coords = dict(
++            x=[4, 5, 6, 7],
++            y=yCoord,
++            z=zCoord
++        )
++    )
++    
++    # This should work without error
++    result = xr.combine_by_coords((ds1, ds2))
++    assert result.dims == {'x': 7, 'y': 3, 'z': 3}
++    assert list(result.y.values) == yCoord
++    assert list(result.z.values) == zCoord
++
++
++def test_combine_by_coords_varying_non_monotonic_should_fail():
++    """Test that combine_by_coords still fails when varying coordinates are non-monotonic"""
++    # This should still raise an error because the varying dimension is non-monotonic
++    ds1 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(3, 3))
++        ),
++        coords=dict(
++            x=[1, 3, 2],  # Non-monotonic and will vary between datasets
++            y=['a', 'b', 'c']
++        )
++    )
++    
++    ds2 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(3, 3))
++        ),
++        coords = dict(
++            x=[4, 6, 5],  # Non-monotonic and different from ds1
++            y=['a', 'b', 'c']
++        )
++    )
++    
++    # This should raise an error
++    with pytest.raises(ValueError, match="monotonically"):
++        xr.combine_by_coords((ds1, ds2))
++
++
++def test_combine_by_coords_monotonic_check_only_concat_dims():
++    """Test that monotonic check is only applied to concatenated dimensions"""
++    # Non-monotonic coordinate that doesn't vary
++    shared_coord = [5, 2, 8, 1]
++    
++    ds1 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(2, 4))
++        ),
++        coords=dict(
++            x=[1, 2],
++            y=shared_coord
++        )
++    )
++    
++    ds2 = xr.Dataset(
++        data_vars=dict(
++            data=(['x', 'y'], np.random.rand(3, 4))
++        ),
++        coords = dict(
++            x=[3, 4, 5],
++            y=shared_coord
++        )
++    )
++    
++    # Should work because y doesn't vary between datasets
++    result = xr.combine_by_coords((ds1, ds2))
++    assert result.dims == {'x': 5, 'y': 4}
++    assert list(result.y.values) == shared_coord
++    
++    # The resulting x coordinate should be monotonic
++    assert list(result.x.values) == [1, 2, 3, 4, 5]
++
++
++if __name__ == "__main__":
++    print("Running test_combine_by_coords_non_monotonic_identical...")
++    test_combine_by_coords_non_monotonic_identical()
++    print("✓ Passed")
++    
++    print("\nRunning test_combine_by_coords_varying_non_monotonic_should_fail...")
++    test_combine_by_coords_varying_non_monotonic_should_fail()
++    print("✓ Passed")
++    
++    print("\nRunning test_combine_by_coords_monotonic_check_only_concat_dims...")
++    test_combine_by_coords_monotonic_check_only_concat_dims()
++    print("✓ Passed")
++    
++    print("\nAll tests passed!")
+diff --git a/xarray/core/combine.py b/xarray/core/combine.py
+index 37ae903b..3a41c38e 100644
+--- a/xarray/core/combine.py
++++ b/xarray/core/combine.py
+@@ -501,7 +501,8 @@ def combine_by_coords(datasets, compat='no_conflicts', data_vars='all',
+                                    fill_value=fill_value)
+ 
+         # Check the overall coordinates are monotonically increasing
+-        for dim in concatenated.dims:
++        # Only check dimensions that were actually concatenated
++        for dim in concat_dims:
+             if dim in concatenated:
+                 indexes = concatenated.indexes.get(dim)
+                 if not (indexes.is_monotonic_increasing
+diff --git a/xarray/tests/test_combine.py b/xarray/tests/test_combine.py
+index 77e2993b..16c822c0 100644
+--- a/xarray/tests/test_combine.py
++++ b/xarray/tests/test_combine.py
+@@ -617,6 +617,39 @@ class TestCombineAuto:
+         with raises_regex(ValueError, "does not have monotonic global indexes"
+                                       " along dimension x"):
+             combine_by_coords([ds1, ds0])
++    
++    def test_combine_by_coords_non_monotonic_identical(self):
++        # Test that identical non-monotonic coordinates work correctly
++        # This is a regression test for issue where combine_by_coords
++        # incorrectly raised an error for non-monotonic coordinates
++        # that don't vary between datasets
++        yCoord = ['a', 'c', 'b']  # Non-monotonic
++        
++        ds1 = Dataset(
++            data_vars=dict(
++                data=(['x', 'y'], np.random.rand(3, 3))
++            ),
++            coords=dict(
++                x=[1, 2, 3],
++                y=yCoord
++            )
++        )
++        
++        ds2 = Dataset(
++            data_vars=dict(
++                data=(['x', 'y'], np.random.rand(4, 3))
++            ),
++            coords=dict(
++                x=[4, 5, 6, 7],
++                y=yCoord
++            )
++        )
++        
++        # This should work without error
++        result = combine_by_coords((ds1, ds2))
++        assert result.dims == {'x': 7, 'y': 3}
++        assert list(result.y.values) == yCoord
++        assert list(result.x.values) == [1, 2, 3, 4, 5, 6, 7]
+ 
+ 
+ @pytest.mark.filterwarnings("ignore:In xarray version 0.13 `auto_combine` "

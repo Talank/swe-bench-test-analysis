@@ -1,0 +1,419 @@
+diff --git a/demo_unicode_fix.py b/demo_unicode_fix.py
+new file mode 100644
+index 0000000000..b869c50337
+--- /dev/null
++++ b/demo_unicode_fix.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Demonstration of the Unicode fix for JSONField in Django admin"""
++import json
++from django.forms import JSONField
++
++print("=" * 70)
++print("DEMONSTRATION: Unicode characters in JSONField")
++print("=" * 70)
++
++# Create a JSONField instance
++field = JSONField()
++
++# Test data with various Unicode characters
++test_cases = [
++    {'language': 'Chinese', 'text': '中国', 'greeting': '你好'},
++    {'language': 'Japanese', 'text': '日本', 'greeting': 'こんにちは'},
++    {'language': 'Korean', 'text': '한국', 'greeting': '안녕하세요'},
++    {'language': 'Arabic', 'text': 'العربية', 'greeting': 'مرحبا'},
++    {'language': 'Russian', 'text': 'Россия', 'greeting': 'Привет'},
++    {'language': 'Greek', 'text': 'Ελλάδα', 'greeting': 'Γεια σου'},
++    {'language': 'Hebrew', 'text': 'עברית', 'greeting': 'שלום'},
++    {'language': 'Emoji', 'text': '😀🎉🌍', 'greeting': '👋'},
++]
++
++print("\nBEFORE FIX: json.dumps() with default ensure_ascii=True")
++print("-" * 70)
++for data in test_cases[:2]:  # Show just first two examples
++    escaped = json.dumps(data)
++    print(f"{data['language']:10} -> {escaped}")
++
++print("\nAFTER FIX: JSONField.prepare_value() with ensure_ascii=False")
++print("-" * 70)
++for data in test_cases:
++    prepared = field.prepare_value(data)
++    print(f"{data['language']:10} -> {prepared}")
++
++print("\n" + "=" * 70)
++print("✓ Unicode characters are now displayed properly in Django admin!")
++print("✓ No more \\uXXXX escape sequences for non-ASCII characters!")
++print("=" * 70)
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index a249f4cdbf..6c4e0091c0 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -81,7 +81,7 @@ class JSONField(CheckFieldDefaultMixin, Field):
+     def get_prep_value(self, value):
+         if value is None:
+             return value
+-        return json.dumps(value, cls=self.encoder)
++        return json.dumps(value, ensure_ascii=False, cls=self.encoder)
+ 
+     def get_transform(self, name):
+         transform = super().get_transform(name)
+@@ -92,7 +92,7 @@ class JSONField(CheckFieldDefaultMixin, Field):
+     def validate(self, value, model_instance):
+         super().validate(value, model_instance)
+         try:
+-            json.dumps(value, cls=self.encoder)
++            json.dumps(value, ensure_ascii=False, cls=self.encoder)
+         except TypeError:
+             raise exceptions.ValidationError(
+                 self.error_messages['invalid'],
+diff --git a/django/forms/fields.py b/django/forms/fields.py
+index 9de2c60b35..c4744ba969 100644
+--- a/django/forms/fields.py
++++ b/django/forms/fields.py
+@@ -1258,7 +1258,7 @@ class JSONField(CharField):
+     def prepare_value(self, value):
+         if isinstance(value, InvalidJSONInput):
+             return value
+-        return json.dumps(value, cls=self.encoder)
++        return json.dumps(value, ensure_ascii=False, cls=self.encoder)
+ 
+     def has_changed(self, initial, data):
+         if super().has_changed(initial, data):
+@@ -1266,6 +1266,6 @@ class JSONField(CharField):
+         # For purposes of seeing whether something has changed, True isn't the
+         # same as 1 and the order of keys doesn't matter.
+         return (
+-            json.dumps(initial, sort_keys=True, cls=self.encoder) !=
+-            json.dumps(self.to_python(data), sort_keys=True, cls=self.encoder)
++            json.dumps(initial, sort_keys=True, ensure_ascii=False, cls=self.encoder) !=
++            json.dumps(self.to_python(data), sort_keys=True, ensure_ascii=False, cls=self.encoder)
+         )
+diff --git a/test_admin_form_unicode.py b/test_admin_form_unicode.py
+new file mode 100644
+index 0000000000..f3f8ecaa02
+--- /dev/null
++++ b/test_admin_form_unicode.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test that JSONField form widget displays Unicode properly"""
++import json
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.db import models
++from django.forms import ModelForm
++
++# Create a test model with JSONField
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Create a ModelForm
++class TestModelForm(ModelForm):
++    class Meta:
++        model = TestModel
++        fields = ['data']
++
++# Test the form rendering
++print("Testing JSONField form rendering with Unicode characters...")
++print("-" * 60)
++
++# Create form instance with Unicode data
++unicode_data = {
++    'chinese': '中国',
++    'japanese': 'こんにちは',
++    'arabic': 'مرحبا',
++    'russian': 'Привет',
++    'emoji': '😀'
++}
++
++form = TestModelForm(initial={'data': unicode_data})
++
++# Get the rendered HTML
++html = str(form)
++print("Form HTML output:")
++print(html)
++print("-" * 60)
++
++# Check if Unicode characters are properly displayed
++if '中国' in html and 'こんにちは' in html and 'مرحبا' in html:
++    print("✓ SUCCESS: Unicode characters are displayed properly!")
++else:
++    print("✗ FAIL: Unicode characters are escaped")
++
++# Check if escaped Unicode is present
++if '\\u' in html:
++    print("✗ FAIL: Found escaped Unicode sequences")
++else:
++    print("✓ SUCCESS: No escaped Unicode sequences found")
+diff --git a/test_admin_unicode_json.py b/test_admin_unicode_json.py
+new file mode 100644
+index 0000000000..a42dcfd198
+--- /dev/null
++++ b/test_admin_unicode_json.py
+@@ -0,0 +1,105 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test that JSONField displays Unicode properly in admin"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++    ],
++    ROOT_URLCONF='test_admin_unicode_json',
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [
++                'django.template.context_processors.debug',
++                'django.template.context_processors.request',
++                'django.contrib.auth.context_processors.auth',
++                'django.contrib.messages.context_processors.messages',
++            ],
++        },
++    }],
++)
++
++django.setup()
++
++from django.db import models
++from django.contrib import admin
++from django.test import TestCase, Client
++from django.contrib.auth.models import User
++from django.urls import path
++
++# Create a test model with JSONField
++class TestModel(models.Model):
++    data = models.JSONField()
++    
++    class Meta:
++        app_label = 'test_admin_unicode_json'
++
++# Register the model in admin
++@admin.register(TestModel)
++class TestModelAdmin(admin.ModelAdmin):
++    pass
++
++# URL configuration
++urlpatterns = [
++    path('admin/', admin.site.urls),
++]
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test case
++class AdminJSONFieldUnicodeTest(TestCase):
++    def setUp(self):
++        self.client = Client()
++        self.user = User.objects.create_superuser('admin', 'admin@test.com', 'password')
++        self.client.login(username='admin', password='password')
++        
++    def test_unicode_display_in_admin_form(self):
++        """Test that Unicode characters are displayed properly in admin forms"""
++        # Create a test object with Unicode data
++        obj = TestModel.objects.create(data={'name': '中国', 'city': '北京', 'greeting': 'こんにちは'})
++        
++        # Get the admin change form
++        response = self.client.get(f'/admin/test_admin_unicode_json/testmodel/{obj.pk}/change/')
++        self.assertEqual(response.status_code, 200)
++        
++        # Check that Unicode characters are not escaped
++        content = response.content.decode('utf-8')
++        self.assertIn('中国', content)
++        self.assertIn('北京', content)
++        self.assertIn('こんにちは', content)
++        
++        # Make sure escaped Unicode is NOT present
++        self.assertNotIn('\\u4e2d\\u56fd', content)  # 中国
++        self.assertNotIn('\\u5317\\u4eac', content)  # 北京
++        self.assertNotIn('\\u3053\\u3093\\u306b\\u3061\\u306f', content)  # こんにちは
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/test_unicode_json.py b/test_unicode_json.py
+new file mode 100644
+index 0000000000..033c3f2013
+--- /dev/null
++++ b/test_unicode_json.py
+@@ -0,0 +1,28 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++import json
++import sys
++from django.forms import JSONField
++
++# Test the issue with Chinese characters
++field = JSONField()
++
++# Test data with Chinese characters
++test_data = {'name': '中国', 'city': '北京'}
++
++# Prepare the value (this is what happens in the admin)
++prepared = field.prepare_value(test_data)
++print("Prepared value:", prepared)
++
++# Expected value with ensure_ascii=False
++expected = json.dumps(test_data, ensure_ascii=False)
++if sys.version_info[0] == 2:
++    print("Expected value:", expected.encode('utf-8'))
++else:
++    print("Expected value:", expected)
++
++# Check if Chinese characters are escaped
++if '\\u' in prepared:
++    print("\nISSUE CONFIRMED: Chinese characters are being escaped as Unicode sequences")
++else:
++    print("\nNo issue found: Chinese characters are displayed properly")
+diff --git a/test_unicode_jsonfield.py b/test_unicode_jsonfield.py
+new file mode 100644
+index 0000000000..31d4bb1dae
+--- /dev/null
++++ b/test_unicode_jsonfield.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test case for Unicode characters in JSONField"""
++import json
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.test import SimpleTestCase
++from django.forms import JSONField
++
++
++class JSONFieldUnicodeTest(SimpleTestCase):
++    def test_unicode_characters_not_escaped(self):
++        """Test that Unicode characters are not escaped in JSONField prepare_value"""
++        field = JSONField()
++        
++        # Test with Chinese characters
++        chinese_data = {'name': '中国', 'city': '北京'}
++        prepared = field.prepare_value(chinese_data)
++        self.assertIn('中国', prepared)
++        self.assertIn('北京', prepared)
++        self.assertNotIn('\\u', prepared)
++        
++        # Test with other Unicode characters
++        unicode_data = {
++            'russian': 'Привет',
++            'japanese': 'こんにちは',
++            'arabic': 'مرحبا',
++            'emoji': '😀'
++        }
++        prepared = field.prepare_value(unicode_data)
++        self.assertIn('Привет', prepared)
++        self.assertIn('こんにちは', prepared)
++        self.assertIn('مرحبا', prepared)
++        self.assertIn('😀', prepared)
++        self.assertNotIn('\\u', prepared)
++    
++    def test_has_changed_with_unicode(self):
++        """Test that has_changed works correctly with Unicode characters"""
++        field = JSONField()
++        
++        # Test that identical Unicode data is not considered changed
++        data1 = {'text': '中国'}
++        json_str = '{"text": "中国"}'
++        self.assertFalse(field.has_changed(data1, json_str))
++        
++        # Test that different Unicode data is considered changed
++        data2 = {'text': '日本'}
++        self.assertTrue(field.has_changed(data1, json.dumps(data2)))
++
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/tests/forms_tests/field_tests/test_jsonfield.py b/tests/forms_tests/field_tests/test_jsonfield.py
+index 915b180d0c..7815021e61 100644
+--- a/tests/forms_tests/field_tests/test_jsonfield.py
++++ b/tests/forms_tests/field_tests/test_jsonfield.py
+@@ -108,3 +108,41 @@ class JSONFieldTest(SimpleTestCase):
+         form = JSONForm({'name': 'xy', 'json_field': '{"foo"}'})
+         self.assertEqual(form.errors['json_field'], ['Enter a valid JSON.'])
+         self.assertIn('{&quot;foo&quot;}</textarea>', form.as_p())
++
++    def test_unicode_characters_not_escaped(self):
++        """Unicode characters should not be escaped in JSONField prepare_value."""
++        field = JSONField()
++        
++        # Test with Chinese characters
++        chinese_data = {'name': '中国', 'city': '北京'}
++        prepared = field.prepare_value(chinese_data)
++        self.assertIn('中国', prepared)
++        self.assertIn('北京', prepared)
++        self.assertNotIn('\\u', prepared)
++        
++        # Test with other Unicode characters
++        unicode_data = {
++            'russian': 'Привет',
++            'japanese': 'こんにちは',
++            'arabic': 'مرحبا',
++            'emoji': '😀'
++        }
++        prepared = field.prepare_value(unicode_data)
++        self.assertIn('Привет', prepared)
++        self.assertIn('こんにちは', prepared)
++        self.assertIn('مرحبا', prepared)
++        self.assertIn('😀', prepared)
++        self.assertNotIn('\\u', prepared)
++    
++    def test_has_changed_with_unicode(self):
++        """has_changed() should work correctly with Unicode characters."""
++        field = JSONField()
++        
++        # Test that identical Unicode data is not considered changed
++        data1 = {'text': '中国'}
++        json_str = '{"text": "中国"}'
++        self.assertFalse(field.has_changed(data1, json_str))
++        
++        # Test that different Unicode data is considered changed
++        data2 = {'text': '日本'}
++        self.assertTrue(field.has_changed(data1, json.dumps(data2)))

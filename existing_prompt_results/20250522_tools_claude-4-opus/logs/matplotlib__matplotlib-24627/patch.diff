@@ -1,0 +1,359 @@
+diff --git a/lib/matplotlib/axes/_base.py b/lib/matplotlib/axes/_base.py
+index 90b0bf117e..4c6a49ae66 100644
+--- a/lib/matplotlib/axes/_base.py
++++ b/lib/matplotlib/axes/_base.py
+@@ -1308,6 +1308,10 @@ class _AxesBase(martist.Artist):
+         self._get_patches_for_fill = _process_plot_var_args(self, 'fill')
+ 
+         self._gridOn = mpl.rcParams['axes.grid']
++        # Unset the axes and figure attributes of all children before clearing
++        for child in self._children:
++            child.axes = None
++            child.figure = None
+         self._children = []
+         self._mouseover_set = _OrderedSet()
+         self.child_axes = []
+diff --git a/lib/matplotlib/figure.py b/lib/matplotlib/figure.py
+index 6c18ba1a64..d48e834be3 100644
+--- a/lib/matplotlib/figure.py
++++ b/lib/matplotlib/figure.py
+@@ -949,6 +949,20 @@ default: %(va)s
+             ax.clear()
+             self.delaxes(ax)  # Remove ax from self._axstack.
+ 
++        # Unset the figure attribute of all artists before clearing
++        for artist in self.artists:
++            artist.figure = None
++        for line in self.lines:
++            line.figure = None
++        for patch in self.patches:
++            patch.figure = None
++        for text in self.texts:
++            text.figure = None
++        for image in self.images:
++            image.figure = None
++        for legend in self.legends:
++            legend.figure = None
++        
+         self.artists = []
+         self.lines = []
+         self.patches = []
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..64127bd3ee
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,30 @@
++import matplotlib.pyplot as plt
++
++# Test case 1: remove() correctly unsets .axes
++print("Test case 1: remove() behavior")
++f, a = plt.subplots()
++l, = a.plot([1, 2])
++print(f"Before remove: l.axes = {l.axes}")
++l.remove()
++print(f"After remove: l.axes = {l.axes}")
++print()
++
++# Test case 2: cla() does not unset .axes (this is the bug)
++print("Test case 2: cla() behavior")
++f, a = plt.subplots()
++l, = a.plot([1, 2])
++print(f"Before cla: l.axes = {l.axes}")
++a.cla()
++print(f"After cla: l.axes = {l.axes}")
++print()
++
++# Test case 3: clf() behavior with figure attribute
++print("Test case 3: clf() behavior")
++f = plt.figure()
++a = f.add_subplot(111)
++l, = a.plot([1, 2])
++print(f"Before clf: l.figure = {l.figure}")
++print(f"Before clf: l.axes = {l.axes}")
++f.clf()
++print(f"After clf: l.figure = {l.figure}")
++print(f"After clf: l.axes = {l.axes}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..499b8d38c7
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,73 @@
++import matplotlib.pyplot as plt
++import matplotlib.patches as mpatches
++
++def test_cla_unsets_attributes():
++    """Test that cla() unsets axes and figure attributes for various artist types."""
++    fig, ax = plt.subplots()
++    
++    # Create various types of artists
++    line, = ax.plot([1, 2, 3], [1, 2, 3], label='line')
++    scatter = ax.scatter([1, 2, 3], [3, 2, 1], label='scatter')
++    patch = mpatches.Rectangle((0.1, 0.1), 0.5, 0.5)
++    ax.add_patch(patch)
++    text = ax.text(0.5, 0.5, 'Hello')
++    
++    # Store references to check later
++    artists = [line, scatter, patch, text]
++    
++    # Verify all artists have axes and figure set
++    print("Before cla():")
++    for artist in artists:
++        print(f"  {type(artist).__name__}: axes={artist.axes}, figure={artist.figure}")
++        assert artist.axes is not None
++        assert artist.figure is not None
++    
++    # Clear the axes
++    ax.cla()
++    
++    # Verify all artists have axes and figure unset
++    print("\nAfter cla():")
++    for artist in artists:
++        print(f"  {type(artist).__name__}: axes={artist.axes}, figure={artist.figure}")
++        assert artist.axes is None
++        assert artist.figure is None
++    
++    print("\nTest passed!")
++
++def test_clf_unsets_attributes():
++    """Test that clf() unsets figure attributes for various artist types."""
++    fig = plt.figure()
++    ax1 = fig.add_subplot(121)
++    ax2 = fig.add_subplot(122)
++    
++    # Create artists in both axes
++    line1, = ax1.plot([1, 2, 3], [1, 2, 3])
++    line2, = ax2.plot([1, 2, 3], [3, 2, 1])
++    
++    # Add figure-level artists
++    fig_text = fig.text(0.5, 0.95, 'Figure Title')
++    
++    # Store references
++    artists = [line1, line2, fig_text]
++    
++    # Verify all artists have figure set
++    print("\nBefore clf():")
++    for artist in artists:
++        print(f"  {type(artist).__name__}: figure={artist.figure}")
++        assert artist.figure is not None
++    
++    # Clear the figure
++    fig.clf()
++    
++    # Verify all artists have figure unset
++    print("\nAfter clf():")
++    for artist in artists:
++        print(f"  {type(artist).__name__}: figure={artist.figure}")
++        # Note: fig_text should have figure=None after clf()
++        assert artist.figure is None
++    
++    print("\nTest passed!")
++
++if __name__ == "__main__":
++    test_cla_unsets_attributes()
++    test_clf_unsets_attributes()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..d93ede587b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,87 @@
++"""Test edge cases for the fix."""
++import matplotlib.pyplot as plt
++import numpy as np
++
++def test_shared_axes():
++    """Test that cla() works correctly with shared axes."""
++    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
++    
++    # Create artists in both axes
++    line1, = ax1.plot([1, 2, 3], [1, 2, 3])
++    line2, = ax2.plot([1, 2, 3], [3, 2, 1])
++    
++    # Clear only the first axes
++    ax1.cla()
++    
++    # Check that line1's attributes are unset but line2's are not
++    assert line1.axes is None
++    assert line1.figure is None
++    assert line2.axes is ax2
++    assert line2.figure is fig
++    
++    print("Shared axes test passed!")
++
++def test_nested_artists():
++    """Test with nested artists like legends."""
++    fig, ax = plt.subplots()
++    
++    line, = ax.plot([1, 2, 3], [1, 2, 3], label='test')
++    legend = ax.legend()
++    
++    # Get the legend artists
++    legend_lines = legend.get_lines()
++    
++    # Clear the axes
++    ax.cla()
++    
++    # Check that all artists have unset attributes
++    assert line.axes is None
++    assert line.figure is None
++    # Note: legend is also removed and its artists should be cleaned up
++    
++    print("Nested artists test passed!")
++
++def test_multiple_clear():
++    """Test that multiple cla() calls don't cause issues."""
++    fig, ax = plt.subplots()
++    
++    line, = ax.plot([1, 2, 3], [1, 2, 3])
++    
++    # Clear multiple times
++    ax.cla()
++    assert line.axes is None
++    assert line.figure is None
++    
++    # Clearing again should not cause any errors
++    ax.cla()
++    
++    print("Multiple clear test passed!")
++
++def test_mixed_artists():
++    """Test with different types of artists."""
++    fig, ax = plt.subplots()
++    
++    # Create various artists
++    line, = ax.plot([1, 2], [1, 2])
++    scatter = ax.scatter([1.5], [1.5])
++    bar_container = ax.bar([1, 2], [1, 2])
++    text = ax.text(1.5, 1.5, 'test')
++    
++    artists = [line, scatter, text] + list(bar_container)
++    
++    # Clear axes
++    ax.cla()
++    
++    # Check all artists
++    for artist in artists:
++        assert artist.axes is None, f"{type(artist).__name__}.axes should be None"
++        assert artist.figure is None, f"{type(artist).__name__}.figure should be None"
++    
++    print("Mixed artists test passed!")
++
++if __name__ == "__main__":
++    test_shared_axes()
++    test_nested_artists() 
++    test_multiple_clear()
++    test_mixed_artists()
++    print("\nAll edge case tests passed!")
+diff --git a/test_issue_fix.py b/test_issue_fix.py
+new file mode 100644
+index 0000000000..666419fcad
+--- /dev/null
++++ b/test_issue_fix.py
+@@ -0,0 +1,32 @@
++"""Test that reproduces the exact issue from the problem statement."""
++import matplotlib.pyplot as plt
++
++def test_issue():
++    # Test case from problem statement
++    print("Testing the exact issue from problem statement:")
++    
++    # First test: remove() should unset .axes (this was already working)
++    f, a = plt.subplots()
++    l, = a.plot([1, 2])
++    l.remove()
++    print(f"After remove(): l.axes = {l.axes}")
++    assert l.axes is None, "remove() should unset .axes attribute"
++    
++    # Second test: cla() should also unset .axes (this was the bug)
++    f, a = plt.subplots()
++    l, = a.plot([1, 2])
++    a.cla()
++    print(f"After cla(): l.axes = {l.axes}")
++    assert l.axes is None, "cla() should unset .axes attribute"
++    
++    # Additional test: clf() should unset .figure attribute
++    f, a = plt.subplots()
++    l, = a.plot([1, 2])
++    f.clf()
++    print(f"After clf(): l.figure = {l.figure}")
++    assert l.figure is None, "clf() should unset .figure attribute"
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_issue()
+diff --git a/test_mouseover.py b/test_mouseover.py
+new file mode 100644
+index 0000000000..ed7a221f28
+--- /dev/null
++++ b/test_mouseover.py
+@@ -0,0 +1,32 @@
++"""Test mouseover functionality after clear."""
++import matplotlib.pyplot as plt
++
++def test_mouseover_after_clear():
++    """Test that mouseover set is properly handled after clear."""
++    fig, ax = plt.subplots()
++    
++    # Create a line with mouseover enabled
++    line, = ax.plot([1, 2, 3], [1, 2, 3])
++    line.set_mouseover(True)
++    
++    # Verify it's in the mouseover set
++    assert line in ax._mouseover_set
++    
++    # Clear the axes
++    ax.cla()
++    
++    # Verify the mouseover set is empty
++    assert len(ax._mouseover_set) == 0
++    
++    # Create a new line with mouseover
++    new_line, = ax.plot([1, 2, 3], [3, 2, 1])
++    new_line.set_mouseover(True)
++    
++    # Verify the new line is in the mouseover set
++    assert new_line in ax._mouseover_set
++    assert line not in ax._mouseover_set
++    
++    print("Mouseover test passed!")
++
++if __name__ == "__main__":
++    test_mouseover_after_clear()
+diff --git a/test_smoke.py b/test_smoke.py
+new file mode 100644
+index 0000000000..76548988e9
+--- /dev/null
++++ b/test_smoke.py
+@@ -0,0 +1,29 @@
++"""Basic smoke test to ensure plotting still works."""
++import matplotlib.pyplot as plt
++import numpy as np
++
++# Test basic plotting
++fig, ax = plt.subplots()
++x = np.linspace(0, 10, 100)
++line, = ax.plot(x, np.sin(x), label='sin')
++
++# Test that the line has proper attributes
++assert line.axes is ax
++assert line.figure is fig
++
++# Clear and plot again
++ax.cla()
++assert line.axes is None
++assert line.figure is None
++
++# Plot again after clear
++line2, = ax.plot(x, np.cos(x), label='cos')
++assert line2.axes is ax
++assert line2.figure is fig
++
++# Test figure clear
++fig.clf()
++assert line2.axes is None
++assert line2.figure is None
++
++print("Smoke test passed! Basic plotting functionality works correctly.")

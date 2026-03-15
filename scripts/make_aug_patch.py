@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+Exaple: python make_aug_patch.py --patch ../existing_prompt_results/20250522_tools_claude-4-opus/logs/astropy__astropy-13398/patch.diff --traj ../existing_prompt_results/20250522_tools_claude-4-opus/trajs/astropy__astropy-13398.txt -o aug_astropy__astropy-13398.diff
 make_aug_patch.py
 =================
 Produces aug_patch.diff from a SWE-bench patch.diff + trajectory file.
@@ -493,7 +494,7 @@ def main():
     if args.report and not Path(args.report).exists():
         ap.error(f"--report not found: {args.report}")
 
-    os.makedirs(os.path.join(os.getcwd(), "output", args.output), exist_ok=True)
+    os.makedirs(os.path.join(os.getcwd(), "output"), exist_ok=True)
 
     pipeline = AugPatchPipeline(verbose=args.verbose, debug=args.debug)
     summary  = pipeline.run(

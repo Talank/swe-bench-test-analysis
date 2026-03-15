@@ -1,0 +1,217 @@
+diff --git a/debug_comparison.py b/debug_comparison.py
+new file mode 100644
+index 0000000000..f070a7d583
+--- /dev/null
++++ b/debug_comparison.py
+@@ -0,0 +1,24 @@
++from sympy import S, Float
++from sympy.core.sympify import _sympify
++
++# Test what happens during comparison
++class DebugFloat(Float):
++    def __eq__(self, other):
++        print(f"DebugFloat.__eq__ called with other={other}, type={type(other)}")
++        original_other = other
++        try:
++            other = _sympify(other)
++            print(f"After sympify: other={other}, type={type(other)}")
++        except:
++            pass
++        return super().__eq__(original_other)
++
++# Create a debug float
++df = DebugFloat(0.0)
++print("Testing df == False:")
++result = df == False
++print(f"Result: {result}\n")
++
++print("Testing df == S.false:")
++result = df == S.false
++print(f"Result: {result}")
+diff --git a/sympy/core/numbers.py b/sympy/core/numbers.py
+index 79f6a7d165..09f12a94ec 100644
+--- a/sympy/core/numbers.py
++++ b/sympy/core/numbers.py
+@@ -1382,14 +1382,27 @@ def __int__(self):
+ 
+     def __eq__(self, other):
+         from sympy.logic.boolalg import Boolean
++        # Store original value to check if it was a Python bool
++        orig_other = other
+         try:
+             other = _sympify(other)
+         except SympifyError:
+             return NotImplemented
+-        if not self:
+-            return not other
++        # Special handling for Python bool
++        if isinstance(orig_other, bool):
++            # Use Python's semantics for bool comparison
++            # In Python: 0.0 == False is True, 1.0 == True is True
++            if not self:
++                return not orig_other
++            elif self == 1:
++                return orig_other
++            else:
++                return False
++        # For SymPy Boolean, always return False
+         if isinstance(other, Boolean):
+             return False
++        if not self:
++            return not other
+         if other.is_NumberSymbol:
+             if other.is_irrational:
+                 return False
+diff --git a/sympy/core/tests/test_numbers.py b/sympy/core/tests/test_numbers.py
+index 8b3e99126e..8b63922913 100644
+--- a/sympy/core/tests/test_numbers.py
++++ b/sympy/core/tests/test_numbers.py
+@@ -1670,6 +1670,9 @@ def test_bool_eq():
+     assert 0 == False
+     assert S(0) == False
+     assert S(0) != S.false
++    assert S(0.0) == False
++    assert S(0.0) != S.false
++    assert S.false != S(0.0)
+     assert 1 == True
+     assert S.One == True
+     assert S.One != S.true
+diff --git a/test_boolean_comparison.py b/test_boolean_comparison.py
+new file mode 100644
+index 0000000000..3ffa96d1a9
+--- /dev/null
++++ b/test_boolean_comparison.py
+@@ -0,0 +1,49 @@
++from sympy import S, Float, Rational, Integer, true, false
++
++def test_boolean_number_comparison():
++    """Test that comparisons between Boolean and numeric types are consistent."""
++    
++    # Test with S.false
++    print("Testing S.false comparisons:")
++    assert (S(0.0) == S.false) == False
++    assert (S.false == S(0.0)) == False
++    assert (S(0) == S.false) == False
++    assert (S.false == S(0)) == False
++    assert (Float(0.0) == S.false) == False
++    assert (S.false == Float(0.0)) == False
++    assert (Integer(0) == S.false) == False
++    assert (S.false == Integer(0)) == False
++    assert (Rational(0, 1) == S.false) == False
++    assert (S.false == Rational(0, 1)) == False
++    
++    # Test with S.true
++    print("Testing S.true comparisons:")
++    assert (S(1.0) == S.true) == False
++    assert (S.true == S(1.0)) == False
++    assert (S(1) == S.true) == False
++    assert (S.true == S(1)) == False
++    assert (Float(1.0) == S.true) == False
++    assert (S.true == Float(1.0)) == False
++    assert (Integer(1) == S.true) == False
++    assert (S.true == Integer(1)) == False
++    assert (Rational(1, 1) == S.true) == False
++    assert (S.true == Rational(1, 1)) == False
++    
++    # Test with non-zero/non-one values
++    print("Testing non-zero/non-one comparisons:")
++    assert (S(2.5) == S.false) == False
++    assert (S.false == S(2.5)) == False
++    assert (S(2.5) == S.true) == False
++    assert (S.true == S(2.5)) == False
++    
++    # Test with Python bool values (these should work differently)
++    print("Testing Python bool comparisons:")
++    assert (S(0) == False) == True
++    assert (S(0.0) == False) == True
++    assert (S(1) == True) == True
++    assert (S(1.0) == True) == True
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_boolean_number_comparison()
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 0000000000..2d8bcbdcb8
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,34 @@
++from sympy import S, Float, true, false
++
++def test_boolean_comparisons():
++    """Test that the issue is fixed."""
++    # Original issue: these should be consistent
++    assert (S(0.0) == S.false) == False
++    assert (S.false == S(0.0)) == False
++    
++    # Should be consistent with S(0)
++    assert (S(0) == S.false) == False
++    assert (S.false == S(0)) == False
++    
++    # Python bool comparisons should still work
++    assert (S(0.0) == False) == True
++    assert (S(0.0) == True) == False
++    assert (S(0) == False) == True
++    assert (S(0) == True) == False
++    
++    # Non-zero floats
++    assert (S(1.0) == S.true) == False
++    assert (S.true == S(1.0)) == False
++    assert (S(1.0) == True) == True
++    assert (S(1.0) == False) == False
++    
++    # Direct Float instances
++    assert (Float(0.0) == S.false) == False
++    assert (S.false == Float(0.0)) == False
++    assert (Float(0.0) == False) == True
++    assert (Float(0.0) == True) == False
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_boolean_comparisons()
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..a6b6cfa07d
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,38 @@
++from sympy import S, Float
++from sympy.logic.boolalg import BooleanFalse
++
++# Test the issue
++print("S(0.0) == S.false:", S(0.0) == S.false)
++print("S.false == S(0.0):", S.false == S(0.0))
++print("S(0) == S.false:", S(0) == S.false)
++print("S.false == S(0):", S.false == S(0))
++
++# Check types
++print("\nTypes:")
++print("type(S(0.0)):", type(S(0.0)))
++print("type(S.false):", type(S.false))
++print("type(S(0)):", type(S(0)))
++
++# Check the __eq__ methods
++print("\nChecking __eq__ methods:")
++print("Float.__eq__:", Float.__eq__)
++print("BooleanFalse.__eq__:", BooleanFalse.__eq__)
++
++# Check what happens when sympifying
++from sympy.core.sympify import _sympify
++print("\n_sympify(S.false):", _sympify(S.false))
++print("type(_sympify(S.false)):", type(_sympify(S.false)))
++
++# Check hashable content
++print("\nHashable content:")
++print("S(0.0)._hashable_content():", S(0.0)._hashable_content())
++print("S.false._hashable_content():", S.false._hashable_content())
++print("S(0)._hashable_content():", S(0)._hashable_content())
++
++# Check if Float(0.0) is considered zero
++print("\nIs zero checks:")
++print("S(0.0).is_zero:", S(0.0).is_zero)
++print("S(0).is_zero:", S(0).is_zero)
++print("hasattr(S.false, 'is_zero'):", hasattr(S.false, 'is_zero'))
++if hasattr(S.false, 'is_zero'):
++    print("S.false.is_zero:", S.false.is_zero)

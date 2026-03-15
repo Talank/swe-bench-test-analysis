@@ -1,0 +1,409 @@
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index ee45bb941e..c9a8fab74f 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -763,8 +763,10 @@ class Field(RegisterLookupMixin):
+             if not getattr(cls, self.attname, None):
+                 setattr(cls, self.attname, self.descriptor_class(self))
+         if self.choices is not None:
+-            setattr(cls, 'get_%s_display' % self.name,
+-                    partialmethod(cls._get_FIELD_display, field=self))
++            # Don't override custom get_FOO_display() methods
++            if not hasattr(cls, 'get_%s_display' % self.name):
++                setattr(cls, 'get_%s_display' % self.name,
++                        partialmethod(cls._get_FIELD_display, field=self))
+ 
+     def get_filter_kwargs_for_object(self, obj):
+         """
+diff --git a/test_comprehensive_get_display.py b/test_comprehensive_get_display.py
+new file mode 100644
+index 0000000000..946d818d4c
+--- /dev/null
++++ b/test_comprehensive_get_display.py
+@@ -0,0 +1,111 @@
++"""Comprehensive test for get_FOO_display override functionality."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++# Setup Django
++django.setup()
++
++from django.db import models
++from django.db import connection
++
++# Test 1: Model with custom get_FOO_display method
++class ModelWithCustomDisplay(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    def get_status_display(self):
++        return f"Custom: {self.status}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test 2: Model without custom get_FOO_display method (should use default)
++class ModelWithDefaultDisplay(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test 3: Model with inheritance
++class BaseModel(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    def get_status_display(self):
++        return f"Base: {self.status}"
++    
++    class Meta:
++        app_label = 'test_app'
++        abstract = True
++
++class InheritedModel(BaseModel):
++    class Meta:
++        app_label = 'test_app'
++
++# Test 4: Model with overridden method in child
++class InheritedModelWithOverride(BaseModel):
++    def get_status_display(self):
++        return f"Child: {self.status}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ModelWithCustomDisplay)
++    schema_editor.create_model(ModelWithDefaultDisplay)
++    schema_editor.create_model(InheritedModel)
++    schema_editor.create_model(InheritedModelWithOverride)
++
++# Run tests
++print("Test 1: Model with custom get_FOO_display method")
++obj1 = ModelWithCustomDisplay(status='a')
++result1 = obj1.get_status_display()
++print(f"  Result: {result1}")
++print(f"  Expected: 'Custom: a'")
++print(f"  Pass: {result1 == 'Custom: a'}")
++
++print("\nTest 2: Model without custom method (should use default)")
++obj2 = ModelWithDefaultDisplay(status='a')
++result2 = obj2.get_status_display()
++print(f"  Result: {result2}")
++print(f"  Expected: 'Active'")
++print(f"  Pass: {result2 == 'Active'}")
++
++print("\nTest 3: Model with inheritance from abstract base")
++obj3 = InheritedModel(status='a')
++result3 = obj3.get_status_display()
++print(f"  Result: {result3}")
++print(f"  Expected: 'Base: a'")
++print(f"  Pass: {result3 == 'Base: a'}")
++
++print("\nTest 4: Model with overridden method in child")
++obj4 = InheritedModelWithOverride(status='a')
++result4 = obj4.get_status_display()
++print(f"  Result: {result4}")
++print(f"  Expected: 'Child: a'")
++print(f"  Pass: {result4 == 'Child: a'}")
++
++# Test with None/empty values
++print("\nTest 5: Handling None/empty values")
++obj5 = ModelWithDefaultDisplay(status='x')  # Invalid choice
++result5 = obj5.get_status_display()
++print(f"  Result: {result5}")
++print(f"  Expected: 'x' (fallback to raw value)")
++print(f"  Pass: {result5 == 'x'}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..9f51f84f39
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,110 @@
++"""Test edge cases for get_FOO_display override."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++# Setup Django
++django.setup()
++
++from django.db import models
++from django.db import connection
++
++# Edge case 1: Property decorator
++class ModelWithProperty(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    @property
++    def get_status_display(self):
++        return f"Property: {self.status}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Edge case 2: Classmethod (should not be overridden)
++class ModelWithClassmethod(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    @classmethod
++    def get_status_display(cls):
++        return "Classmethod"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Edge case 3: Staticmethod
++class ModelWithStaticmethod(models.Model):
++    status = models.CharField(choices=[('a', 'Active'), ('i', 'Inactive')], max_length=1)
++    
++    @staticmethod
++    def get_status_display():
++        return "Staticmethod"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Edge case 4: Field without choices should not create get_FOO_display
++class ModelWithoutChoices(models.Model):
++    status = models.CharField(max_length=1)
++    
++    def get_status_display(self):
++        return f"Custom without choices: {self.status}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(ModelWithProperty)
++    schema_editor.create_model(ModelWithClassmethod)
++    schema_editor.create_model(ModelWithStaticmethod)
++    schema_editor.create_model(ModelWithoutChoices)
++
++# Run tests
++print("Edge case 1: Property decorator")
++obj1 = ModelWithProperty(status='a')
++try:
++    result1 = obj1.get_status_display
++    print(f"  Result: {result1}")
++    print(f"  Type: {type(obj1.__class__.get_status_display)}")
++    print(f"  Pass: Property is preserved")
++except Exception as e:
++    print(f"  Error: {e}")
++
++print("\nEdge case 2: Classmethod")
++obj2 = ModelWithClassmethod(status='a')
++result2 = ModelWithClassmethod.get_status_display()
++print(f"  Result: {result2}")
++print(f"  Expected: 'Classmethod'")
++print(f"  Pass: {result2 == 'Classmethod'}")
++
++print("\nEdge case 3: Staticmethod")
++obj3 = ModelWithStaticmethod(status='a')
++result3 = ModelWithStaticmethod.get_status_display()
++print(f"  Result: {result3}")
++print(f"  Expected: 'Staticmethod'")
++print(f"  Pass: {result3 == 'Staticmethod'}")
++
++print("\nEdge case 4: Field without choices")
++obj4 = ModelWithoutChoices(status='a')
++result4 = obj4.get_status_display()
++print(f"  Result: {result4}")
++print(f"  Expected: 'Custom without choices: a'")
++print(f"  Pass: {result4 == 'Custom without choices: a'}")
++print(f"  Note: Method should remain since field has no choices")
+diff --git a/test_get_display_override.py b/test_get_display_override.py
+new file mode 100644
+index 0000000000..6a903d09aa
+--- /dev/null
++++ b/test_get_display_override.py
+@@ -0,0 +1,55 @@
++"""Test script to reproduce the get_FOO_display override issue."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++# Setup Django
++django.setup()
++
++# Now we can import Django models
++from django.db import models
++
++# Create a test model
++class FooBar(models.Model):
++    foo_bar = models.CharField("foo", choices=[(1, 'foo'), (2, 'bar')], max_length=10)
++    
++    def __str__(self):
++        return self.get_foo_bar_display()
++    
++    def get_foo_bar_display(self):
++        return "something"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(FooBar)
++
++# Test the behavior
++instance = FooBar(foo_bar='1')
++print(f"get_foo_bar_display() returns: {instance.get_foo_bar_display()}")
++print(f"Expected: 'something'")
++print(f"Actual behavior shows it returns: {instance.get_foo_bar_display()}")
++
++# Check if our custom method is being overridden
++print(f"\nMethod type: {type(instance.get_foo_bar_display)}")
++print(f"Is it a partialmethod? {type(instance.get_foo_bar_display).__name__ == 'partialmethod'}")
+diff --git a/test_get_foo_display_override.py b/test_get_foo_display_override.py
+new file mode 100644
+index 0000000000..69ad81f306
+--- /dev/null
++++ b/test_get_foo_display_override.py
+@@ -0,0 +1,92 @@
++"""
++Test for custom get_FOO_display() method override functionality.
++This test should be added to Django's test suite.
++"""
++from django.db import models
++from django.test import TestCase
++
++
++class GetFooDisplayOverrideTests(TestCase):
++    """Test that custom get_FOO_display methods can be overridden."""
++    
++    def test_custom_get_foo_display_override(self):
++        """Test that a custom get_FOO_display method is not overridden by Django."""
++        
++        class TestModel(models.Model):
++            status = models.CharField(
++                max_length=1,
++                choices=[('a', 'Active'), ('i', 'Inactive')]
++            )
++            
++            def get_status_display(self):
++                return f"Custom: {self.status}"
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        obj = TestModel(status='a')
++        self.assertEqual(obj.get_status_display(), 'Custom: a')
++        
++    def test_default_get_foo_display_when_not_overridden(self):
++        """Test that default get_FOO_display works when not overridden."""
++        
++        class TestModel(models.Model):
++            status = models.CharField(
++                max_length=1,
++                choices=[('a', 'Active'), ('i', 'Inactive')]
++            )
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        obj = TestModel(status='a')
++        self.assertEqual(obj.get_status_display(), 'Active')
++        
++    def test_inherited_get_foo_display_override(self):
++        """Test that inherited get_FOO_display methods work correctly."""
++        
++        class BaseModel(models.Model):
++            status = models.CharField(
++                max_length=1,
++                choices=[('a', 'Active'), ('i', 'Inactive')]
++            )
++            
++            def get_status_display(self):
++                return f"Base: {self.status}"
++            
++            class Meta:
++                app_label = 'test_app'
++                abstract = True
++        
++        class ChildModel(BaseModel):
++            class Meta:
++                app_label = 'test_app'
++        
++        obj = ChildModel(status='a')
++        self.assertEqual(obj.get_status_display(), 'Base: a')
++        
++    def test_child_override_of_parent_get_foo_display(self):
++        """Test that child can override parent's get_FOO_display method."""
++        
++        class BaseModel(models.Model):
++            status = models.CharField(
++                max_length=1,
++                choices=[('a', 'Active'), ('i', 'Inactive')]
++            )
++            
++            def get_status_display(self):
++                return f"Base: {self.status}"
++            
++            class Meta:
++                app_label = 'test_app'
++                abstract = True
++        
++        class ChildModel(BaseModel):
++            def get_status_display(self):
++                return f"Child: {self.status}"
++                
++            class Meta:
++                app_label = 'test_app'
++        
++        obj = ChildModel(status='a')
++        self.assertEqual(obj.get_status_display(), 'Child: a')

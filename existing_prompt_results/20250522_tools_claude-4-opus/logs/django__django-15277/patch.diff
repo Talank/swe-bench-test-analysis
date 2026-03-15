@@ -1,0 +1,211 @@
+diff --git a/benchmark_value_resolve.py b/benchmark_value_resolve.py
+new file mode 100644
+index 0000000000..c886d2107c
+--- /dev/null
++++ b/benchmark_value_resolve.py
+@@ -0,0 +1,53 @@
++"""Benchmark the performance improvement of Value._resolve_output_field."""
++import time
++import statistics
++from django.db.models import Value
++
++def benchmark_resolve_output_field(iterations=100000, runs=5):
++    """Benchmark Value._resolve_output_field performance."""
++    x = Value('test')
++    
++    times = []
++    for run in range(runs):
++        start = time.perf_counter()
++        for _ in range(iterations):
++            x._resolve_output_field()
++        end = time.perf_counter()
++        times.append(end - start)
++    
++    avg_time = statistics.mean(times)
++    std_dev = statistics.stdev(times) if len(times) > 1 else 0
++    
++    print(f"Benchmark results ({iterations} iterations, {runs} runs):")
++    print(f"  Average total time: {avg_time:.3f}s")
++    print(f"  Standard deviation: {std_dev:.3f}s")
++    print(f"  Average time per call: {avg_time / iterations * 1e6:.2f} µs")
++    
++    # Also test that the result is correct
++    field = x._resolve_output_field()
++    print(f"\nResult verification:")
++    print(f"  Field type: {type(field).__name__}")
++    print(f"  Max length: {field.max_length}")
++    print(f"  Validators: {len(field.validators)}")
++
++if __name__ == "__main__":
++    # Setup Django
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++    
++    benchmark_resolve_output_field()
+diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py
+index f30b523346..88c9ca9f28 100644
+--- a/django/db/models/fields/__init__.py
++++ b/django/db/models/fields/__init__.py
+@@ -1010,7 +1010,8 @@ class CharField(Field):
+     def __init__(self, *args, db_collation=None, **kwargs):
+         super().__init__(*args, **kwargs)
+         self.db_collation = db_collation
+-        self.validators.append(validators.MaxLengthValidator(self.max_length))
++        if self.max_length is not None:
++            self.validators.append(validators.MaxLengthValidator(self.max_length))
+ 
+     def check(self, **kwargs):
+         databases = kwargs.get('databases') or []
+diff --git a/test_charfield_validators.py b/test_charfield_validators.py
+new file mode 100644
+index 0000000000..9c2ec24806
+--- /dev/null
++++ b/test_charfield_validators.py
+@@ -0,0 +1,74 @@
++"""Test that CharField validators work correctly with and without max_length."""
++from django.core.exceptions import ValidationError
++from django.db.models.fields import CharField
++from django.db.models import Value
++
++def test_charfield_with_max_length():
++    """Test that CharField with max_length still has validators."""
++    field = CharField(max_length=10)
++    assert len(field.validators) == 1
++    assert field.validators[0].limit_value == 10
++    
++    # Should work for valid values
++    field.clean('test', model_instance=None)
++    
++    # Should fail for too long values
++    try:
++        field.clean('this is too long', model_instance=None)
++        assert False, "Should have raised ValidationError"
++    except ValidationError as e:
++        assert 'at most 10 characters' in str(e)
++    
++    print("✓ CharField with max_length works correctly")
++
++def test_charfield_without_max_length():
++    """Test that CharField without max_length has no validators."""
++    field = CharField()
++    assert len(field.validators) == 0
++    assert field.max_length is None
++    
++    # Should work for any string
++    field.clean('test', model_instance=None)
++    field.clean('this is a very long string that would normally exceed max_length', model_instance=None)
++    
++    print("✓ CharField without max_length works correctly")
++
++def test_value_resolve_output_field():
++    """Test that Value._resolve_output_field creates valid CharField."""
++    x = Value('test')
++    field = x._resolve_output_field()
++    
++    assert isinstance(field, CharField)
++    assert field.max_length is None
++    assert len(field.validators) == 0
++    
++    # Should work without errors
++    field.clean('any string', model_instance=None)
++    
++    print("✓ Value._resolve_output_field creates valid CharField")
++
++if __name__ == "__main__":
++    # Setup Django
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++    
++    test_charfield_with_max_length()
++    test_charfield_without_max_length()
++    test_value_resolve_output_field()
++    
++    print("\nAll tests passed!")
+diff --git a/test_value_optimization.py b/test_value_optimization.py
+new file mode 100644
+index 0000000000..87db9738fe
+--- /dev/null
++++ b/test_value_optimization.py
+@@ -0,0 +1,52 @@
++"""Test script to reproduce the Value._resolve_output_field optimization issue."""
++import time
++from django.db.models import Value
++from django.db.models.fields import CharField
++
++def test_value_resolve_output_field():
++    """Test that Value._resolve_output_field creates a valid CharField."""
++    x = Value('test')
++    field = x._resolve_output_field()
++    
++    print(f"Field type: {type(field)}")
++    print(f"Field max_length: {field.max_length}")
++    print(f"Field validators: {field.validators}")
++    
++    # This should fail with the current implementation
++    try:
++        field.clean('test', model_instance=None)
++        print("field.clean() succeeded")
++    except Exception as e:
++        print(f"field.clean() failed with: {type(e).__name__}: {e}")
++    
++    # Performance test
++    iterations = 100000
++    start = time.time()
++    for _ in range(iterations):
++        x._resolve_output_field()
++    end = time.time()
++    
++    print(f"\nTime for {iterations} iterations: {end - start:.3f}s")
++    print(f"Average time per call: {(end - start) / iterations * 1e6:.2f} µs")
++
++if __name__ == "__main__":
++    # Setup Django
++    import django
++    from django.conf import settings
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++    
++    test_value_resolve_output_field()

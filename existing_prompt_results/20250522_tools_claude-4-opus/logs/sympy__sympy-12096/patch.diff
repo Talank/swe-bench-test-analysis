@@ -1,0 +1,229 @@
+diff --git a/sympy/core/function.py b/sympy/core/function.py
+index 1b8005e1d2..287f07d189 100644
+--- a/sympy/core/function.py
++++ b/sympy/core/function.py
+@@ -507,7 +507,12 @@ def _eval_evalf(self, prec):
+             func = getattr(mpmath, fname)
+         except (AttributeError, KeyError):
+             try:
+-                return Float(self._imp_(*self.args), prec)
++                result = self._imp_(*self.args)
++                # If the result has an evalf method, call it recursively
++                if hasattr(result, 'evalf'):
++                    return result.evalf(prec)
++                else:
++                    return Float(result, prec)
+             except (AttributeError, TypeError, ValueError):
+                 return
+ 
+diff --git a/sympy/core/tests/test_function.py b/sympy/core/tests/test_function.py
+index 0288a80c46..3d01c0a79c 100644
+--- a/sympy/core/tests/test_function.py
++++ b/sympy/core/tests/test_function.py
+@@ -344,6 +344,38 @@ def eq(a, b, eps):
+     assert eq(cos(100).evalf(15), Float("0.86231887228768"), 1e-13)
+ 
+ 
++def test_implemented_function_evalf():
++    """Test that evalf calls _imp_ recursively for implemented functions"""
++    from sympy.utilities.lambdify import implemented_function
++    
++    # Create implemented functions
++    f = implemented_function('f', lambda x: x ** 2)
++    g = implemented_function('g', lambda x: 2 * x)
++    h = implemented_function('h', lambda x: x + 1)
++    
++    # Test simple evaluation
++    assert f(2).evalf() == Float(4)
++    assert g(2).evalf() == Float(4)
++    
++    # Test composition - this is the main issue being fixed
++    assert f(g(2)).evalf() == Float(16)
++    assert f(g(h(2))).evalf() == Float(36)
++    
++    # Test with symbolic constants
++    result = f(g(pi)).evalf()
++    expected = (4 * pi**2).evalf()
++    assert abs(result - expected) < 1e-10
++    
++    # Test precision
++    result = f(g(E)).evalf(50)
++    expected = (4 * E**2).evalf(50)
++    assert abs(result - expected) < Float(10)**(-49)
++    
++    # Test function returning symbolic expression
++    k = implemented_function('k', lambda x: x**2 + x)
++    assert k(g(1)).evalf() == Float(6)  # g(1) = 2, k(2) = 2^2 + 2 = 6
++
++
+ def test_extensibility_eval():
+     class MyFunc(Function):
+         @classmethod
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..2b650e3c67
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,55 @@
++from sympy.utilities.lambdify import implemented_function
++from sympy import Function, symbols, pi, E, sin, cos, sqrt
++
++# Create implemented functions
++f = implemented_function('f', lambda x: x ** 2)
++g = implemented_function('g', lambda x: 2 * x)
++h = implemented_function('h', lambda x: x + 1)
++
++# Test cases
++print("Test 1 - Simple composition f(g(2)):")
++print(f(g(2)).evalf())
++print("Expected: 16.0")
++print()
++
++print("Test 2 - Triple composition f(g(h(2))):")
++print(f(g(h(2))).evalf())
++print("Expected: 36.0 (h(2)=3, g(3)=6, f(6)=36)")
++print()
++
++print("Test 3 - With symbolic constants f(g(pi)):")
++print(f(g(pi)).evalf())
++print("Expected: ~39.478")
++print()
++
++print("Test 4 - Mixed with built-in functions:")
++x = symbols('x')
++expr = f(sin(pi/4))
++print(f"f(sin(pi/4)).evalf() = {expr.evalf()}")
++print("Expected: 0.5")
++print()
++
++# Test that regular functions still work
++print("Test 5 - Regular function sin(1).evalf():")
++print(sin(1).evalf())
++print()
++
++# Test with functions returning non-numeric values
++k = implemented_function('k', lambda x: sin(x))
++print("Test 6 - Function returning symbolic expression k(pi/2).evalf():")
++print(k(pi/2).evalf())
++print("Expected: 1.0")
++print()
++
++# Test precision
++print("Test 7 - Precision test f(g(E)).evalf(50):")
++print(f(g(E)).evalf(50))
++print()
++
++# Test error handling - function that returns non-evalf-able object
++m = implemented_function('m', lambda x: "string")
++print("Test 8 - Error handling m(2).evalf():")
++try:
++    print(m(2).evalf())
++except Exception as e:
++    print(f"Error (expected): {type(e).__name__}: {e}")
+diff --git a/test_imp_return.py b/test_imp_return.py
+new file mode 100644
+index 0000000000..d28af126fe
+--- /dev/null
++++ b/test_imp_return.py
+@@ -0,0 +1,20 @@
++from sympy.utilities.lambdify import implemented_function
++from sympy import Function, symbols
++
++# Create implemented functions
++f = implemented_function('f', lambda x: x ** 2)
++g = implemented_function('g', lambda x: 2 * x)
++
++# Test what _imp_ returns
++print("g._imp_(2):", g._imp_(2))
++print("Type:", type(g._imp_(2)))
++
++# Test with symbolic input
++print("\nf._imp_(g(2)):", f._imp_(g(2)))
++print("Type:", type(f._imp_(g(2))))
++
++# Test with evalf
++print("\nTesting evalf on _imp_ result:")
++result = f._imp_(g(2))
++print("Result:", result)
++print("Result.evalf():", result.evalf() if hasattr(result, 'evalf') else "No evalf method")
+diff --git a/test_implemented_function_evalf.py b/test_implemented_function_evalf.py
+new file mode 100644
+index 0000000000..ca8d66cf7a
+--- /dev/null
++++ b/test_implemented_function_evalf.py
+@@ -0,0 +1,39 @@
++"""Test for the fix of evalf not calling _imp_ recursively"""
++from sympy import symbols, pi, E, Float
++from sympy.utilities.lambdify import implemented_function
++from sympy.core.function import Function
++
++def test_implemented_function_evalf():
++    """Test that evalf calls _imp_ recursively for implemented functions"""
++    
++    # Create implemented functions
++    f = implemented_function('f', lambda x: x ** 2)
++    g = implemented_function('g', lambda x: 2 * x)
++    h = implemented_function('h', lambda x: x + 1)
++    
++    # Test simple evaluation
++    assert f(2).evalf() == Float(4)
++    assert g(2).evalf() == Float(4)
++    
++    # Test composition - this is the main issue being fixed
++    assert f(g(2)).evalf() == Float(16)
++    assert f(g(h(2))).evalf() == Float(36)
++    
++    # Test with symbolic constants
++    result = f(g(pi)).evalf()
++    expected = (4 * pi**2).evalf()
++    assert abs(result - expected) < 1e-10
++    
++    # Test precision
++    result = f(g(E)).evalf(50)
++    expected = (4 * E**2).evalf(50)
++    assert abs(result - expected) < Float(10)**(-49)
++    
++    # Test function returning symbolic expression
++    k = implemented_function('k', lambda x: x**2 + x)
++    assert k(g(1)).evalf() == Float(6)  # g(1) = 2, k(2) = 2^2 + 2 = 6
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_implemented_function_evalf()
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..18b1b05e4f
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,30 @@
++from sympy.utilities.lambdify import implemented_function
++from sympy import Function
++
++# Create implemented functions
++f = implemented_function('f', lambda x: x ** 2)
++g = implemented_function('g', lambda x: 2 * x)
++
++# Test cases
++print("Test 1 - f(2).evalf():")
++print(f(2).evalf())
++print("Expected: 4.00000000000000")
++print()
++
++print("Test 2 - g(2).evalf():")
++print(g(2).evalf())
++print("Expected: 4.00000000000000")
++print()
++
++print("Test 3 - f(g(2)).evalf():")
++print(f(g(2)).evalf())
++print("Expected: 16.0000000000000 (since g(2) = 4, f(4) = 16)")
++print()
++
++# Additional test with symbolic argument
++from sympy import symbols, pi
++x = symbols('x')
++
++print("Test 4 - f(g(pi)).evalf():")
++print(f(g(pi)).evalf())
++print("Expected: 39.4784... (since g(pi) = 2*pi, f(2*pi) = 4*pi^2)")

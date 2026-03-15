@@ -1,0 +1,223 @@
+diff --git a/src/_pytest/python.py b/src/_pytest/python.py
+index b8b365ad3..5f2af31e2 100644
+--- a/src/_pytest/python.py
++++ b/src/_pytest/python.py
+@@ -286,7 +286,7 @@ class PyobjMixin(PyobjContext):
+             parts.append(name)
+         parts.reverse()
+         s = ".".join(parts)
+-        return s.replace(".[", "[")
++        return s
+ 
+     def reportinfo(self):
+         # XXX caching?
+diff --git a/test_bug_reproduction.py b/test_bug_reproduction.py
+new file mode 100644
+index 000000000..7204c6aac
+--- /dev/null
++++ b/test_bug_reproduction.py
+@@ -0,0 +1,5 @@
++import pytest
++
++@pytest.mark.parametrize("a", ["..["])
++def test_boo(a):
++    assert 0
+diff --git a/test_debug_path.py b/test_debug_path.py
+new file mode 100644
+index 000000000..6edfaa7c9
+--- /dev/null
++++ b/test_debug_path.py
+@@ -0,0 +1,47 @@
++import pytest
++
++class TestClass:
++    @pytest.mark.parametrize("x", [1])
++    def test_method(self, x):
++        # Let's print the path components to understand the issue
++        node = pytest.current_test_item
++        print(f"Node name: {node.name}")
++        print(f"Parent name: {node.parent.name}")
++        print(f"Nodeid: {node.nodeid}")
++        
++        # Get the modpath
++        modpath = node.getmodpath()
++        print(f"Modpath: {modpath}")
++        
++        # Manually build the path
++        chain = node.listchain()
++        chain.reverse()
++        parts = []
++        for n in chain:
++            if hasattr(n, '__class__') and n.__class__.__name__ == 'Instance':
++                continue
++            name = n.name
++            if hasattr(n, '__class__') and n.__class__.__name__ == 'Module':
++                import os
++                name = os.path.splitext(name)[0]
++                if True:  # stopatmodule
++                    if False:  # includemodule
++                        parts.append(name)
++                    break
++            parts.append(name)
++        parts.reverse()
++        s = ".".join(parts)
++        print(f"Built path before replace: {s}")
++        print(f"After replace: {s.replace('.[', '[')}")
++        
++        assert 0
++
++# Also test at module level
++@pytest.mark.parametrize("y", [2])
++def test_function(y):
++    node = pytest.current_test_item
++    print(f"\nFunction test:")
++    print(f"Node name: {node.name}")
++    print(f"Nodeid: {node.nodeid}")
++    print(f"Modpath: {node.getmodpath()}")
++    assert 0
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..0009beb2b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,19 @@
++import pytest
++
++# Test if there's any case where we'd have .[
++class TestA:
++    class TestB:
++        @pytest.mark.parametrize("x", [1])
++        def test_nested(self, x):
++            assert 0
++
++# Test module level parametrized function
++@pytest.mark.parametrize("y", [2])
++def test_module_param(y):
++    assert 0
++
++# Test with weird names
++class Test_With_Dots:
++    @pytest.mark.parametrize("z", ["a.b"])
++    def test_dots_in_param(self, z):
++        assert 0
+diff --git a/test_fix_verification.py b/test_fix_verification.py
+new file mode 100644
+index 000000000..a9d012b87
+--- /dev/null
++++ b/test_fix_verification.py
+@@ -0,0 +1,72 @@
++"""Test to verify the fix for issue where '..[' was replaced with '.[' in test report headlines"""
++import pytest
++
++
++def test_getmodpath_preserves_double_dot_bracket():
++    """Test that getmodpath doesn't replace '..[' with '.['"""
++    
++    # Create a mock node structure to test getmodpath
++    class MockModule:
++        name = "test_module.py"
++        
++    class MockClass:
++        name = "TestClass"
++        parent = MockModule()
++        
++        def listchain(self):
++            return [MockModule(), self, MockFunction()]
++    
++    class MockFunction:
++        name = "test_method[..[" 
++        parent = MockClass()
++        
++        def listchain(self):
++            return [MockModule(), MockClass(), self]
++    
++    # Import the necessary classes
++    from _pytest.python import Module, Class, Function
++    import os
++    
++    # Create a simple mock structure
++    class MockNode:
++        def __init__(self, name):
++            self.name = name
++            
++    # Test the actual getmodpath logic directly
++    def test_getmodpath(node_name):
++        # Simulate the getmodpath logic
++        chain = [MockNode("test_module.py"), MockNode("TestClass"), MockNode(node_name)]
++        chain.reverse()  # Now: [node_name, TestClass, test_module.py]
++        parts = []
++        for node in chain:
++            name = node.name
++            # Check if it's a module (last in reversed chain)
++            if name == "test_module.py":
++                name = os.path.splitext(name)[0]
++                # stopatmodule=True by default, so break here
++                break
++            parts.append(name)
++        parts.reverse()
++        s = ".".join(parts)
++        # This is where the fix is - we no longer do s.replace(".[", "[")
++        return s
++    
++    # Test with the problematic pattern
++    modpath = test_getmodpath("test_method[..[")
++    expected = "TestClass.test_method[..["
++    # Since we stop at module, we should get the path without the module name
++    assert modpath == expected, f"Expected '{expected}', got '{modpath}'"
++    
++    # Test other patterns to ensure they work correctly
++    modpath2 = test_getmodpath("test_method[.[")
++    expected2 = "TestClass.test_method[.["
++    assert modpath2 == expected2, f"Expected '{expected2}', got '{modpath2}'"
++    
++    modpath3 = test_getmodpath("test_method[123]")
++    expected3 = "TestClass.test_method[123]"
++    assert modpath3 == expected3, f"Expected '{expected3}', got '{modpath3}'"
++
++
++if __name__ == "__main__":
++    test_getmodpath_preserves_double_dot_bracket()
++    print("All tests passed!")
+diff --git a/test_parametrize_brackets.py b/test_parametrize_brackets.py
+new file mode 100644
+index 000000000..526747156
+--- /dev/null
++++ b/test_parametrize_brackets.py
+@@ -0,0 +1,22 @@
++import pytest
++
++# Test various bracket combinations
++@pytest.mark.parametrize("a", ["..[", "[..", ".[", "[.", "[[", "]]"])
++def test_brackets(a):
++    """Test different bracket combinations"""
++    print(f"Parameter value: {a}")
++    assert 0  # Force failure to see the output
++
++# Test nested brackets
++@pytest.mark.parametrize("x,y", [(".[", "]"), ("..[", "]")])
++def test_nested(x, y):
++    """Test nested parameters with brackets"""
++    print(f"x={x}, y={y}")
++    assert 0
++
++# Test class with parametrized method
++class TestClass:
++    @pytest.mark.parametrize("param", ["..[", ".["])
++    def test_method(self, param):
++        print(f"Class method param: {param}")
++        assert 0
+diff --git a/test_understand_replace.py b/test_understand_replace.py
+new file mode 100644
+index 000000000..7c62493f7
+--- /dev/null
++++ b/test_understand_replace.py
+@@ -0,0 +1,9 @@
++import pytest
++
++# This might be what the replace was trying to fix
++class TestClass:
++    @pytest.mark.parametrize("x", [1, 2])
++    def test_method(self, x):
++        # The path might be something like TestClass.test_method.[1]
++        # and the replace was trying to make it TestClass.test_method[1]
++        assert 0

@@ -1,0 +1,607 @@
+diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py
+index eaccc96d7d..2bbbc7dd1c 100644
+--- a/django/db/models/sql/compiler.py
++++ b/django/db/models/sql/compiler.py
+@@ -704,6 +704,16 @@ class SQLCompiler:
+         not be) and column name for ordering by the given 'name' parameter.
+         The 'name' is of the form 'field1__field2__...__fieldN'.
+         """
++        # Handle expression objects (like OrderBy) that might come from Meta.ordering
++        if hasattr(name, 'resolve_expression'):
++            # If it's an expression, compile it directly
++            if not isinstance(name, OrderBy):
++                name = name.asc()
++            if not self.query.standard_ordering:
++                name = name.copy()
++                name.reverse_ordering()
++            return [(name, False)]
++        
+         name, order = get_order_dir(name, default_order)
+         descending = order == 'DESC'
+         pieces = name.split(LOOKUP_SEP)
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..e684e0b8c4
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,129 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Q
++from django.db.models.expressions import OrderBy
++from django.db.models.functions import Lower
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Define test models with various ordering scenarios
++class ParentWithOrderByExpression(models.Model):
++    name = models.CharField(max_length=100)
++    created_at = models.DateTimeField(auto_now_add=True)
++    priority = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('priority'), descending=True), OrderBy(F('created_at'))]
++
++class ChildOfOrderByParent(ParentWithOrderByExpression):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ParentWithFExpression(models.Model):
++    name = models.CharField(max_length=100)
++    score = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [F('score').desc(), 'name']
++
++class ChildOfFExprParent(ParentWithFExpression):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class ParentWithFunction(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [Lower('name').asc()]
++
++class ChildOfFunctionParent(ParentWithFunction):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the issue
++if __name__ == '__main__':
++    from django.db import connection
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(ParentWithOrderByExpression)
++        schema_editor.create_model(ChildOfOrderByParent)
++        schema_editor.create_model(ParentWithFExpression)
++        schema_editor.create_model(ChildOfFExprParent)
++        schema_editor.create_model(ParentWithFunction)
++        schema_editor.create_model(ChildOfFunctionParent)
++    
++    # Test 1: Child of parent with OrderBy expressions
++    try:
++        list(ChildOfOrderByParent.objects.order_by('parentwithorderbyexpression_ptr'))
++        print("Test 1 passed: Child of parent with OrderBy expressions")
++    except Exception as e:
++        print(f"Test 1 failed: {e}")
++        import traceback
++        traceback.print_exc()
++    
++    # Test 2: Child of parent with F expressions
++    try:
++        list(ChildOfFExprParent.objects.order_by('parentwithfexpression_ptr'))
++        print("Test 2 passed: Child of parent with F expressions")
++    except Exception as e:
++        print(f"Test 2 failed: {e}")
++        import traceback
++        traceback.print_exc()
++    
++    # Test 3: Child of parent with function expressions
++    try:
++        list(ChildOfFunctionParent.objects.order_by('parentwithfunction_ptr'))
++        print("Test 3 passed: Child of parent with function expressions")
++    except Exception as e:
++        print(f"Test 3 failed: {e}")
++        import traceback
++        traceback.print_exc()
++    
++    # Test 4: Direct ordering still works
++    try:
++        list(ChildOfOrderByParent.objects.order_by('name'))
++        print("Test 4 passed: Direct field ordering")
++    except Exception as e:
++        print(f"Test 4 failed: {e}")
++        import traceback
++        traceback.print_exc()
++    
++    # Test 5: Ordering with lookups
++    try:
++        list(ChildOfOrderByParent.objects.order_by('parentwithorderbyexpression_ptr__name'))
++        print("Test 5 passed: Ordering with lookups")
++    except Exception as e:
++        print(f"Test 5 failed: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_final_comprehensive.py b/test_final_comprehensive.py
+new file mode 100644
+index 0000000000..dec64f9435
+--- /dev/null
++++ b/test_final_comprehensive.py
+@@ -0,0 +1,145 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Q
++from django.db.models.expressions import OrderBy
++from django.db.models.functions import Lower, Upper
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Test all possible expression types in Meta.ordering
++test_cases = []
++
++# Case 1: OrderBy expression
++class Parent1(models.Model):
++    name = models.CharField(max_length=100)
++    priority = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('priority'), descending=True)]
++
++class Child1(Parent1):
++    extra = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++test_cases.append(('OrderBy expression', Child1, 'parent1_ptr'))
++
++# Case 2: F expression with desc()
++class Parent2(models.Model):
++    name = models.CharField(max_length=100)
++    score = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [F('score').desc()]
++
++class Child2(Parent2):
++    extra = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++test_cases.append(('F expression with desc()', Child2, 'parent2_ptr'))
++
++# Case 3: Function expression
++class Parent3(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [Lower('name')]
++
++class Child3(Parent3):
++    extra = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++test_cases.append(('Function expression', Child3, 'parent3_ptr'))
++
++# Case 4: Mixed expressions and strings
++class Parent4(models.Model):
++    name = models.CharField(max_length=100)
++    priority = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('priority'), descending=True), 'name', F('id').asc()]
++
++class Child4(Parent4):
++    extra = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++test_cases.append(('Mixed expressions and strings', Child4, 'parent4_ptr'))
++
++# Case 5: Nested function expressions
++class Parent5(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [Upper(Lower('name'))]
++
++class Child5(Parent5):
++    extra = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'test_app'
++
++test_cases.append(('Nested function expressions', Child5, 'parent5_ptr'))
++
++# Run tests
++if __name__ == '__main__':
++    from django.db import connection
++    
++    # Create all tables
++    with connection.schema_editor() as schema_editor:
++        for _, child_model, _ in test_cases:
++            parent_model = child_model.__bases__[0]
++            schema_editor.create_model(parent_model)
++            schema_editor.create_model(child_model)
++    
++    # Test each case
++    all_passed = True
++    for test_name, child_model, parent_ptr_name in test_cases:
++        try:
++            # Test ordering by parent pointer
++            list(child_model.objects.order_by(parent_ptr_name))
++            print(f"✓ {test_name}: order_by('{parent_ptr_name}') - PASSED")
++        except Exception as e:
++            print(f"✗ {test_name}: order_by('{parent_ptr_name}') - FAILED: {e}")
++            all_passed = False
++        
++        try:
++            # Test ordering by parent field through lookup
++            list(child_model.objects.order_by(f'{parent_ptr_name}__name'))
++            print(f"✓ {test_name}: order_by('{parent_ptr_name}__name') - PASSED")
++        except Exception as e:
++            print(f"✗ {test_name}: order_by('{parent_ptr_name}__name') - FAILED: {e}")
++            all_passed = False
++    
++    print("\n" + "="*50)
++    if all_passed:
++        print("All tests PASSED! 🎉")
++    else:
++        print("Some tests FAILED! ❌")
+diff --git a/test_order_by_bug.py b/test_order_by_bug.py
+new file mode 100644
+index 0000000000..63e9b2a043
+--- /dev/null
++++ b/test_order_by_bug.py
+@@ -0,0 +1,62 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F
++from django.db.models.expressions import OrderBy
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    created_at = models.DateTimeField(auto_now_add=True)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('created_at'), descending=True)]
++
++class Child(Parent):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the issue
++if __name__ == '__main__':
++    from django.db import connection
++    from django.db.migrations.executor import MigrationExecutor
++    from django.db.migrations.recorder import MigrationRecorder
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Parent)
++        schema_editor.create_model(Child)
++    
++    # Try to query Child model
++    try:
++        list(Child.objects.all())
++        print("Query succeeded!")
++    except Exception as e:
++        print(f"Query failed with error: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_order_by_bug2.py b/test_order_by_bug2.py
+new file mode 100644
+index 0000000000..c350eab245
+--- /dev/null
++++ b/test_order_by_bug2.py
+@@ -0,0 +1,80 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F
++from django.db.models.expressions import OrderBy
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    created_at = models.DateTimeField(auto_now_add=True)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('created_at'), descending=True)]
++
++class Child(Parent):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class GrandChild(Child):
++    another_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        # This should trigger the issue when ordering by a parent field
++        ordering = ['name']
++
++# Test the issue
++if __name__ == '__main__':
++    from django.db import connection
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Parent)
++        schema_editor.create_model(Child) 
++        schema_editor.create_model(GrandChild)
++    
++    # Try to query GrandChild model with ordering by parent field
++    try:
++        # This should trigger the recursive ordering resolution
++        list(GrandChild.objects.order_by('parent_ptr__name'))
++        print("Query 1 succeeded!")
++    except Exception as e:
++        print(f"Query 1 failed with error: {e}")
++        import traceback
++        traceback.print_exc()
++        
++    # Try another case
++    try:
++        # This should also trigger it
++        list(GrandChild.objects.order_by('child_ptr__name'))
++        print("Query 2 succeeded!")
++    except Exception as e:
++        print(f"Query 2 failed with error: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/test_order_by_bug3.py b/test_order_by_bug3.py
+new file mode 100644
+index 0000000000..7384a69afb
+--- /dev/null
++++ b/test_order_by_bug3.py
+@@ -0,0 +1,68 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F
++from django.db.models.expressions import OrderBy
++
++# Configure Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Define test models
++class Parent(models.Model):
++    name = models.CharField(max_length=100)
++    created_at = models.DateTimeField(auto_now_add=True)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = [OrderBy(F('created_at'), descending=True)]
++
++class Child(Parent):
++    parent_ptr = models.OneToOneField(
++        Parent,
++        on_delete=models.CASCADE,
++        parent_link=True,
++        primary_key=True,
++        related_name='+'
++    )
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the issue
++if __name__ == '__main__':
++    from django.db import connection
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Parent)
++        schema_editor.create_model(Child) 
++    
++    # Try to query Child model ordering by parent field that triggers parent's ordering
++    try:
++        # This should trigger the issue when the parent's ordering contains expressions
++        list(Child.objects.order_by('parent_ptr'))
++        print("Query succeeded!")
++    except Exception as e:
++        print(f"Query failed with error: {e}")
++        import traceback
++        traceback.print_exc()
+diff --git a/tests/ordering/test_expression_ordering_inheritance.py b/tests/ordering/test_expression_ordering_inheritance.py
+new file mode 100644
+index 0000000000..a595daa341
+--- /dev/null
++++ b/tests/ordering/test_expression_ordering_inheritance.py
+@@ -0,0 +1,66 @@
++from django.db import models
++from django.db.models import F
++from django.db.models.expressions import OrderBy
++from django.test import TestCase
++
++
++class ParentWithExpressionOrdering(models.Model):
++    name = models.CharField(max_length=100)
++    priority = models.IntegerField(default=0)
++    
++    class Meta:
++        app_label = 'ordering'
++        ordering = [OrderBy(F('priority'), descending=True), 'name']
++
++
++class ChildOfExpressionOrderingParent(ParentWithExpressionOrdering):
++    extra_field = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'ordering'
++
++
++class ExpressionOrderingInheritanceTests(TestCase):
++    """
++    Test that ordering by parent pointer works when parent has expression-based ordering.
++    This tests the fix for the bug where get_order_dir() would receive OrderBy objects
++    instead of strings when resolving parent model ordering.
++    """
++    
++    @classmethod
++    def setUpTestData(cls):
++        # Create some test data
++        ChildOfExpressionOrderingParent.objects.create(
++            name='Parent 1',
++            priority=1,
++            extra_field='Child 1'
++        )
++        ChildOfExpressionOrderingParent.objects.create(
++            name='Parent 2',
++            priority=2,
++            extra_field='Child 2'
++        )
++    
++    def test_order_by_parent_ptr_with_expression_ordering(self):
++        """Test that ordering by parent pointer works when parent has OrderBy expressions."""
++        # This should not raise TypeError: 'OrderBy' object does not support indexing
++        children = list(ChildOfExpressionOrderingParent.objects.order_by('parentwithexpressionordering_ptr'))
++        self.assertEqual(len(children), 2)
++        # Should be ordered by parent's ordering (priority DESC, name ASC)
++        self.assertEqual(children[0].priority, 2)  # Higher priority first
++        self.assertEqual(children[1].priority, 1)
++    
++    def test_order_by_parent_field_with_expression_ordering(self):
++        """Test that ordering by parent field through lookup works."""
++        children = list(ChildOfExpressionOrderingParent.objects.order_by('parentwithexpressionordering_ptr__name'))
++        self.assertEqual(len(children), 2)
++        self.assertEqual(children[0].name, 'Parent 1')
++        self.assertEqual(children[1].name, 'Parent 2')
++    
++    def test_default_ordering_inherited(self):
++        """Test that default ordering from parent with expressions works."""
++        children = list(ChildOfExpressionOrderingParent.objects.all())
++        self.assertEqual(len(children), 2)
++        # Should inherit parent's ordering (priority DESC, name ASC)
++        self.assertEqual(children[0].priority, 2)  # Higher priority first
++        self.assertEqual(children[1].priority, 1)

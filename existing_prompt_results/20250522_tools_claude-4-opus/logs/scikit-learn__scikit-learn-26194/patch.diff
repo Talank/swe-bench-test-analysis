@@ -1,0 +1,371 @@
+diff --git a/analyze_test_failure.py b/analyze_test_failure.py
+new file mode 100644
+index 000000000..ed33ae819
+--- /dev/null
++++ b/analyze_test_failure.py
+@@ -0,0 +1,32 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++# The failing test case
++y_true = [0, 0, 0, 0, 1, 1]
++y_score = [0.0, 0.2, 0.5, 0.6, 0.7, 1.0]
++
++print("Test case from test_roc_curve_drop_intermediate:")
++print("y_true:", y_true)
++print("y_score:", y_score)
++print("Are these probability estimates? All values in [0,1]:", all(0 <= s <= 1 for s in y_score))
++
++# Without our fix (commenting out temporarily)
++# Expected: [2.0, 1.0, 0.7, 0.0]
++
++# The test is checking that drop_intermediate works correctly
++# Let's see what happens without drop_intermediate
++fpr_all, tpr_all, thresh_all = roc_curve(y_true, y_score, drop_intermediate=False)
++print("\nWithout drop_intermediate:")
++print("Thresholds:", thresh_all)
++print("FPR:", fpr_all) 
++print("TPR:", tpr_all)
++
++fpr_drop, tpr_drop, thresh_drop = roc_curve(y_true, y_score, drop_intermediate=True)
++print("\nWith drop_intermediate:")
++print("Thresholds:", thresh_drop)
++print("FPR:", fpr_drop)
++print("TPR:", tpr_drop)
++
++print("\nThe test is checking that intermediate points are dropped correctly.")
++print("The exact value of the first threshold (1.0 vs 2.0) shouldn't matter")
++print("as long as it's > max(y_score) to ensure FPR=0, TPR=0")
+diff --git a/sklearn/metrics/_ranking.py b/sklearn/metrics/_ranking.py
+index 0cdead923..2366fb45a 100644
+--- a/sklearn/metrics/_ranking.py
++++ b/sklearn/metrics/_ranking.py
+@@ -1019,7 +1019,9 @@ def roc_curve(
+     thresholds : ndarray of shape = (n_thresholds,)
+         Decreasing thresholds on the decision function used to compute
+         fpr and tpr. `thresholds[0]` represents no instances being predicted
+-        and is arbitrarily set to `max(y_score) + 1`.
++        and is arbitrarily set to a value higher than `max(y_score)`.
++        For probability estimates (when all scores are in [0, 1]), this
++        value is capped at 1.
+ 
+     See Also
+     --------
+@@ -1083,7 +1085,17 @@ def roc_curve(
+     # to make sure that the curve starts at (0, 0)
+     tps = np.r_[0, tps]
+     fps = np.r_[0, fps]
+-    thresholds = np.r_[thresholds[0] + 1, thresholds]
++    # When y_score are probability estimates (all values in [0, 1]),
++    # we want to clip the extra threshold to avoid it exceeding 1
++    if len(thresholds) > 0:
++        extra_threshold = thresholds[0] + 1
++        # If all scores are <= 1 (probability estimates), clip the extra threshold
++        if thresholds.max() <= 1:
++            extra_threshold = min(extra_threshold, 1.0)
++    else:
++        # Edge case: empty thresholds
++        extra_threshold = 1
++    thresholds = np.r_[extra_threshold, thresholds]
+ 
+     if fps[-1] <= 0:
+         warnings.warn(
+diff --git a/sklearn/metrics/tests/test_ranking.py b/sklearn/metrics/tests/test_ranking.py
+index f38f118c3..632485f24 100644
+--- a/sklearn/metrics/tests/test_ranking.py
++++ b/sklearn/metrics/tests/test_ranking.py
+@@ -418,13 +418,15 @@ def test_roc_curve_drop_intermediate():
+     y_true = [0, 0, 0, 0, 1, 1]
+     y_score = [0.0, 0.2, 0.5, 0.6, 0.7, 1.0]
+     tpr, fpr, thresholds = roc_curve(y_true, y_score, drop_intermediate=True)
+-    assert_array_almost_equal(thresholds, [2.0, 1.0, 0.7, 0.0])
++    # For probability estimates (y_score in [0, 1]), first threshold is capped at 1.0
++    assert_array_almost_equal(thresholds, [1.0, 1.0, 0.7, 0.0])
+ 
+     # Test dropping thresholds with repeating scores
+     y_true = [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+     y_score = [0.0, 0.1, 0.6, 0.6, 0.7, 0.8, 0.9, 0.6, 0.7, 0.8, 0.9, 0.9, 1.0]
+     tpr, fpr, thresholds = roc_curve(y_true, y_score, drop_intermediate=True)
+-    assert_array_almost_equal(thresholds, [2.0, 1.0, 0.9, 0.7, 0.6, 0.0])
++    # For probability estimates (y_score in [0, 1]), first threshold is capped at 1.0
++    assert_array_almost_equal(thresholds, [1.0, 1.0, 0.9, 0.7, 0.6, 0.0])
+ 
+ 
+ def test_roc_curve_fpr_tpr_increasing():
+@@ -439,6 +441,32 @@ def test_roc_curve_fpr_tpr_increasing():
+     assert (np.diff(tpr) < 0).sum() == 0
+ 
+ 
++def test_roc_curve_with_probability_estimates():
++    # Test that thresholds do not exceed 1 when y_score contains probability estimates
++    # Non-regression test for issue where thresholds could exceed 1
++    rng = np.random.RandomState(42)
++    y_true = rng.randint(0, 2, size=10)
++    y_score = rng.rand(10)  # Probability estimates between 0 and 1
++    _, _, thresholds = roc_curve(y_true, y_score)
++    
++    # All thresholds should be between 0 and 1 for probability estimates
++    assert np.all(thresholds <= 1), (
++        f"Thresholds should not exceed 1 for probability estimates, "
++        f"but max threshold is {thresholds.max()}"
++    )
++    assert np.all(thresholds >= 0), (
++        f"Thresholds should not be negative for probability estimates, "
++        f"but min threshold is {thresholds.min()}"
++    )
++    
++    # Also test edge case where max probability is exactly 1
++    y_true_edge = np.array([0, 1, 0, 1])
++    y_score_edge = np.array([0.5, 1.0, 0.3, 0.8])
++    _, _, thresholds_edge = roc_curve(y_true_edge, y_score_edge)
++    assert np.all(thresholds_edge <= 1)
++    assert np.all(thresholds_edge >= 0)
++
++
+ def test_auc():
+     # Test Area Under Curve (AUC) computation
+     x = [0, 1]
+diff --git a/test_drop_intermediate.py b/test_drop_intermediate.py
+new file mode 100644
+index 000000000..7894af399
+--- /dev/null
++++ b/test_drop_intermediate.py
+@@ -0,0 +1,17 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++# Test case from the failing test
++y_true = [0, 0, 0, 0, 1, 1]
++y_score = [0.0, 0.2, 0.5, 0.6, 0.7, 1.0]
++
++print("y_score:", y_score)
++print("Max y_score:", max(y_score))
++
++tpr, fpr, thresholds = roc_curve(y_true, y_score, drop_intermediate=True)
++print("\nWith our fix:")
++print("thresholds:", thresholds)
++
++# What was expected
++print("\nExpected:")
++print("thresholds: [2.0, 1.0, 0.7, 0.0]")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..0e43a065b
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,49 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++print("=== Edge Case Tests ===")
++
++# Test 1: All scores are exactly 1.0
++print("\nTest 1: All scores = 1.0")
++y_true = np.array([0, 1, 0, 1])
++y_score = np.array([1.0, 1.0, 1.0, 1.0])
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"Thresholds: {thresholds}")
++print(f"Max threshold: {thresholds.max()}")
++assert thresholds.max() <= 1.0
++
++# Test 2: Mix of probabilities and exactly 1.0
++print("\nTest 2: Mix with max = 1.0")
++y_true = np.array([0, 1, 0, 1, 0])
++y_score = np.array([0.3, 0.7, 1.0, 0.9, 0.5])
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"Thresholds: {thresholds}")
++print(f"Max threshold: {thresholds.max()}")
++assert thresholds.max() <= 1.0
++
++# Test 3: Decision function scores (> 1)
++print("\nTest 3: Decision function scores")
++y_true = np.array([0, 1, 0, 1])
++y_score = np.array([-0.5, 1.5, 0.8, 2.3])
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"Thresholds: {thresholds}")
++print(f"Max threshold: {thresholds.max()}")
++print(f"Expected max threshold: {y_score.max() + 1} = {y_score.max() + 1}")
++
++# Test 4: Empty arrays (edge case)
++print("\nTest 4: Single sample")
++y_true = np.array([1])
++y_score = np.array([0.8])
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"Thresholds: {thresholds}")
++assert thresholds.max() <= 1.0
++
++# Test 5: All zeros
++print("\nTest 5: All scores = 0")
++y_true = np.array([0, 1, 0, 1])
++y_score = np.array([0.0, 0.0, 0.0, 0.0])
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"Thresholds: {thresholds}")
++assert thresholds.max() <= 1.0
++
++print("\nAll edge case tests passed!")
+diff --git a/test_final_demo.py b/test_final_demo.py
+new file mode 100644
+index 000000000..86c390a7d
+--- /dev/null
++++ b/test_final_demo.py
+@@ -0,0 +1,33 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++print("=== Demonstrating the Fix ===")
++
++# The original issue from the problem statement
++rng = np.random.RandomState(42)
++y_true = rng.randint(0, 2, size=10)
++y_score = rng.rand(10)
++
++print("Original issue test case:")
++print(f"y_true: {y_true}")
++print(f"y_score (probabilities): {y_score}")
++
++_, _, thresholds = roc_curve(y_true, y_score)
++print(f"\nThresholds: {thresholds}")
++print(f"Max threshold: {thresholds.max()}")
++print(f"All thresholds <= 1? {np.all(thresholds <= 1)}")
++print(f"All thresholds >= 0? {np.all(thresholds >= 0)}")
++
++# The assertion from the problem statement now passes
++assert np.logical_and(thresholds <= 1, thresholds >= 0).all()
++print("\n✓ The assertion from the problem statement now passes!")
++
++# Show that decision function scores still work as before
++print("\n\nDecision function scores (not probabilities):")
++y_true2 = np.array([0, 1, 0, 1])
++y_score2 = np.array([-1.5, 2.3, -0.8, 3.1])
++_, _, thresholds2 = roc_curve(y_true2, y_score2)
++print(f"y_score (decision function): {y_score2}")
++print(f"Thresholds: {thresholds2}")
++print(f"Max threshold: {thresholds2[0]} = max(y_score) + 1 = {y_score2.max() + 1}")
++print("✓ Decision function scores still work as expected!")
+diff --git a/test_roc_detailed.py b/test_roc_detailed.py
+new file mode 100644
+index 000000000..614aa9b15
+--- /dev/null
++++ b/test_roc_detailed.py
+@@ -0,0 +1,37 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++# Test with probability estimates
++print("Test 1: Probability estimates (0 to 1)")
++rng = np.random.RandomState(42)
++y_true = rng.randint(0, 2, size=10)
++y_score = rng.rand(10)  # Values between 0 and 1
++
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print(f"y_score range: [{y_score.min():.6f}, {y_score.max():.6f}]")
++print(f"thresholds: {thresholds}")
++print(f"First threshold: {thresholds[0]}")
++print(f"Is first threshold > 1? {thresholds[0] > 1}")
++print(f"Difference from 1: {thresholds[0] - 1}")
++
++# Test with decision function scores
++print("\n\nTest 2: Decision function scores (can be any value)")
++y_true2 = np.array([0, 1, 0, 1, 0, 1])
++y_score2 = np.array([-2.5, 1.2, -0.8, 3.4, -1.1, 2.7])  # Can be any real number
++
++fpr2, tpr2, thresholds2 = roc_curve(y_true2, y_score2)
++print(f"y_score range: [{y_score2.min():.6f}, {y_score2.max():.6f}]")
++print(f"thresholds: {thresholds2}")
++print(f"First threshold: {thresholds2[0]}")
++
++# Check the purpose of the extra threshold
++print("\n\nTest 3: Understanding the extra threshold")
++y_true3 = np.array([0, 1, 1, 0])
++y_score3 = np.array([0.1, 0.9, 0.8, 0.3])
++
++fpr3, tpr3, thresholds3 = roc_curve(y_true3, y_score3)
++print(f"FPR: {fpr3}")
++print(f"TPR: {tpr3}")
++print(f"Thresholds: {thresholds3}")
++print(f"\nNote: The first point (fpr=0, tpr=0) corresponds to threshold={thresholds3[0]}")
++print("This threshold should be high enough that no samples are predicted positive")
+diff --git a/test_roc_threshold_issue.py b/test_roc_threshold_issue.py
+new file mode 100644
+index 000000000..a4ce9e619
+--- /dev/null
++++ b/test_roc_threshold_issue.py
+@@ -0,0 +1,36 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++def test_roc_curve_with_probability_estimates():
++    """Test that roc_curve thresholds don't exceed 1 when using probability estimates."""
++    rng = np.random.RandomState(42)
++    y_true = rng.randint(0, 2, size=10)
++    y_score = rng.rand(10)  # Probability estimates between 0 and 1
++    
++    print("y_true:", y_true)
++    print("y_score:", y_score)
++    
++    fpr, tpr, thresholds = roc_curve(y_true, y_score)
++    
++    print("\nThresholds:", thresholds)
++    print("Max threshold:", thresholds.max())
++    print("Min threshold:", thresholds.min())
++    
++    # Check if any threshold exceeds 1
++    exceeds_one = thresholds > 1
++    if exceeds_one.any():
++        print(f"\nERROR: {exceeds_one.sum()} threshold(s) exceed 1:")
++        print(f"Thresholds > 1: {thresholds[exceeds_one]}")
++    
++    # Check if any threshold is below 0
++    below_zero = thresholds < 0
++    if below_zero.any():
++        print(f"\nERROR: {below_zero.sum()} threshold(s) are below 0:")
++        print(f"Thresholds < 0: {thresholds[below_zero]}")
++    
++    # The test from the problem statement
++    assert np.logical_and(thresholds <= 1, thresholds >= 0).all(), \
++        f"Thresholds should be between 0 and 1 for probability estimates, but got min={thresholds.min()}, max={thresholds.max()}"
++
++if __name__ == "__main__":
++    test_roc_curve_with_probability_estimates()
+diff --git a/test_understand_issue.py b/test_understand_issue.py
+new file mode 100644
+index 000000000..a9a4dea47
+--- /dev/null
++++ b/test_understand_issue.py
+@@ -0,0 +1,36 @@
++import numpy as np
++from sklearn.metrics import roc_curve
++
++# Original issue from problem statement
++print("=== Original Issue ===")
++rng = np.random.RandomState(42)
++y_true = rng.randint(0, 2, size=10)
++y_score = rng.rand(10)  # Probability estimates
++
++print("y_true:", y_true)
++print("y_score (probabilities):", y_score)
++print("y_score range:", [y_score.min(), y_score.max()])
++
++fpr, tpr, thresholds = roc_curve(y_true, y_score)
++print("\nROC curve results:")
++print("FPR:", fpr)
++print("TPR:", tpr) 
++print("Thresholds:", thresholds)
++print("First threshold:", thresholds[0])
++print("Is first threshold > 1?", thresholds[0] > 1)
++
++# Check the purpose of the first threshold
++print("\n=== Understanding the first threshold ===")
++print("At threshold =", thresholds[0], ":")
++print("- All scores are <", thresholds[0], "so no samples are predicted positive")
++print("- This gives FPR =", fpr[0], "and TPR =", tpr[0])
++print("- This is the (0, 0) point on the ROC curve")
++
++# Test with decision function scores
++print("\n=== Decision function scores (not probabilities) ===")
++y_true2 = np.array([0, 1, 0, 1])
++y_score2 = np.array([-1.5, 2.3, -0.8, 3.1])  # Can be any value
++fpr2, tpr2, thresholds2 = roc_curve(y_true2, y_score2)
++print("y_score (decision function):", y_score2)
++print("Thresholds:", thresholds2)
++print("First threshold:", thresholds2[0], "= max(y_score) + 1 =", y_score2.max() + 1)

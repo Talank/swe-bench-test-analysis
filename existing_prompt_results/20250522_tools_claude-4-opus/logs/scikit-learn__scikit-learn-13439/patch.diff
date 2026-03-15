@@ -1,0 +1,248 @@
+diff --git a/sklearn/pipeline.py b/sklearn/pipeline.py
+index 7eaf9a46f..d1d03656d 100644
+--- a/sklearn/pipeline.py
++++ b/sklearn/pipeline.py
+@@ -199,6 +199,12 @@ class Pipeline(_BaseComposition):
+             if trans is not None and trans != 'passthrough':
+                 yield idx, name, trans
+ 
++    def __len__(self):
++        """
++        Returns the length of the Pipeline
++        """
++        return len(self.steps)
++
+     def __getitem__(self, ind):
+         """Returns a sub-pipeline or a single esimtator in the pipeline
+ 
+diff --git a/sklearn/tests/test_pipeline.py b/sklearn/tests/test_pipeline.py
+index 8d6fe8f70..d1f4127d5 100644
+--- a/sklearn/tests/test_pipeline.py
++++ b/sklearn/tests/test_pipeline.py
+@@ -552,6 +552,38 @@ def test_pipeline_index():
+     assert_raises(KeyError, lambda: pipe['foobar'])
+ 
+ 
++def test_pipeline_len():
++    # Test that len() works with Pipeline
++    transf = Transf()
++    clf = FitParamT()
++    
++    # Test pipeline with 2 steps
++    pipe = Pipeline([('transf', transf), ('clf', clf)])
++    assert_equal(len(pipe), 2)
++    
++    # Test pipeline with 1 step
++    pipe1 = Pipeline([('clf', clf)])
++    assert_equal(len(pipe1), 1)
++    
++    # Test pipeline with 3 steps
++    pipe3 = Pipeline([('transf1', Transf()), ('transf2', Transf()), ('clf', clf)])
++    assert_equal(len(pipe3), 3)
++    
++    # Test that len() can be used in slicing
++    sub_pipe = pipe3[:len(pipe3)]
++    assert_equal(len(sub_pipe), len(pipe3))
++    
++    sub_pipe2 = pipe3[:len(pipe3)-1]
++    assert_equal(len(sub_pipe2), 2)
++    
++    # Test with None and passthrough steps
++    pipe_none = Pipeline([('transf', transf), ('none_step', None), ('clf', clf)])
++    assert_equal(len(pipe_none), 3)
++    
++    pipe_passthrough = Pipeline([('transf', transf), ('passthrough_step', 'passthrough'), ('clf', clf)])
++    assert_equal(len(pipe_passthrough), 3)
++
++
+ def test_set_pipeline_steps():
+     transf1 = Transf()
+     transf2 = Transf()
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 000000000..65d465ac8
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,30 @@
++"""Test edge cases for Pipeline.__len__"""
++from sklearn.pipeline import Pipeline
++from sklearn.preprocessing import StandardScaler
++from sklearn.svm import SVC
++
++# Test that modifying steps updates len
++pipe = Pipeline([('scaler', StandardScaler()), ('clf', SVC())])
++print(f"Initial length: {len(pipe)}")
++
++# Add a step
++pipe.steps.append(('extra', StandardScaler()))
++print(f"After adding step: {len(pipe)}")
++
++# Remove a step
++pipe.steps.pop()
++print(f"After removing step: {len(pipe)}")
++
++# Test with set_params
++pipe.set_params(steps=[('only_clf', SVC())])
++print(f"After set_params with 1 step: {len(pipe)}")
++
++# Test boolean context (implicit bool conversion)
++if pipe:
++    print("Pipeline evaluates to True in boolean context (has steps)")
++
++# Test iteration compatibility
++print(f"\nIterating over pipeline steps:")
++for i in range(len(pipe)):
++    name, estimator = pipe.steps[i]
++    print(f"  Step {i}: {name}")
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 000000000..fcb09c931
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,26 @@
++"""Test to reproduce the exact issue from the problem statement"""
++from sklearn import svm
++from sklearn.datasets import samples_generator
++from sklearn.feature_selection import SelectKBest
++from sklearn.feature_selection import f_regression
++from sklearn.pipeline import Pipeline
++
++# generate some data to play with
++X, y = samples_generator.make_classification(
++    n_informative=5, n_redundant=0, random_state=42)
++
++anova_filter = SelectKBest(f_regression, k=5)
++clf = svm.SVC(kernel='linear')
++pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
++
++# This should now work
++print("Testing len(pipe)...")
++length = len(pipe)
++print(f"Success! len(pipe) = {length}")
++
++# This should also work now
++print("\nTesting pipe[:len(pipe)]...")
++sub_pipe = pipe[:len(pipe)]
++print(f"Success! pipe[:len(pipe)] works correctly")
++print(f"Original pipeline steps: {[name for name, _ in pipe.steps]}")
++print(f"Sliced pipeline steps: {[name for name, _ in sub_pipe.steps]}")
+diff --git a/test_pipeline_len.py b/test_pipeline_len.py
+new file mode 100644
+index 000000000..314e3c45c
+--- /dev/null
++++ b/test_pipeline_len.py
+@@ -0,0 +1,36 @@
++from sklearn import svm
++from sklearn.datasets import samples_generator
++from sklearn.feature_selection import SelectKBest
++from sklearn.feature_selection import f_regression
++from sklearn.pipeline import Pipeline
++
++# generate some data to play with
++X, y = samples_generator.make_classification(
++    n_informative=5, n_redundant=0, random_state=42)
++
++anova_filter = SelectKBest(f_regression, k=5)
++clf = svm.SVC(kernel='linear')
++pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
++
++print("Testing len(pipe)...")
++try:
++    length = len(pipe)
++    print(f"Success! len(pipe) = {length}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting pipe[:len(pipe)]...")
++try:
++    # This should work if __len__ is implemented
++    sub_pipe = pipe[:len(pipe)]
++    print(f"Success! pipe[:len(pipe)] = {sub_pipe}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++print("\nTesting pipe[:2]...")
++try:
++    # This should already work with existing __getitem__
++    sub_pipe = pipe[:2]
++    print(f"Success! pipe[:2] = {sub_pipe}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
+diff --git a/test_pipeline_len_comprehensive.py b/test_pipeline_len_comprehensive.py
+new file mode 100644
+index 000000000..3a0527b84
+--- /dev/null
++++ b/test_pipeline_len_comprehensive.py
+@@ -0,0 +1,72 @@
++from sklearn import svm
++from sklearn.datasets import samples_generator
++from sklearn.feature_selection import SelectKBest
++from sklearn.feature_selection import f_regression
++from sklearn.pipeline import Pipeline
++from sklearn.preprocessing import StandardScaler
++from sklearn.decomposition import PCA
++
++# Test 1: Basic pipeline with 2 steps
++print("Test 1: Basic pipeline with 2 steps")
++anova_filter = SelectKBest(f_regression, k=5)
++clf = svm.SVC(kernel='linear')
++pipe = Pipeline([('anova', anova_filter), ('svc', clf)])
++assert len(pipe) == 2
++print(f"OK: len(pipe) = {len(pipe)}")
++
++# Test 2: Pipeline with 3 steps
++print("\nTest 2: Pipeline with 3 steps")
++pipe3 = Pipeline([
++    ('scaler', StandardScaler()),
++    ('pca', PCA(n_components=2)),
++    ('clf', svm.SVC())
++])
++assert len(pipe3) == 3
++print(f"OK: len(pipe3) = {len(pipe3)}")
++
++# Test 3: Empty pipeline (not supported, skip this test)
++# print("\nTest 3: Empty pipeline")
++# empty_pipe = Pipeline([])
++# assert len(empty_pipe) == 0
++# print(f"OK: len(empty_pipe) = {len(empty_pipe)}")
++
++# Test 4: Pipeline with single step
++print("\nTest 4: Pipeline with single step")
++single_pipe = Pipeline([('clf', svm.SVC())])
++assert len(single_pipe) == 1
++print(f"OK: len(single_pipe) = {len(single_pipe)}")
++
++# Test 5: Using len() in slicing
++print("\nTest 5: Using len() in slicing")
++X, y = samples_generator.make_classification(
++    n_informative=5, n_redundant=0, random_state=42)
++
++# Test slicing with len
++sub_pipe = pipe3[:len(pipe3)-1]
++assert len(sub_pipe) == 2
++print(f"OK: pipe3[:len(pipe3)-1] has length {len(sub_pipe)}")
++
++# Test getting all steps
++all_steps = pipe3[:len(pipe3)]
++assert len(all_steps) == len(pipe3)
++print(f"OK: pipe3[:len(pipe3)] has length {len(all_steps)}")
++
++# Test 6: Pipeline with None/passthrough steps
++print("\nTest 6: Pipeline with None/passthrough steps")
++pipe_with_none = Pipeline([
++    ('step1', StandardScaler()),
++    ('step2', None),
++    ('step3', svm.SVC())
++])
++assert len(pipe_with_none) == 3  # None steps still count in length
++print(f"OK: len(pipe_with_none) = {len(pipe_with_none)}")
++
++pipe_with_passthrough = Pipeline([
++    ('step1', StandardScaler()),
++    ('step2', 'passthrough'),
++    ('step3', svm.SVC())
++])
++assert len(pipe_with_passthrough) == 3  # passthrough steps still count in length
++print(f"OK: len(pipe_with_passthrough) = {len(pipe_with_passthrough)}")
++
++print("\nAll tests passed!")

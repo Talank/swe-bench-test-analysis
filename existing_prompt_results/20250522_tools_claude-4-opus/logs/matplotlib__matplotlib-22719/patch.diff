@@ -1,0 +1,261 @@
+diff --git a/lib/matplotlib/category.py b/lib/matplotlib/category.py
+index c823b68fd9..6da7755f63 100644
+--- a/lib/matplotlib/category.py
++++ b/lib/matplotlib/category.py
+@@ -58,12 +58,16 @@ class StrCategoryConverter(units.ConversionInterface):
+             is_numlike = all(units.ConversionInterface.is_numlike(v)
+                              and not isinstance(v, (str, bytes))
+                              for v in values)
+-        if is_numlike:
++        # Empty arrays should not trigger the deprecation warning
++        if is_numlike and len(values) > 0:
+             _api.warn_deprecated(
+                 "3.5", message="Support for passing numbers through unit "
+                 "converters is deprecated since %(since)s and support will be "
+                 "removed %(removal)s; use Axis.convert_units instead.")
+             return np.asarray(values, dtype=float)
++        # For empty arrays, return them as float arrays without warning
++        if len(values) == 0:
++            return np.asarray(values, dtype=float)
+         # force an update so it also does type checking
+         unit.update(values)
+         return np.vectorize(unit._mapping.__getitem__, otypes=[float])(values)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..ac60b25a2b
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,15 @@
++import matplotlib.pyplot as plt
++import warnings
++
++# Catch warnings to see the issue
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    f, ax = plt.subplots()
++    ax.xaxis.update_units(["a", "b"])
++    ax.plot([], [])
++    print("No warning/error - unexpected!")
++except DeprecationWarning as e:
++    print(f"Got deprecation warning: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/test_convert_units.py b/test_convert_units.py
+new file mode 100644
+index 0000000000..1d90babe84
+--- /dev/null
++++ b/test_convert_units.py
+@@ -0,0 +1,19 @@
++import matplotlib.pyplot as plt
++import warnings
++
++# Test the convert_units method directly as suggested in the warning
++warnings.resetwarnings()
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    f, ax = plt.subplots()
++    ax.xaxis.update_units(["a", "b"])
++    
++    # Test convert_units with empty array
++    result = ax.xaxis.convert_units([])
++    print(f"convert_units([]) = {result}")
++    print("✓ No warning with convert_units - SUCCESS")
++except DeprecationWarning as e:
++    print(f"✗ Got deprecation warning with convert_units: {e}")
++except Exception as e:
++    print(f"✗ Got error: {type(e).__name__}: {e}")
+diff --git a/test_empty_array.py b/test_empty_array.py
+new file mode 100644
+index 0000000000..21aa0e43fb
+--- /dev/null
++++ b/test_empty_array.py
+@@ -0,0 +1,18 @@
++import numpy as np
++from matplotlib import units
++
++# Test if empty array is considered numlike
++values = np.array([], dtype=object)
++print(f"Empty array shape: {values.shape}")
++print(f"Empty array dtype: {values.dtype}")
++
++# Check if all elements are numlike (should be True for empty array)
++is_numlike = all(units.ConversionInterface.is_numlike(v)
++                 and not isinstance(v, (str, bytes))
++                 for v in values)
++print(f"Is empty array numlike? {is_numlike}")
++
++# Test with float dtype
++float_values = np.array([], dtype=float)
++print(f"\nFloat empty array: {float_values}")
++print(f"Float empty array dtype: {float_values.dtype}")
+diff --git a/test_empty_category_fix.py b/test_empty_category_fix.py
+new file mode 100644
+index 0000000000..a78911b48c
+--- /dev/null
++++ b/test_empty_category_fix.py
+@@ -0,0 +1,50 @@
++"""
++Test for the fix to issue with empty arrays and category converters.
++This test should be added to test_category.py
++"""
++import matplotlib.pyplot as plt
++import numpy as np
++import warnings
++import pytest
++
++
++def test_empty_arrays_no_deprecation_warning():
++    """Empty arrays should not trigger deprecation warning with category units."""
++    with warnings.catch_warnings():
++        warnings.simplefilter("error", DeprecationWarning)
++        
++        # This should not raise a deprecation warning
++        f, ax = plt.subplots()
++        ax.xaxis.update_units(["a", "b"])
++        ax.plot([], [])
++        
++        # Also test with numpy arrays
++        ax.plot(np.array([]), np.array([]))
++        
++        # Mixed empty types
++        ax.plot([], np.array([]))
++        ax.plot(np.array([]), [])
++
++
++def test_numeric_data_still_warns():
++    """Numeric data should still trigger deprecation warning."""
++    import matplotlib.category as mcat
++    
++    unit = mcat.UnitData()
++    unit.update(["a", "b", "c"])
++    
++    with pytest.warns(DeprecationWarning, match="Support for passing numbers through unit converters"):
++        mcat.StrCategoryConverter.convert([1, 2, 3], unit, None)
++
++
++if __name__ == "__main__":
++    # Run the tests
++    print("Testing empty arrays with category units...")
++    test_empty_arrays_no_deprecation_warning()
++    print("✓ Empty arrays test passed")
++    
++    print("\nTesting numeric data warning...")
++    test_numeric_data_still_warns()
++    print("✓ Numeric data warning test passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..a63c7d2d11
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,68 @@
++import matplotlib.pyplot as plt
++import numpy as np
++import warnings
++
++# Test 1: Empty arrays should not trigger warning
++print("Test 1: Empty arrays")
++warnings.resetwarnings()
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    f, ax = plt.subplots()
++    ax.xaxis.update_units(["a", "b"])
++    ax.plot([], [])
++    print("✓ No warning for empty arrays - SUCCESS")
++except DeprecationWarning as e:
++    print(f"✗ Got unexpected deprecation warning: {e}")
++
++# Test 2: Numeric data should still trigger warning
++print("\nTest 2: Numeric data through category converter")
++warnings.resetwarnings()
++warnings.filterwarnings('default')  # Show warnings but don't error
++
++f, ax = plt.subplots()
++ax.xaxis.update_units(["a", "b"])
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    try:
++        # Try to plot numeric data on categorical axis
++        ax.plot([1, 2], [3, 4])
++    except:
++        pass  # We expect this to fail, just checking for warning
++    
++    if any("Support for passing numbers through unit converters" in str(warning.message) for warning in w):
++        print("✓ Numeric data still triggers deprecation warning - SUCCESS")
++    else:
++        print("✗ No deprecation warning for numeric data - FAIL")
++
++# Test 3: Normal categorical data should work
++print("\nTest 3: Normal categorical data")
++warnings.resetwarnings()
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    f, ax = plt.subplots()
++    ax.plot(["a", "b"], [1, 2])
++    print("✓ Categorical data works without warning - SUCCESS")
++except DeprecationWarning as e:
++    print(f"✗ Got unexpected deprecation warning: {e}")
++
++# Test 4: Empty numpy arrays of different types
++print("\nTest 4: Various empty arrays")
++warnings.resetwarnings()
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    f, ax = plt.subplots()
++    ax.xaxis.update_units(["a", "b"])
++    
++    # Test different empty array types
++    ax.plot(np.array([]), np.array([]))
++    ax.plot([], np.array([]))
++    ax.plot(np.array([]), [])
++    
++    print("✓ All empty array variants work without warning - SUCCESS")
++except DeprecationWarning as e:
++    print(f"✗ Got unexpected deprecation warning: {e}")
++
++print("\nAll tests completed!")
+diff --git a/test_numeric_warning.py b/test_numeric_warning.py
+new file mode 100644
+index 0000000000..2b98b7aab3
+--- /dev/null
++++ b/test_numeric_warning.py
+@@ -0,0 +1,33 @@
++import matplotlib.pyplot as plt
++import matplotlib.category as mcat
++import numpy as np
++import warnings
++
++# Direct test of the converter
++print("Direct converter test with numeric data:")
++warnings.resetwarnings()
++
++unit = mcat.UnitData()
++unit.update(["a", "b", "c"])
++
++with warnings.catch_warnings(record=True) as w:
++    warnings.simplefilter("always")
++    
++    # Test with numeric data
++    result = mcat.StrCategoryConverter.convert([1, 2, 3], unit, None)
++    
++    if any("Support for passing numbers through unit converters" in str(warning.message) for warning in w):
++        print("✓ Numeric data triggers deprecation warning - SUCCESS")
++    else:
++        print("✗ No deprecation warning for numeric data - FAIL")
++
++print("\nDirect converter test with empty array:")
++warnings.resetwarnings()
++warnings.filterwarnings('error', category=DeprecationWarning)
++
++try:
++    result = mcat.StrCategoryConverter.convert([], unit, None)
++    print("✓ Empty array doesn't trigger warning - SUCCESS")
++    print(f"  Result: {result}, dtype: {result.dtype}")
++except DeprecationWarning as e:
++    print(f"✗ Got unexpected deprecation warning: {e}")

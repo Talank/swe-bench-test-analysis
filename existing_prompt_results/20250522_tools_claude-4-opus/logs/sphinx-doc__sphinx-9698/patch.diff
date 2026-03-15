@@ -1,0 +1,248 @@
+diff --git a/sphinx/domains/python.py b/sphinx/domains/python.py
+index cd02eaad5..0b3d55856 100644
+--- a/sphinx/domains/python.py
++++ b/sphinx/domains/python.py
+@@ -788,15 +788,21 @@ class PyMethod(PyObject):
+             if modname and self.env.config.add_module_names:
+                 clsname = '.'.join([modname, clsname])
+         except ValueError:
+-            if modname:
+-                return _('%s() (in module %s)') % (name, modname)
++            if 'property' in self.options:
++                if modname:
++                    return _('%s (in module %s)') % (name, modname)
++                else:
++                    return '%s' % name
+             else:
+-                return '%s()' % name
++                if modname:
++                    return _('%s() (in module %s)') % (name, modname)
++                else:
++                    return '%s()' % name
+ 
+-        if 'classmethod' in self.options:
++        if 'property' in self.options:
++            return _('%s (%s property)') % (methname, clsname)
++        elif 'classmethod' in self.options:
+             return _('%s() (%s class method)') % (methname, clsname)
+-        elif 'property' in self.options:
+-            return _('%s() (%s property)') % (methname, clsname)
+         elif 'staticmethod' in self.options:
+             return _('%s() (%s static method)') % (methname, clsname)
+         else:
+diff --git a/test_comprehensive_property_index.py b/test_comprehensive_property_index.py
+new file mode 100644
+index 000000000..8022f91b2
+--- /dev/null
++++ b/test_comprehensive_property_index.py
+@@ -0,0 +1,114 @@
++"""Comprehensive test for property index entries."""
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_comprehensive_property_index():
++    """Test various property definitions and their index entries."""
++    
++    # Create a temporary directory for the test
++    tmpdir = tempfile.mkdtemp()
++    srcdir = os.path.join(tmpdir, 'source')
++    outdir = os.path.join(tmpdir, 'build')
++    os.makedirs(srcdir)
++    
++    # Create conf.py
++    with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++        f.write("""
++project = 'Test'
++extensions = []
++""")
++    
++    # Create index.rst with comprehensive test content
++    with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++        f.write("""
++Test Property Index
++===================
++
++.. py:module:: mymodule
++
++.. py:class:: Foo
++
++   .. py:method:: method_as_property
++      :property:
++      
++      This is a property defined using method directive with :property: option.
++
++   .. py:property:: real_property
++   
++      This is a property defined using property directive.
++      
++   .. py:method:: regular_method()
++   
++      This is a regular method.
++      
++   .. py:method:: classmethod_property
++      :classmethod:
++      :property:
++      
++      This is a class method property (edge case).
++
++.. py:method:: module_level_property
++   :property:
++   
++   This is a module-level property.
++   
++.. py:method:: module_level_method()
++
++   This is a module-level method.
++
++Index
++=====
++
++:ref:`genindex`
++""")
++    
++    try:
++        # Build the documentation
++        with docutils_namespace():
++            app = Sphinx(srcdir, srcdir, outdir, outdir + '/.doctrees', 'html')
++            app.build()
++        
++        # Check the generated index
++        with open(os.path.join(outdir, 'genindex.html'), 'r') as f:
++            content = f.read()
++        
++        # Print relevant lines for debugging
++        lines = content.split('\n')
++        print("\nIndex entries found:")
++        for line in lines:
++            if '<li><a href' in line and ('property' in line or 'method' in line):
++                print(line.strip())
++        
++        # Check that properties don't have parentheses
++        assert 'method_as_property (Foo property)' in content or 'method_as_property (mymodule.Foo property)' in content, \
++            "method_as_property should not have parentheses"
++        assert 'real_property (Foo property)' in content or 'real_property (mymodule.Foo property)' in content, \
++            "real_property should not have parentheses"
++        assert 'module_level_property (in module mymodule)' in content, \
++            "module_level_property should not have parentheses"
++            
++        # Check that regular methods have parentheses
++        assert 'regular_method() (Foo method)' in content or 'regular_method() (mymodule.Foo method)' in content, \
++            "regular_method should have parentheses"
++        assert 'module_level_method() (in module mymodule)' in content, \
++            "module_level_method should have parentheses"
++            
++        # Check that classmethod property doesn't have parentheses
++        # (This is an edge case - a method that is both classmethod and property)
++        # When both options are present, :property: takes precedence
++        assert 'classmethod_property (Foo property)' in content or 'classmethod_property (mymodule.Foo property)' in content, \
++            "classmethod_property should be indexed as property (without parentheses) when :property: option is present"
++            
++        print("\nAll tests passed!")
++        
++    finally:
++        # Clean up
++        shutil.rmtree(tmpdir)
++
++
++if __name__ == '__main__':
++    test_comprehensive_property_index()
+diff --git a/test_property_index.py b/test_property_index.py
+new file mode 100644
+index 000000000..185a1107b
+--- /dev/null
++++ b/test_property_index.py
+@@ -0,0 +1,77 @@
++"""Test for property index entry issue."""
++import os
++import tempfile
++import shutil
++from sphinx.application import Sphinx
++from sphinx.util.docutils import docutils_namespace
++
++
++def test_property_index_entry():
++    """Test that py:method with :property: option doesn't add parentheses to index."""
++    
++    # Create a temporary directory for the test
++    tmpdir = tempfile.mkdtemp()
++    srcdir = os.path.join(tmpdir, 'source')
++    outdir = os.path.join(tmpdir, 'build')
++    os.makedirs(srcdir)
++    
++    # Create conf.py
++    with open(os.path.join(srcdir, 'conf.py'), 'w') as f:
++        f.write("""
++project = 'Test'
++extensions = []
++""")
++    
++    # Create index.rst with test content
++    with open(os.path.join(srcdir, 'index.rst'), 'w') as f:
++        f.write("""
++Test Property Index
++===================
++
++.. py:class:: Foo
++
++   .. py:method:: bar
++      :property:
++      
++      This is a property defined using method directive.
++
++   .. py:property:: baz
++   
++      This is a property defined using property directive.
++
++Index
++=====
++
++:ref:`genindex`
++""")
++    
++    try:
++        # Build the documentation
++        with docutils_namespace():
++            app = Sphinx(srcdir, srcdir, outdir, outdir + '/.doctrees', 'html')
++            app.build()
++        
++        # Check the generated index
++        with open(os.path.join(outdir, 'genindex.html'), 'r') as f:
++            content = f.read()
++            
++        # Check that both properties don't have parentheses in the index
++        # The index should show "bar (Foo property)" not "bar() (Foo property)"
++        assert 'bar (Foo property)' in content or 'bar (property)' in content, \
++            "Property 'bar' should not have parentheses in index"
++        assert 'bar() (Foo property)' not in content and 'bar() (property)' not in content, \
++            "Property 'bar' should not have parentheses in index"
++            
++        # Also check that baz is correctly indexed
++        assert 'baz (Foo property)' in content or 'baz (property)' in content, \
++            "Property 'baz' should be in index"
++            
++        print("Test passed!")
++        
++    finally:
++        # Clean up
++        shutil.rmtree(tmpdir)
++
++
++if __name__ == '__main__':
++    test_property_index_entry()
+diff --git a/tests/test_domain_py.py b/tests/test_domain_py.py
+index 682ea76e1..5ba63d0e3 100644
+--- a/tests/test_domain_py.py
++++ b/tests/test_domain_py.py
+@@ -756,7 +756,7 @@ def test_pymethod_options(app):
+ 
+     # :property:
+     assert_node(doctree[1][1][8], addnodes.index,
+-                entries=[('single', 'meth5() (Class property)', 'Class.meth5', '', None)])
++                entries=[('single', 'meth5 (Class property)', 'Class.meth5', '', None)])
+     assert_node(doctree[1][1][9], ([desc_signature, ([desc_annotation, ("property", desc_sig_space)],
+                                                      [desc_name, "meth5"])],
+                                    [desc_content, ()]))

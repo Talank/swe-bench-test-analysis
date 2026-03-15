@@ -1,0 +1,452 @@
+diff --git a/django/db/backends/base/client.py b/django/db/backends/base/client.py
+index 339f1e863c..335f7bcded 100644
+--- a/django/db/backends/base/client.py
++++ b/django/db/backends/base/client.py
+@@ -21,6 +21,6 @@ class BaseDatabaseClient:
+ 
+     def runshell(self, parameters):
+         args, env = self.settings_to_cmd_args_env(self.connection.settings_dict, parameters)
+-        if env:
++        if env is not None:
+             env = {**os.environ, **env}
+         subprocess.run(args, env=env, check=True)
+diff --git a/test_all_backends.py b/test_all_backends.py
+new file mode 100644
+index 0000000000..b02f9612be
+--- /dev/null
++++ b/test_all_backends.py
+@@ -0,0 +1,103 @@
++import os
++import subprocess
++from unittest.mock import patch, MagicMock
++from django.db.backends.postgresql.client import DatabaseClient as PostgreSQLClient
++from django.db.backends.mysql.client import DatabaseClient as MySQLClient
++from django.db.backends.sqlite3.client import DatabaseClient as SQLiteClient
++from django.db.backends.oracle.client import DatabaseClient as OracleClient
++
++def test_backend_env_handling():
++    """Test that all backends handle environment correctly"""
++    
++    # Set up a test environment variable
++    test_env_var = "TEST_VAR_FOR_RUNSHELL"
++    test_env_value = "test_value_123"
++    os.environ[test_env_var] = test_env_value
++    
++    # Test PostgreSQL with empty env
++    print("\n=== Testing PostgreSQL (empty env) ===")
++    connection = MagicMock()
++    connection.settings_dict = {
++        'NAME': 'testdb',
++        'USER': 'testuser',
++        'HOST': 'localhost',
++        'PORT': '5432',
++    }
++    client = PostgreSQLClient(connection)
++    
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        env_passed = mock_run.call_args.kwargs.get('env')
++        print(f"Env type: {type(env_passed)}")
++        print(f"Contains test var: {test_env_var in (env_passed or {})}")
++        assert env_passed is not None
++        assert test_env_var in env_passed
++    
++    # Test PostgreSQL with password (non-empty env)
++    print("\n=== Testing PostgreSQL (with password) ===")
++    connection.settings_dict['PASSWORD'] = 'testpass'
++    client = PostgreSQLClient(connection)
++    
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        env_passed = mock_run.call_args.kwargs.get('env')
++        print(f"Env type: {type(env_passed)}")
++        print(f"Contains test var: {test_env_var in (env_passed or {})}")
++        print(f"Contains PGPASSWORD: {'PGPASSWORD' in (env_passed or {})}")
++        assert env_passed is not None
++        assert test_env_var in env_passed
++        assert env_passed['PGPASSWORD'] == 'testpass'
++    
++    # Test SQLite (returns None)
++    print("\n=== Testing SQLite (None env) ===")
++    connection.settings_dict = {'NAME': 'test.db'}
++    client = SQLiteClient(connection)
++    
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        env_passed = mock_run.call_args.kwargs.get('env')
++        print(f"Env type: {type(env_passed)}")
++        print(f"Env is None: {env_passed is None}")
++        # When env is None, subprocess.run uses current environment
++        assert env_passed is None
++    
++    # Test MySQL (no password - returns None)
++    print("\n=== Testing MySQL (no password - None env) ===")
++    connection.settings_dict = {
++        'NAME': 'testdb',
++        'USER': 'testuser',
++        'HOST': 'localhost',
++        'PORT': '3306',
++        'PASSWORD': '',
++        'OPTIONS': {},
++    }
++    client = MySQLClient(connection)
++    
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        env_passed = mock_run.call_args.kwargs.get('env')
++        print(f"Env type: {type(env_passed)}")
++        print(f"Env is None: {env_passed is None}")
++        assert env_passed is None
++        
++    # Test MySQL with password
++    print("\n=== Testing MySQL (with password) ===")
++    connection.settings_dict['PASSWORD'] = 'testpass'
++    client = MySQLClient(connection)
++    
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        env_passed = mock_run.call_args.kwargs.get('env')
++        print(f"Env type: {type(env_passed)}")
++        print(f"Contains test var: {test_env_var in (env_passed or {})}")
++        print(f"Contains MYSQL_PWD: {'MYSQL_PWD' in (env_passed or {})}")
++        assert env_passed is not None
++        assert test_env_var in env_passed
++        assert env_passed['MYSQL_PWD'] == 'testpass'
++    
++    # Clean up
++    del os.environ[test_env_var]
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_backend_env_handling()
+diff --git a/test_bug_without_fix.py b/test_bug_without_fix.py
+new file mode 100644
+index 0000000000..e0d97aeff9
+--- /dev/null
++++ b/test_bug_without_fix.py
+@@ -0,0 +1,58 @@
++"""
++Test what happens without the fix (using the old code logic)
++"""
++import os
++import subprocess
++from unittest.mock import patch, MagicMock
++from django.db.backends.postgresql.client import DatabaseClient
++
++
++def simulate_old_runshell(client, parameters):
++    """Simulate the old buggy behavior where 'if env:' was used"""
++    args, env = client.settings_to_cmd_args_env(client.connection.settings_dict, parameters)
++    # Old buggy code: if env:
++    if env:  # Empty dict is falsy!
++        env = {**os.environ, **env}
++    # If env was empty dict, it stays empty dict and is passed to subprocess
++    return args, env
++
++
++def test_bug_behavior():
++    """Show what the bug was doing"""
++    
++    # Set a test env var
++    os.environ['TEST_VAR'] = 'should_be_passed'
++    
++    try:
++        connection = MagicMock()
++        connection.settings_dict = {
++            'NAME': 'testdb',
++            'USER': 'testuser',
++            'HOST': 'localhost',
++            'PORT': '5432',
++        }
++        
++        client = DatabaseClient(connection)
++        
++        # Simulate old behavior
++        args, env_passed = simulate_old_runshell(client, [])
++        
++        print("=== OLD BUGGY BEHAVIOR ===")
++        print(f"Environment type: {type(env_passed)}")
++        print(f"Environment content: {env_passed}")
++        print(f"Contains TEST_VAR: {'TEST_VAR' in env_passed}")
++        print(f"Number of env vars: {len(env_passed)}")
++        
++        # The bug: empty dict is passed, os.environ is not included
++        assert env_passed == {}, "Old behavior passes empty dict"
++        assert 'TEST_VAR' not in env_passed, "Old behavior loses os.environ"
++        
++        print("\nThis shows the bug: subprocess.run would get an empty environment!")
++        print("No PATH, no HOME, no system env vars would be available.")
++        
++    finally:
++        del os.environ['TEST_VAR']
++
++
++if __name__ == "__main__":
++    test_bug_behavior()
+diff --git a/test_env_regression.py b/test_env_regression.py
+new file mode 100644
+index 0000000000..998d12f317
+--- /dev/null
++++ b/test_env_regression.py
+@@ -0,0 +1,111 @@
++"""
++Test for the regression where empty env dict prevents os.environ from being used.
++This test ensures that the fix for the issue is working correctly.
++"""
++import os
++import subprocess
++from unittest.mock import patch, MagicMock
++from django.test import SimpleTestCase
++from django.db.backends.base.client import BaseDatabaseClient
++
++
++class MockDatabaseClient(BaseDatabaseClient):
++    """Mock client for testing env handling"""
++    executable_name = 'mock_client'
++    
++    @classmethod
++    def settings_to_cmd_args_env(cls, settings_dict, parameters):
++        # Return different env values to test all cases
++        env_type = settings_dict.get('ENV_TYPE', 'empty_dict')
++        if env_type == 'empty_dict':
++            return [cls.executable_name], {}
++        elif env_type == 'none':
++            return [cls.executable_name], None
++        elif env_type == 'with_values':
++            return [cls.executable_name], {'CUSTOM_VAR': 'custom_value'}
++        
++
++class TestEnvRegression(SimpleTestCase):
++    """Test that runshell correctly handles environment variables"""
++    
++    def setUp(self):
++        self.test_env_var = 'TEST_REGRESSION_VAR'
++        self.test_env_value = 'test_regression_value'
++        os.environ[self.test_env_var] = self.test_env_value
++        
++    def tearDown(self):
++        if self.test_env_var in os.environ:
++            del os.environ[self.test_env_var]
++    
++    def test_empty_dict_env_includes_os_environ(self):
++        """Empty dict from settings_to_cmd_args_env should include os.environ"""
++        connection = MagicMock()
++        connection.settings_dict = {'ENV_TYPE': 'empty_dict'}
++        client = MockDatabaseClient(connection)
++        
++        with patch('subprocess.run') as mock_run:
++            client.runshell([])
++            env_passed = mock_run.call_args.kwargs.get('env')
++            
++            # Should have merged os.environ
++            self.assertIsNotNone(env_passed)
++            self.assertIn(self.test_env_var, env_passed)
++            self.assertEqual(env_passed[self.test_env_var], self.test_env_value)
++    
++    def test_none_env_passes_none(self):
++        """None from settings_to_cmd_args_env should pass None to subprocess"""
++        connection = MagicMock()
++        connection.settings_dict = {'ENV_TYPE': 'none'}
++        client = MockDatabaseClient(connection)
++        
++        with patch('subprocess.run') as mock_run:
++            client.runshell([])
++            env_passed = mock_run.call_args.kwargs.get('env')
++            
++            # Should be None (subprocess.run will use os.environ)
++            self.assertIsNone(env_passed)
++    
++    def test_dict_with_values_includes_os_environ(self):
++        """Dict with values should be merged with os.environ"""
++        connection = MagicMock()
++        connection.settings_dict = {'ENV_TYPE': 'with_values'}
++        client = MockDatabaseClient(connection)
++        
++        with patch('subprocess.run') as mock_run:
++            client.runshell([])
++            env_passed = mock_run.call_args.kwargs.get('env')
++            
++            # Should have both custom vars and os.environ
++            self.assertIsNotNone(env_passed)
++            self.assertIn('CUSTOM_VAR', env_passed)
++            self.assertEqual(env_passed['CUSTOM_VAR'], 'custom_value')
++            self.assertIn(self.test_env_var, env_passed)
++            self.assertEqual(env_passed[self.test_env_var], self.test_env_value)
++
++
++if __name__ == '__main__':
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++        )
++    
++    django.setup()
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.TestEnvRegression"])
++    if failures:
++        exit(1)
+diff --git a/test_postgresql_env_bug.py b/test_postgresql_env_bug.py
+new file mode 100644
+index 0000000000..34db954e31
+--- /dev/null
++++ b/test_postgresql_env_bug.py
+@@ -0,0 +1,87 @@
++"""
++Reproduce the exact bug mentioned in the problem statement:
++PostgreSQL client returns empty dict instead of None for env,
++as a result os.environ is not used and empty env passed to subprocess.
++"""
++import os
++import subprocess
++from unittest.mock import patch, MagicMock
++from django.db.backends.postgresql.client import DatabaseClient
++
++
++def test_postgresql_empty_env_bug():
++    """Test the exact scenario from the bug report"""
++    
++    # Set up environment variables that should be preserved
++    important_env_vars = {
++        'PATH': os.environ.get('PATH', ''),
++        'HOME': os.environ.get('HOME', ''),
++        'USER': os.environ.get('USER', ''),
++        'LANG': 'en_US.UTF-8',  # Common env var that might be needed
++        'CUSTOM_TEST_VAR': 'should_be_preserved',
++    }
++    
++    # Save original env
++    original_env = os.environ.copy()
++    
++    # Set our test env vars
++    for key, value in important_env_vars.items():
++        os.environ[key] = value
++    
++    try:
++        # Create a PostgreSQL client with minimal settings (no password, etc.)
++        # This will make settings_to_cmd_args_env return an empty dict
++        connection = MagicMock()
++        connection.settings_dict = {
++            'NAME': 'testdb',
++            'USER': 'testuser',
++            'HOST': 'localhost',
++            'PORT': '5432',
++            # No PASSWORD, so env dict will be empty
++        }
++        
++        client = DatabaseClient(connection)
++        
++        # Get what settings_to_cmd_args_env returns
++        args, env = client.settings_to_cmd_args_env(connection.settings_dict, [])
++        print(f"settings_to_cmd_args_env returned env: {env}")
++        print(f"env is empty dict: {env == {}}")
++        
++        # Verify it returns an empty dict (the bug scenario)
++        assert env == {}, "Expected empty dict from PostgreSQL client"
++        
++        # Now test runshell
++        with patch('subprocess.run') as mock_run:
++            client.runshell([])
++            
++            # Get the environment passed to subprocess.run
++            call_args = mock_run.call_args
++            env_passed = call_args.kwargs.get('env')
++            
++            print(f"\nEnvironment passed to subprocess.run:")
++            print(f"Type: {type(env_passed)}")
++            print(f"Is None: {env_passed is None}")
++            if env_passed is not None:
++                print(f"Number of env vars: {len(env_passed)}")
++                print(f"Contains PATH: {'PATH' in env_passed}")
++                print(f"Contains CUSTOM_TEST_VAR: {'CUSTOM_TEST_VAR' in env_passed}")
++                
++                # The fix ensures that os.environ is included
++                assert 'PATH' in env_passed, "PATH should be in environment"
++                assert 'CUSTOM_TEST_VAR' in env_passed, "Custom env var should be preserved"
++                assert env_passed['CUSTOM_TEST_VAR'] == 'should_be_preserved'
++            else:
++                # Before the fix, this would happen - empty dict would cause
++                # env to be None and subprocess would get no environment
++                raise AssertionError("Environment should not be None!")
++                
++        print("\nBug is fixed! Empty dict from PostgreSQL client now includes os.environ")
++        
++    finally:
++        # Restore original environment
++        os.environ.clear()
++        os.environ.update(original_env)
++
++
++if __name__ == "__main__":
++    test_postgresql_empty_env_bug()
+diff --git a/test_runshell_env.py b/test_runshell_env.py
+new file mode 100644
+index 0000000000..c35789f8dd
+--- /dev/null
++++ b/test_runshell_env.py
+@@ -0,0 +1,51 @@
++import os
++import subprocess
++from unittest.mock import patch, MagicMock
++from django.db.backends.postgresql.client import DatabaseClient
++from django.db.backends.base.client import BaseDatabaseClient
++
++# Test the issue where empty env dict prevents os.environ from being used
++
++def test_runshell_with_empty_env():
++    """Test that runshell respects os.environ when env is empty dict"""
++    
++    # Set up a test environment variable
++    test_env_var = "TEST_VAR_FOR_RUNSHELL"
++    test_env_value = "test_value_123"
++    os.environ[test_env_var] = test_env_value
++    
++    # Create a mock connection
++    connection = MagicMock()
++    connection.settings_dict = {
++        'NAME': 'testdb',
++        'USER': 'testuser',
++        'HOST': 'localhost',
++        'PORT': '5432',
++    }
++    
++    # Create a client instance
++    client = DatabaseClient(connection)
++    
++    # Mock subprocess.run to capture the env argument
++    with patch('subprocess.run') as mock_run:
++        client.runshell([])
++        
++        # Get the env argument passed to subprocess.run
++        call_args = mock_run.call_args
++        env_passed = call_args.kwargs.get('env') or call_args[1].get('env') if len(call_args) > 1 else None
++        
++        print(f"Environment passed to subprocess.run: {env_passed}")
++        print(f"Test env var in passed env: {test_env_var in (env_passed or {})}")
++        print(f"Test env var value: {(env_passed or {}).get(test_env_var)}")
++        
++        # The bug is that env_passed will be None instead of containing os.environ
++        assert env_passed is not None, "Environment should not be None"
++        assert test_env_var in env_passed, f"Environment should contain {test_env_var} from os.environ"
++        assert env_passed[test_env_var] == test_env_value, f"Environment variable value should be {test_env_value}"
++    
++    # Clean up
++    del os.environ[test_env_var]
++
++if __name__ == "__main__":
++    test_runshell_with_empty_env()
++    print("Test passed!")

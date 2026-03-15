@@ -1,0 +1,172 @@
+diff --git a/sphinx/domains/python.py b/sphinx/domains/python.py
+index 9875a9f4b..8ec81864f 100644
+--- a/sphinx/domains/python.py
++++ b/sphinx/domains/python.py
+@@ -109,25 +109,33 @@ def type_to_xref(text: str, env: BuildEnvironment = None) -> addnodes.pending_xr
+ 
+ def _parse_annotation(annotation: str, env: BuildEnvironment = None) -> List[Node]:
+     """Parse type annotation."""
+-    def unparse(node: ast.AST) -> List[Node]:
++    def unparse(node: ast.AST, in_literal: bool = False) -> List[Node]:
+         if isinstance(node, ast.Attribute):
+-            return [nodes.Text("%s.%s" % (unparse(node.value)[0], node.attr))]
++            return [nodes.Text("%s.%s" % (unparse(node.value, in_literal)[0], node.attr))]
+         elif isinstance(node, ast.BinOp):
+-            result: List[Node] = unparse(node.left)
+-            result.extend(unparse(node.op))
+-            result.extend(unparse(node.right))
++            result: List[Node] = unparse(node.left, in_literal)
++            result.extend(unparse(node.op, in_literal))
++            result.extend(unparse(node.right, in_literal))
+             return result
+         elif isinstance(node, ast.BitOr):
+             return [nodes.Text(' '), addnodes.desc_sig_punctuation('', '|'), nodes.Text(' ')]
+         elif isinstance(node, ast.Constant):  # type: ignore
+             if node.value is Ellipsis:
+-                return [addnodes.desc_sig_punctuation('', "...")]
++                # In literal context, ellipsis should be a literal string, not punctuation
++                if in_literal:
++                    return [addnodes.desc_sig_literal_string('', "...")]
++                else:
++                    return [addnodes.desc_sig_punctuation('', "...")]
+             else:
+-                return [nodes.Text(node.value)]
++                # Mark literal values so they won't be converted to xrefs
++                if in_literal:
++                    return [addnodes.desc_sig_literal_string('', repr(node.value))]
++                else:
++                    return [nodes.Text(node.value)]
+         elif isinstance(node, ast.Expr):
+-            return unparse(node.value)
++            return unparse(node.value, in_literal)
+         elif isinstance(node, ast.Index):
+-            return unparse(node.value)
++            return unparse(node.value, in_literal)
+         elif isinstance(node, ast.List):
+             result = [addnodes.desc_sig_punctuation('', '[')]
+             if node.elts:
+@@ -135,26 +143,37 @@ def _parse_annotation(annotation: str, env: BuildEnvironment = None) -> List[Nod
+                 # last element of result if the for-loop was run at least
+                 # once
+                 for elem in node.elts:
+-                    result.extend(unparse(elem))
++                    result.extend(unparse(elem, in_literal))
+                     result.append(addnodes.desc_sig_punctuation('', ', '))
+                 result.pop()
+             result.append(addnodes.desc_sig_punctuation('', ']'))
+             return result
+         elif isinstance(node, ast.Module):
+-            return sum((unparse(e) for e in node.body), [])
++            return sum((unparse(e, in_literal) for e in node.body), [])
+         elif isinstance(node, ast.Name):
+-            return [nodes.Text(node.id)]
++            # Special case: In Literal context, some names should be treated as literal values
++            if in_literal and node.id in ('Ellipsis', 'True', 'False', 'None'):
++                return [addnodes.desc_sig_literal_string('', node.id)]
++            else:
++                return [nodes.Text(node.id)]
+         elif isinstance(node, ast.Subscript):
+-            result = unparse(node.value)
++            # Check if this is a Literal type
++            is_literal = False
++            if isinstance(node.value, ast.Attribute) and node.value.attr == 'Literal':
++                is_literal = True
++            elif isinstance(node.value, ast.Name) and node.value.id == 'Literal':
++                is_literal = True
++            
++            result = unparse(node.value, in_literal)
+             result.append(addnodes.desc_sig_punctuation('', '['))
+-            result.extend(unparse(node.slice))
++            result.extend(unparse(node.slice, is_literal or in_literal))
+             result.append(addnodes.desc_sig_punctuation('', ']'))
+             return result
+         elif isinstance(node, ast.Tuple):
+             if node.elts:
+                 result = []
+                 for elem in node.elts:
+-                    result.extend(unparse(elem))
++                    result.extend(unparse(elem, in_literal))
+                     result.append(addnodes.desc_sig_punctuation('', ', '))
+                 result.pop()
+             else:
+@@ -165,9 +184,17 @@ def _parse_annotation(annotation: str, env: BuildEnvironment = None) -> List[Nod
+         else:
+             if sys.version_info < (3, 8):
+                 if isinstance(node, ast.Ellipsis):
+-                    return [addnodes.desc_sig_punctuation('', "...")]
++                    # In literal context, ellipsis should be a literal string, not punctuation
++                    if in_literal:
++                        return [addnodes.desc_sig_literal_string('', "...")]
++                    else:
++                        return [addnodes.desc_sig_punctuation('', "...")]
+                 elif isinstance(node, ast.NameConstant):
+-                    return [nodes.Text(node.value)]
++                    # Mark literal values so they won't be converted to xrefs
++                    if in_literal:
++                        return [addnodes.desc_sig_literal_string('', repr(node.value))]
++                    else:
++                        return [nodes.Text(node.value)]
+ 
+             raise SyntaxError  # unsupported syntax
+ 
+diff --git a/tests/test_domain_py.py b/tests/test_domain_py.py
+index 067febcf4..1b6f37286 100644
+--- a/tests/test_domain_py.py
++++ b/tests/test_domain_py.py
+@@ -341,6 +341,56 @@ def test_parse_annotation(app):
+     assert_node(doctree, ([pending_xref, "None"],))
+     assert_node(doctree[0], pending_xref, refdomain="py", reftype="obj", reftarget="None")
+ 
++    # Test Literal annotations - literal values should not be treated as class references
++    doctree = _parse_annotation("typing.Literal[True]", app.env)
++    assert_node(doctree, ([pending_xref, "typing.Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "True"],
++                          [desc_sig_punctuation, "]"]))
++    
++    doctree = _parse_annotation("typing.Literal[False]", app.env)
++    assert_node(doctree, ([pending_xref, "typing.Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "False"],
++                          [desc_sig_punctuation, "]"]))
++    
++    doctree = _parse_annotation("typing.Literal['hello']", app.env)
++    assert_node(doctree, ([pending_xref, "typing.Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "'hello'"],
++                          [desc_sig_punctuation, "]"]))
++    
++    doctree = _parse_annotation("typing.Literal[42]", app.env)
++    assert_node(doctree, ([pending_xref, "typing.Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "42"],
++                          [desc_sig_punctuation, "]"]))
++    
++    # Test multiple literals
++    doctree = _parse_annotation("typing.Literal[1, 2, 3]", app.env)
++    assert_node(doctree, ([pending_xref, "typing.Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "1"],
++                          [desc_sig_punctuation, ", "],
++                          [addnodes.desc_sig_literal_string, "2"],
++                          [desc_sig_punctuation, ", "],
++                          [addnodes.desc_sig_literal_string, "3"],
++                          [desc_sig_punctuation, "]"]))
++    
++    # Test Literal[Ellipsis] (from stringify of Literal[...])
++    doctree = _parse_annotation("Literal[Ellipsis]", app.env)
++    assert_node(doctree, ([pending_xref, "Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "Ellipsis"],
++                          [desc_sig_punctuation, "]"]))
++    
++    # Test Literal[None]
++    doctree = _parse_annotation("Literal[None]", app.env)
++    assert_node(doctree, ([pending_xref, "Literal"],
++                          [desc_sig_punctuation, "["],
++                          [addnodes.desc_sig_literal_string, "None"],
++                          [desc_sig_punctuation, "]"]))
++
+ 
+ def test_pyfunction_signature(app):
+     text = ".. py:function:: hello(name: str) -> str"

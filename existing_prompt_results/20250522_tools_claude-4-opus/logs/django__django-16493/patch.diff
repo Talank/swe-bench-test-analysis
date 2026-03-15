@@ -1,0 +1,362 @@
+diff --git a/django/db/models/fields/files.py b/django/db/models/fields/files.py
+index 7a99b12691..612f5b719f 100644
+--- a/django/db/models/fields/files.py
++++ b/django/db/models/fields/files.py
+@@ -295,8 +295,12 @@ class FileField(Field):
+         if kwargs.get("max_length") == 100:
+             del kwargs["max_length"]
+         kwargs["upload_to"] = self.upload_to
+-        if self.storage is not default_storage:
+-            kwargs["storage"] = getattr(self, "_storage_callable", self.storage)
++        # If storage was provided as a callable, always include it in the
++        # deconstructed form, even if it returns default_storage.
++        if hasattr(self, "_storage_callable"):
++            kwargs["storage"] = self._storage_callable
++        elif self.storage is not default_storage:
++            kwargs["storage"] = self.storage
+         return name, path, args, kwargs
+ 
+     def get_internal_type(self):
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..24a23def02
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,90 @@
++"""Comprehensive test for FileField storage deconstruction"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.core.files.storage import FileSystemStorage, default_storage
++from django.db import models
++
++# Create test storages
++other_storage = FileSystemStorage(location='/media/other')
++
++def get_default_storage():
++    """A callable that returns default_storage"""
++    return default_storage
++
++def get_other_storage():
++    """A callable that returns other_storage"""
++    return other_storage
++
++class CallableStorage(FileSystemStorage):
++    """A callable storage class"""
++    def __call__(self):
++        return self
++
++# Test cases
++test_cases = [
++    # (description, storage_arg, expected_in_kwargs, expected_value_check)
++    ("No storage (uses default)", None, False, None),
++    ("Direct default_storage", default_storage, False, None),
++    ("Direct other_storage", other_storage, True, lambda v: v is other_storage),
++    ("Callable returning default_storage", get_default_storage, True, lambda v: v is get_default_storage),
++    ("Callable returning other_storage", get_other_storage, True, lambda v: v is get_other_storage),
++    ("Callable storage class", CallableStorage, True, lambda v: v is CallableStorage),
++]
++
++print("Testing FileField storage deconstruction:\n")
++
++for desc, storage_arg, expected_in_kwargs, expected_check in test_cases:
++    class TestModel(models.Model):
++        if storage_arg is None:
++            my_file = models.FileField()
++        else:
++            my_file = models.FileField(storage=storage_arg)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    field = TestModel._meta.get_field('my_file')
++    name, path, args, kwargs = field.deconstruct()
++    
++    has_storage = 'storage' in kwargs
++    
++    print(f"Test: {desc}")
++    print(f"  Expected 'storage' in kwargs: {expected_in_kwargs}")
++    print(f"  Actual 'storage' in kwargs: {has_storage}")
++    
++    if has_storage:
++        storage_value = kwargs['storage']
++        print(f"  Storage value: {storage_value}")
++        if expected_check:
++            check_result = expected_check(storage_value)
++            print(f"  Value check passed: {check_result}")
++    
++    # Verify expectation
++    if has_storage != expected_in_kwargs:
++        print(f"  ❌ FAILED: Expected {'storage' if expected_in_kwargs else 'no storage'} in kwargs")
++    else:
++        print(f"  ✅ PASSED")
++    
++    print()
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 0000000000..e384033665
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,71 @@
++"""Test script to reproduce the issue with callable storage returning default_storage"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.core.files.storage import FileSystemStorage, default_storage
++from django.db import models
++import random
++
++# Create test storage
++other_storage = FileSystemStorage(location='/media/other')
++
++def get_storage():
++    """A callable that returns default_storage"""
++    return default_storage
++
++def get_storage_random():
++    """A callable that randomly returns default_storage or other_storage"""
++    return random.choice([default_storage, other_storage])
++
++# Test 1: Callable that always returns default_storage
++class TestModel1(models.Model):
++    my_file = models.FileField(storage=get_storage)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test 2: Callable that randomly returns default_storage or other_storage
++class TestModel2(models.Model):
++    my_file = models.FileField(storage=get_storage_random)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test deconstruction
++print("Testing TestModel1 (callable always returns default_storage):")
++field1 = TestModel1._meta.get_field('my_file')
++name, path, args, kwargs = field1.deconstruct()
++print(f"  Deconstructed kwargs: {kwargs}")
++print(f"  Has 'storage' in kwargs: {'storage' in kwargs}")
++if 'storage' in kwargs:
++    print(f"  Storage value: {kwargs['storage']}")
++
++print("\nTesting TestModel2 (callable randomly returns default_storage or other_storage):")
++# Run multiple times to see the random behavior
++for i in range(5):
++    field2 = TestModel2._meta.get_field('my_file')
++    name, path, args, kwargs = field2.deconstruct()
++    print(f"  Run {i+1}: Has 'storage' in kwargs: {'storage' in kwargs}")
++    if 'storage' in kwargs:
++        print(f"    Storage value: {kwargs['storage']}")
+diff --git a/test_makemigrations.py b/test_makemigrations.py
+new file mode 100644
+index 0000000000..772cd5935a
+--- /dev/null
++++ b/test_makemigrations.py
+@@ -0,0 +1,113 @@
++"""Test to verify makemigrations behavior with callable storage"""
++import os
++import sys
++import tempfile
++import shutil
++import django
++from django.conf import settings
++
++# Create a temporary directory for the test app
++test_dir = tempfile.mkdtemp()
++app_dir = os.path.join(test_dir, 'testapp')
++os.makedirs(app_dir)
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'testapp',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++# Add test directory to Python path
++sys.path.insert(0, test_dir)
++
++# Create __init__.py
++with open(os.path.join(app_dir, '__init__.py'), 'w') as f:
++    f.write('')
++
++# Create models.py
++models_content = '''
++from django.core.files.storage import FileSystemStorage, default_storage
++from django.db import models
++import random
++
++other_storage = FileSystemStorage(location='/media/other')
++
++def get_storage():
++    return random.choice([default_storage, other_storage])
++
++class MyModel(models.Model):
++    my_file = models.FileField(storage=get_storage)
++'''
++
++with open(os.path.join(app_dir, 'models.py'), 'w') as f:
++    f.write(models_content)
++
++# Create migrations directory
++migrations_dir = os.path.join(app_dir, 'migrations')
++os.makedirs(migrations_dir)
++with open(os.path.join(migrations_dir, '__init__.py'), 'w') as f:
++    f.write('')
++
++django.setup()
++
++from django.core.management import call_command
++from django.db.migrations.loader import MigrationLoader
++from django.db.migrations.state import ProjectState
++
++print("Testing makemigrations with callable storage that returns default_storage...")
++
++# Run makemigrations multiple times
++migration_files = []
++for i in range(3):
++    print(f"\nRun {i+1}:")
++    try:
++        # Capture the migration
++        from io import StringIO
++        out = StringIO()
++        call_command('makemigrations', 'testapp', stdout=out)
++        output = out.getvalue()
++        print(f"  Output: {output.strip()}")
++        
++        # Find the generated migration file
++        migration_file = None
++        for f in os.listdir(migrations_dir):
++            if f.endswith('.py') and f != '__init__.py':
++                migration_file = f
++                break
++        
++        if migration_file:
++            migration_path = os.path.join(migrations_dir, migration_file)
++            with open(migration_path, 'r') as f:
++                content = f.read()
++                migration_files.append(content)
++                # Check if storage=testapp.models.get_storage is in the migration
++                has_storage = 'storage=testapp.models.get_storage' in content
++                print(f"  Migration contains storage parameter: {has_storage}")
++            
++            # Remove the migration file for the next run
++            os.remove(migration_path)
++    except Exception as e:
++        print(f"  Error: {e}")
++
++# Check consistency
++print("\nChecking consistency across runs:")
++if len(set(migration_files)) == 1:
++    print("✅ All migrations are identical - CONSISTENT!")
++else:
++    print("❌ Migrations differ between runs - INCONSISTENT!")
++    
++# Cleanup
++shutil.rmtree(test_dir)
++sys.path.remove(test_dir)
+diff --git a/test_new_test_case.py b/test_new_test_case.py
+new file mode 100644
+index 0000000000..a2df3c43ed
+--- /dev/null
++++ b/test_new_test_case.py
+@@ -0,0 +1,19 @@
++"""Test case to add to Django's test suite"""
++
++def test_callable_storage_returning_default_storage_deconstruction(self):
++    """
++    A callable storage that returns default_storage should still be included
++    in the deconstructed form to ensure consistent migrations.
++    """
++    from django.core.files.storage import default_storage
++    from django.db import models
++    
++    def get_default_storage():
++        return default_storage
++    
++    field = models.FileField(storage=get_default_storage)
++    name, path, args, kwargs = field.deconstruct()
++    
++    # The callable should be included in kwargs even though it returns default_storage
++    self.assertIn('storage', kwargs)
++    self.assertIs(kwargs['storage'], get_default_storage)
+diff --git a/tests/file_storage/tests.py b/tests/file_storage/tests.py
+index 4616aad10a..c44f144ea6 100644
+--- a/tests/file_storage/tests.py
++++ b/tests/file_storage/tests.py
+@@ -1018,6 +1018,21 @@ class FieldCallableFileStorageTests(SimpleTestCase):
+         storage = kwargs["storage"]
+         self.assertIs(storage, callable_storage)
+ 
++    def test_callable_storage_returning_default_storage_deconstruction(self):
++        """
++        A callable storage that returns default_storage should still be included
++        in the deconstructed form to ensure consistent migrations (#XXXXX).
++        """
++        def get_default_storage():
++            return default_storage
++        
++        field = FileField(storage=get_default_storage)
++        name, path, args, kwargs = field.deconstruct()
++        
++        # The callable should be included in kwargs even though it returns default_storage
++        self.assertIn('storage', kwargs)
++        self.assertIs(kwargs['storage'], get_default_storage)
++
+ 
+ # Tests for a race condition on file saving (#4948).
+ # This is written in such a way that it'll always pass on platforms

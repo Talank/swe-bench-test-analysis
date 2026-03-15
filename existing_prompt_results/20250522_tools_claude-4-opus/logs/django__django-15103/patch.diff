@@ -1,0 +1,353 @@
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 5ccef38048..12f0d4caaa 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -83,7 +83,7 @@ def escapejs_filter(value):
+ 
+ 
+ @register.filter(is_safe=True)
+-def json_script(value, element_id):
++def json_script(value, element_id=None):
+     """
+     Output value JSON-encoded, wrapped in a <script type="application/json">
+     tag.
+diff --git a/django/utils/html.py b/django/utils/html.py
+index da1b5675ec..8147c5d3d0 100644
+--- a/django/utils/html.py
++++ b/django/utils/html.py
+@@ -61,7 +61,7 @@ _json_script_escapes = {
+ }
+ 
+ 
+-def json_script(value, element_id):
++def json_script(value, element_id=None):
+     """
+     Escape all the HTML/XML special characters with their unicode escapes, so
+     value is safe to be output anywhere except for inside a tag attribute. Wrap
+@@ -69,10 +69,16 @@ def json_script(value, element_id):
+     """
+     from django.core.serializers.json import DjangoJSONEncoder
+     json_str = json.dumps(value, cls=DjangoJSONEncoder).translate(_json_script_escapes)
+-    return format_html(
+-        '<script id="{}" type="application/json">{}</script>',
+-        element_id, mark_safe(json_str)
+-    )
++    if element_id:
++        return format_html(
++            '<script id="{}" type="application/json">{}</script>',
++            element_id, mark_safe(json_str)
++        )
++    else:
++        return format_html(
++            '<script type="application/json">{}</script>',
++            mark_safe(json_str)
++        )
+ 
+ 
+ def conditional_escape(text):
+diff --git a/test_json_script_comprehensive.py b/test_json_script_comprehensive.py
+new file mode 100644
+index 0000000000..38a7a910a0
+--- /dev/null
++++ b/test_json_script_comprehensive.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python
++"""Comprehensive test for json_script with optional element_id"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [],
++        },
++    }]
++)
++
++django.setup()
++
++from django.utils.html import json_script
++from django.template import Template, Context
++
++# Test the function directly
++print("=== Direct function tests ===")
++
++# Test with element_id
++print("1. With element_id:")
++result = json_script({'key': 'value'}, 'test_id')
++print(f"   Result: {result}")
++assert result == '<script id="test_id" type="application/json">{"key": "value"}</script>'
++
++# Test without element_id
++print("2. Without element_id:")
++result = json_script({'key': 'value'})
++print(f"   Result: {result}")
++assert result == '<script type="application/json">{"key": "value"}</script>'
++
++# Test with None element_id
++print("3. With None element_id:")
++result = json_script({'key': 'value'}, None)
++print(f"   Result: {result}")
++assert result == '<script type="application/json">{"key": "value"}</script>'
++
++# Test with empty string element_id
++print("4. With empty string element_id:")
++result = json_script({'key': 'value'}, '')
++print(f"   Result: {result}")
++assert result == '<script type="application/json">{"key": "value"}</script>'
++
++# Test with special characters that need escaping
++print("5. With special characters:")
++result = json_script({'test': '<script>alert("XSS")</script>'})
++print(f"   Result: {result}")
++assert '\\u003C' in result and '\\u003E' in result
++
++# Test template filter
++print("\n=== Template filter tests ===")
++
++# Test with element_id in template
++print("6. Template with element_id:")
++template = Template('{{ value|json_script:"my_id" }}')
++context = Context({'value': {'foo': 'bar'}})
++result = template.render(context)
++print(f"   Result: {result}")
++assert 'id="my_id"' in result
++
++# Test without element_id in template (this might not work due to template filter limitations)
++print("7. Template without element_id:")
++try:
++    template = Template('{{ value|json_script }}')
++    context = Context({'value': {'foo': 'bar'}})
++    result = template.render(context)
++    print(f"   Result: {result}")
++except Exception as e:
++    print(f"   Note: Template filters require arguments, got error: {e}")
++
++# Test with variable as element_id
++print("8. Template with variable as element_id:")
++template = Template('{{ value|json_script:elem_id }}')
++context = Context({'value': {'foo': 'bar'}, 'elem_id': 'dynamic_id'})
++result = template.render(context)
++print(f"   Result: {result}")
++assert 'id="dynamic_id"' in result
++
++# Test with None variable as element_id
++print("9. Template with None variable as element_id:")
++template = Template('{{ value|json_script:elem_id }}')
++context = Context({'value': {'foo': 'bar'}, 'elem_id': None})
++result = template.render(context)
++print(f"   Result: {result}")
++assert 'id=' not in result
++
++print("\nAll tests passed!")
+diff --git a/test_json_script_optional_id.py b/test_json_script_optional_id.py
+new file mode 100644
+index 0000000000..2c530ef1f9
+--- /dev/null
++++ b/test_json_script_optional_id.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python
++"""Test script to verify json_script with optional element_id"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++
++django.setup()
++
++from django.utils.html import json_script
++
++# Test cases
++print("Testing json_script with element_id:")
++result = json_script({'key': 'value'}, 'test_id')
++print(f"Result: {result}")
++print()
++
++print("Testing json_script without element_id (should work after our changes):")
++try:
++    # This should fail with current implementation
++    result = json_script({'key': 'value'})
++    print(f"Result: {result}")
++except TypeError as e:
++    print(f"Error (expected): {e}")
++print()
++
++# Test with None as element_id
++print("Testing json_script with None as element_id:")
++try:
++    result = json_script({'key': 'value'}, None)
++    print(f"Result: {result}")
++except Exception as e:
++    print(f"Error: {e}")
+diff --git a/test_use_case.py b/test_use_case.py
+new file mode 100644
+index 0000000000..ee8197deba
+--- /dev/null
++++ b/test_use_case.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python
++"""Test the use case from the problem statement"""
++
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    SECRET_KEY='test-secret-key',
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    TEMPLATES=[{
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++        'DIRS': [],
++        'APP_DIRS': True,
++        'OPTIONS': {
++            'context_processors': [],
++        },
++    }]
++)
++
++django.setup()
++
++from django.template import Template, Context
++
++# Simulate the use case: json_script inside a <template> tag
++print("Use case: json_script inside a <template> tag without needing an id")
++print("=" * 60)
++
++# Before our changes, this would require an id even if not needed
++template_str = '''
++<template id="my-template">
++    {{ data|json_script }}
++</template>
++'''
++
++template = Template(template_str)
++context = Context({
++    'data': {
++        'message': 'Hello World',
++        'items': ['apple', 'banana', 'cherry']
++    }
++})
++
++result = template.render(context)
++print("Template source:")
++print(template_str)
++print("\nRendered output:")
++print(result)
++
++# Verify the output
++assert '<script type="application/json">' in result
++assert 'id=' not in result.split('<script')[1].split('>')[0]  # No id attribute in script tag
++assert '"message": "Hello World"' in result
++print("\n✓ Success! The json_script filter works without an element_id inside a template tag.")
+diff --git a/tests/template_tests/filter_tests/test_json_script.py b/tests/template_tests/filter_tests/test_json_script.py
+index 061fe32c12..3e1e5e1fc5 100644
+--- a/tests/template_tests/filter_tests/test_json_script.py
++++ b/tests/template_tests/filter_tests/test_json_script.py
+@@ -17,3 +17,25 @@ class JsonScriptTests(SimpleTestCase):
+             '{"a": "testing\\r\\njson \'string\\" \\u003Cb\\u003Eescaping\\u003C/b\\u003E"}'
+             '</script>'
+         )
++
++    @setup({'json-tag-empty-id': '{{ value|json_script:"" }}'})
++    def test_with_empty_id(self):
++        output = self.engine.render_to_string(
++            'json-tag-empty-id',
++            {'value': {'a': 'test'}}
++        )
++        self.assertEqual(
++            output,
++            '<script type="application/json">{"a": "test"}</script>'
++        )
++
++    @setup({'json-tag-none-id': '{{ value|json_script:none_var }}'})
++    def test_with_none_id(self):
++        output = self.engine.render_to_string(
++            'json-tag-none-id',
++            {'value': {'a': 'test'}, 'none_var': None}
++        )
++        self.assertEqual(
++            output,
++            '<script type="application/json">{"a": "test"}</script>'
++        )
+diff --git a/tests/utils_tests/test_html.py b/tests/utils_tests/test_html.py
+index 909620ea3f..ae566ef42c 100644
+--- a/tests/utils_tests/test_html.py
++++ b/tests/utils_tests/test_html.py
+@@ -173,6 +173,29 @@ class TestUtilsHtml(SimpleTestCase):
+             with self.subTest(arg=arg):
+                 self.assertEqual(json_script(arg, 'test_id'), expected)
+ 
++    def test_json_script_without_id(self):
++        """Test json_script with optional element_id parameter."""
++        # Test without element_id
++        self.assertEqual(
++            json_script({'a': 'b'}),
++            '<script type="application/json">{"a": "b"}</script>'
++        )
++        # Test with None element_id
++        self.assertEqual(
++            json_script({'a': 'b'}, None),
++            '<script type="application/json">{"a": "b"}</script>'
++        )
++        # Test with empty string element_id
++        self.assertEqual(
++            json_script({'a': 'b'}, ''),
++            '<script type="application/json">{"a": "b"}</script>'
++        )
++        # Test escaping still works without id
++        self.assertEqual(
++            json_script('<script>alert("XSS")</script>'),
++            '<script type="application/json">"\\u003Cscript\\u003Ealert(\\"XSS\\")\\u003C/script\\u003E"</script>'
++        )
++
+     def test_smart_urlquote(self):
+         items = (
+             ('http://öäü.com/', 'http://xn--4ca9at.com/'),

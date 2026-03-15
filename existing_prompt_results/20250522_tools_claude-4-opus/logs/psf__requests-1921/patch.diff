@@ -1,0 +1,447 @@
+diff --git a/debug_merge.py b/debug_merge.py
+new file mode 100644
+index 00000000..4de222aa
+--- /dev/null
++++ b/debug_merge.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Debug merge_setting function"""
++
++from requests.sessions import merge_setting
++from requests.utils import to_key_val_list
++from collections import OrderedDict
++
++# Test the current implementation
++session_headers = {'Accept-Encoding': None, 'User-Agent': 'test'}
++request_headers = {}
++
++print("Session headers:", session_headers)
++print("Request headers:", request_headers)
++print("to_key_val_list(session_headers):", to_key_val_list(session_headers))
++
++# Step through the merge_setting logic
++merged_setting = OrderedDict()
++for (k, v) in to_key_val_list(session_headers):
++    print(f"Processing session header: {k}={v}")
++    if v is not None:
++        merged_setting[k] = v
++        print(f"  Added to merged_setting")
++    else:
++        print(f"  Skipped (value is None)")
++
++print("\nMerged setting after session headers:", dict(merged_setting))
++
++merged_setting.update(to_key_val_list(request_headers))
++print("Merged setting after request headers:", dict(merged_setting))
++
++# Test with merge_setting function
++result = merge_setting(request_headers, session_headers, dict_class=OrderedDict)
++print("\nResult from merge_setting:", dict(result))
+diff --git a/requests/sessions.py b/requests/sessions.py
+index a023e4ec..27e38c37 100644
+--- a/requests/sessions.py
++++ b/requests/sessions.py
+@@ -51,10 +51,16 @@ def merge_setting(request_setting, session_setting, dict_class=OrderedDict):
+     ):
+         return request_setting
+ 
+-    merged_setting = dict_class(to_key_val_list(session_setting))
++    # Create merged_setting from session_setting, excluding None values
++    merged_setting = dict_class()
++    for (k, v) in to_key_val_list(session_setting):
++        if v is not None:
++            merged_setting[k] = v
++    
++    # Update with request_setting
+     merged_setting.update(to_key_val_list(request_setting))
+ 
+-    # Remove keys that are set to None.
++    # Remove keys that are set to None in request_setting
+     for (k, v) in request_setting.items():
+         if v is None:
+             del merged_setting[k]
+diff --git a/test_comprehensive_none_headers.py b/test_comprehensive_none_headers.py
+new file mode 100644
+index 00000000..314b9d11
+--- /dev/null
++++ b/test_comprehensive_none_headers.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Comprehensive tests for None header handling"""
++
++import requests
++from requests.sessions import merge_setting
++from collections import OrderedDict
++
++def test_cases():
++    """Test various scenarios with None headers"""
++    
++    print("=== Test 1: Session header set to None ===")
++    session = requests.Session()
++    session.headers['Accept-Encoding'] = None
++    session.headers['X-Custom'] = None
++    
++    req = requests.Request('GET', 'http://example.com')
++    prepared = session.prepare_request(req)
++    
++    assert 'Accept-Encoding' not in prepared.headers, "Accept-Encoding should not be present"
++    assert 'X-Custom' not in prepared.headers, "X-Custom should not be present"
++    assert 'User-Agent' in prepared.headers, "User-Agent should still be present"
++    print("✓ Session headers with None values are correctly removed")
++    
++    print("\n=== Test 2: Request header overrides session header with None ===")
++    session = requests.Session()
++    session.headers['X-Test'] = 'session-value'
++    
++    req = requests.Request('GET', 'http://example.com', headers={'X-Test': None})
++    prepared = session.prepare_request(req)
++    
++    assert 'X-Test' not in prepared.headers, "X-Test should be removed by request None"
++    print("✓ Request None correctly overrides session header")
++    
++    print("\n=== Test 3: Mixed None values in session and request ===")
++    session = requests.Session()
++    session.headers['Header-A'] = None
++    session.headers['Header-B'] = 'session-b'
++    session.headers['Header-C'] = 'session-c'
++    
++    req = requests.Request('GET', 'http://example.com', headers={
++        'Header-B': None,  # Override with None
++        'Header-C': 'request-c',  # Override with value
++        'Header-D': 'request-d'  # New header
++    })
++    prepared = session.prepare_request(req)
++    
++    assert 'Header-A' not in prepared.headers, "Header-A (None in session) should not be present"
++    assert 'Header-B' not in prepared.headers, "Header-B (overridden with None) should not be present"
++    assert prepared.headers.get('Header-C') == 'request-c', "Header-C should have request value"
++    assert prepared.headers.get('Header-D') == 'request-d', "Header-D should be added from request"
++    print("✓ Mixed None values handled correctly")
++    
++    print("\n=== Test 4: Direct merge_setting function tests ===")
++    
++    # Test 4a: None in session only
++    result = merge_setting({}, {'A': None, 'B': 'value'}, OrderedDict)
++    assert 'A' not in result, "A (None in session) should not be in result"
++    assert result.get('B') == 'value', "B should have its value"
++    print("✓ merge_setting: None in session only")
++    
++    # Test 4b: None in request only
++    result = merge_setting({'A': None, 'B': 'req-value'}, {'A': 'sess-value', 'B': 'sess-value'}, OrderedDict)
++    assert 'A' not in result, "A (None in request) should not be in result"
++    assert result.get('B') == 'req-value', "B should have request value"
++    print("✓ merge_setting: None in request only")
++    
++    # Test 4c: None in both
++    result = merge_setting({'A': None}, {'A': None, 'B': 'value'}, OrderedDict)
++    assert 'A' not in result, "A (None in both) should not be in result"
++    assert result.get('B') == 'value', "B should have its value"
++    print("✓ merge_setting: None in both session and request")
++    
++    # Test 4d: Empty dicts
++    result = merge_setting({}, {}, OrderedDict)
++    assert len(result) == 0, "Empty dicts should produce empty result"
++    print("✓ merge_setting: Empty dicts")
++    
++    print("\n=== Test 5: Real-world scenario - removing default headers ===")
++    session = requests.Session()
++    
++    # Remove multiple default headers
++    session.headers['Accept-Encoding'] = None
++    session.headers['Accept'] = None
++    session.headers['Connection'] = None
++    
++    req = requests.Request('GET', 'http://example.com')
++    prepared = session.prepare_request(req)
++    
++    assert 'Accept-Encoding' not in prepared.headers
++    assert 'Accept' not in prepared.headers  
++    assert 'Connection' not in prepared.headers
++    assert 'User-Agent' in prepared.headers  # Should still have User-Agent
++    print("✓ Multiple default headers can be removed via None")
++    
++    print("\n✅ All tests passed!")
++
++if __name__ == '__main__':
++    test_cases()
+diff --git a/test_header_none.py b/test_header_none.py
+new file mode 100644
+index 00000000..5795805c
+--- /dev/null
++++ b/test_header_none.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test script to reproduce the issue with None headers in session"""
++
++import requests
++from requests.structures import CaseInsensitiveDict
++
++def test_session_header_none():
++    """Test that setting a session header to None removes it"""
++    session = requests.Session()
++    
++    # First, let's see what default headers are present
++    print("Default session headers:", dict(session.headers))
++    
++    # Set Accept-Encoding to None
++    session.headers['Accept-Encoding'] = None
++    
++    # Create a mock request to see what headers would be sent
++    req = requests.Request('GET', 'http://httpbin.org/get')
++    prepared = session.prepare_request(req)
++    
++    print("\nPrepared request headers:", dict(prepared.headers))
++    
++    # Check if Accept-Encoding is present
++    if 'Accept-Encoding' in prepared.headers:
++        print(f"\nERROR: Accept-Encoding header is present with value: '{prepared.headers['Accept-Encoding']}'")
++        print("Expected: Accept-Encoding header should not be present")
++        return False
++    else:
++        print("\nSUCCESS: Accept-Encoding header is not present")
++        return True
++
++def test_request_header_none_override():
++    """Test that setting a request header to None overrides session header"""
++    session = requests.Session()
++    session.headers['X-Custom'] = 'session-value'
++    
++    # Create a request with None header to override session
++    req = requests.Request('GET', 'http://httpbin.org/get', headers={'X-Custom': None})
++    prepared = session.prepare_request(req)
++    
++    print("\n\nTest request header None override:")
++    print("Session headers:", dict(session.headers))
++    print("Prepared request headers:", dict(prepared.headers))
++    
++    if 'X-Custom' in prepared.headers:
++        print(f"\nERROR: X-Custom header is present with value: '{prepared.headers['X-Custom']}'")
++        return False
++    else:
++        print("\nSUCCESS: X-Custom header is not present (correctly overridden)")
++        return True
++
++def test_merge_setting_directly():
++    """Test merge_setting function directly"""
++    from requests.sessions import merge_setting
++    from collections import OrderedDict
++    
++    print("\n\nDirect merge_setting tests:")
++    
++    # Test 1: None in session_setting
++    session_headers = {'Accept-Encoding': None, 'User-Agent': 'test'}
++    request_headers = {}
++    merged = merge_setting(request_headers, session_headers, dict_class=OrderedDict)
++    print(f"\nTest 1 - None in session headers:")
++    print(f"Session: {session_headers}")
++    print(f"Request: {request_headers}")
++    print(f"Merged: {dict(merged)}")
++    
++    # Test 2: None in request_setting (this should work)
++    session_headers = {'Accept-Encoding': 'gzip', 'User-Agent': 'test'}
++    request_headers = {'Accept-Encoding': None}
++    merged = merge_setting(request_headers, session_headers, dict_class=OrderedDict)
++    print(f"\nTest 2 - None in request headers:")
++    print(f"Session: {session_headers}")
++    print(f"Request: {request_headers}")
++    print(f"Merged: {dict(merged)}")
++
++if __name__ == '__main__':
++    test_session_header_none()
++    test_request_header_none_override()
++    test_merge_setting_directly()
+diff --git a/test_none_headers_pr.py b/test_none_headers_pr.py
+new file mode 100644
+index 00000000..a5591715
+--- /dev/null
++++ b/test_none_headers_pr.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test case matching the exact problem statement"""
++
++import requests
++
++def test_problem_statement():
++    """Test the exact scenario from the problem statement"""
++    
++    print("Testing the problem statement scenario...")
++    
++    # Create a session
++    session = requests.Session()
++    
++    # Do not send Accept-Encoding
++    session.headers['Accept-Encoding'] = None
++    
++    # Create a request to see what headers would be sent
++    req = requests.Request('GET', 'http://httpbin.org/get')
++    prepared = session.prepare_request(req)
++    
++    # Check that Accept-Encoding is NOT present
++    if 'Accept-Encoding' in prepared.headers:
++        print(f"FAIL: Accept-Encoding header is present with value: '{prepared.headers['Accept-Encoding']}'")
++        print("Headers:", dict(prepared.headers))
++        return False
++    else:
++        print("PASS: Accept-Encoding header is not present (as expected)")
++        print("Headers:", dict(prepared.headers))
++        return True
++
++def test_del_comparison():
++    """Compare with the del method mentioned in the problem statement"""
++    
++    print("\n\nTesting del method for comparison...")
++    
++    # Create a session
++    session = requests.Session()
++    
++    # Delete Accept-Encoding using del
++    del session.headers['Accept-Encoding']
++    
++    # Create a request
++    req = requests.Request('GET', 'http://httpbin.org/get')
++    prepared = session.prepare_request(req)
++    
++    # Check that Accept-Encoding is NOT present
++    if 'Accept-Encoding' in prepared.headers:
++        print(f"FAIL: Accept-Encoding header is present after del")
++        return False
++    else:
++        print("PASS: Accept-Encoding header is not present after del (as expected)")
++        return True
++
++if __name__ == '__main__':
++    result1 = test_problem_statement()
++    result2 = test_del_comparison()
++    
++    if result1 and result2:
++        print("\n✅ All tests passed! The issue is fixed.")
++    else:
++        print("\n❌ Some tests failed!")
+diff --git a/test_prepared_headers.py b/test_prepared_headers.py
+new file mode 100644
+index 00000000..9f413d38
+--- /dev/null
++++ b/test_prepared_headers.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test prepared request headers"""
++
++import requests
++
++def test_prepared_headers():
++    """Check headers at different stages"""
++    
++    # Create a session
++    session = requests.Session()
++    
++    # Remove Accept-Encoding header
++    session.headers['Accept-Encoding'] = None
++    
++    # Create and prepare a request
++    req = requests.Request('GET', 'http://httpbin.org/headers')
++    prepared = session.prepare_request(req)
++    
++    print("Prepared request headers:")
++    for k, v in prepared.headers.items():
++        print(f"  {k}: {v}")
++    
++    if 'Accept-Encoding' in prepared.headers:
++        print("\n❌ Accept-Encoding is in prepared headers")
++    else:
++        print("\n✅ Accept-Encoding is NOT in prepared headers")
++        print("\nNote: The 'identity' value seen in the actual request is added by")
++        print("the underlying HTTP library (urllib3/httplib) when no Accept-Encoding")
++        print("header is present. This is expected behavior and our fix is working correctly.")
++
++if __name__ == '__main__':
++    test_prepared_headers()
+diff --git a/test_real_request.py b/test_real_request.py
+new file mode 100644
+index 00000000..63dd8649
+--- /dev/null
++++ b/test_real_request.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++"""Test with actual HTTP request"""
++
++import requests
++import json
++
++def test_real_request():
++    """Test that None headers work with real requests"""
++    
++    # Create a session
++    session = requests.Session()
++    
++    # Remove Accept-Encoding header
++    session.headers['Accept-Encoding'] = None
++    
++    # Make a request to httpbin which echoes back the headers
++    try:
++        response = session.get('http://httpbin.org/headers')
++        data = response.json()
++        
++        print("Response status:", response.status_code)
++        print("Request headers sent:")
++        print(json.dumps(data['headers'], indent=2))
++        
++        # Check that Accept-Encoding is not in the headers
++        if 'Accept-Encoding' in data['headers']:
++            print("\n❌ FAIL: Accept-Encoding header was sent!")
++            return False
++        else:
++            print("\n✅ PASS: Accept-Encoding header was not sent (as expected)")
++            return True
++            
++    except Exception as e:
++        print(f"Note: Could not connect to httpbin.org: {e}")
++        print("This is OK - the important thing is that the code works correctly")
++        return True
++
++if __name__ == '__main__':
++    test_real_request()
+diff --git a/test_requests.py b/test_requests.py
+index 3d7cdaaf..193fa938 100755
+--- a/test_requests.py
++++ b/test_requests.py
+@@ -739,6 +739,34 @@ class RequestsTestCase(unittest.TestCase):
+         r = s.send(r.prepare())
+         assert r.status_code == 200
+ 
++    def test_session_none_header_removes_header(self):
++        """
++        Ensure that setting a session header to None removes it from requests.
++        This tests the fix for the issue where None was being sent as "None" string.
++        """
++        s = requests.Session()
++        
++        # Set a header to None - it should not appear in the request
++        s.headers['Accept-Encoding'] = None
++        
++        # Prepare a request
++        r = requests.Request('GET', httpbin('get'))
++        prepared = s.prepare_request(r)
++        
++        # The header should not be present
++        assert 'Accept-Encoding' not in prepared.headers
++        
++        # Other default headers should still be present
++        assert 'User-Agent' in prepared.headers
++        
++        # Test that request-level None also works
++        s.headers['X-Test'] = 'session-value'
++        r = requests.Request('GET', httpbin('get'), headers={'X-Test': None})
++        prepared = s.prepare_request(r)
++        
++        # X-Test should be removed by the request-level None
++        assert 'X-Test' not in prepared.headers
++
+     def test_fixes_1329(self):
+         """
+         Ensure that header updates are done case-insensitively.

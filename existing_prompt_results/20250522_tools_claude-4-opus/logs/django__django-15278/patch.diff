@@ -1,0 +1,659 @@
+diff --git a/django/db/backends/sqlite3/schema.py b/django/db/backends/sqlite3/schema.py
+index 6752a8e3c0..a37c9949aa 100644
+--- a/django/db/backends/sqlite3/schema.py
++++ b/django/db/backends/sqlite3/schema.py
+@@ -327,7 +327,9 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
+         # Fields with default values cannot by handled by ALTER TABLE ADD
+         # COLUMN statement because DROP DEFAULT is not supported in
+         # ALTER TABLE.
+-        if not field.null or self.effective_default(field) is not None:
++        # Also, fields with UNIQUE constraints cannot be added via ALTER TABLE
++        # ADD COLUMN in SQLite.
++        if not field.null or self.effective_default(field) is not None or field.unique:
+             self._remake_table(model, create_field=field)
+         else:
+             super().add_field(model, field)
+diff --git a/test_comprehensive_sqlite_unique.py b/test_comprehensive_sqlite_unique.py
+new file mode 100644
+index 0000000000..18c054a397
+--- /dev/null
++++ b/test_comprehensive_sqlite_unique.py
+@@ -0,0 +1,91 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++class TestModel(models.Model):
++    name = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class RelatedModel(models.Model):
++    name = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def test_various_unique_fields():
++    """Test adding various types of unique fields."""
++    from django.db import connection
++    
++    with connection.schema_editor() as schema_editor:
++        # Create initial tables
++        schema_editor.create_model(TestModel)
++        schema_editor.create_model(RelatedModel)
++        print("Initial tables created successfully")
++        
++        test_cases = [
++            # (field_name, field_instance, description)
++            ('unique_char', models.CharField(max_length=100, unique=True, null=True), 'nullable unique CharField'),
++            ('unique_int', models.IntegerField(unique=True, null=True), 'nullable unique IntegerField'),
++            ('one_to_one', models.OneToOneField(RelatedModel, null=True, on_delete=models.SET_NULL), 'nullable OneToOneField'),
++            ('non_unique_char', models.CharField(max_length=100, null=True), 'nullable non-unique CharField'),
++        ]
++        
++        for field_name, field, description in test_cases:
++            try:
++                field.set_attributes_from_name(field_name)
++                field.model = TestModel
++                if hasattr(field, 'column'):
++                    pass
++                else:
++                    field.column = field_name + ('_id' if field.remote_field else '')
++                
++                schema_editor.add_field(TestModel, field)
++                print(f"✓ Successfully added {description}")
++            except Exception as e:
++                print(f"✗ Failed to add {description}: {e}")
++                import traceback
++                traceback.print_exc()
++                return False
++    
++    # Verify the fields were added correctly
++    with connection.cursor() as cursor:
++        cursor.execute("PRAGMA table_info(test_app_testmodel)")
++        columns = cursor.fetchall()
++        print("\nFinal table structure:")
++        for col in columns:
++            print(f"  {col[1]} {col[2]}")
++    
++    return True
++
++
++if __name__ == '__main__':
++    success = test_various_unique_fields()
++    sys.exit(0 if success else 1)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..948fe65f9f
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,94 @@
++"""
++Test edge cases for the SQLite unique field fix.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++class TestModel(models.Model):
++    name = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def test_edge_cases():
++    """Test various edge cases."""
++    with connection.schema_editor() as schema_editor:
++        # Create initial table
++        schema_editor.create_model(TestModel)
++        print("✓ Created initial table")
++        
++        test_cases = [
++            # (field_name, field_instance, description, should_use_remake_table)
++            ('unique_not_null', models.CharField(max_length=100, unique=True, default='default'), 'unique field with default', True),
++            ('unique_null', models.CharField(max_length=100, unique=True, null=True), 'nullable unique field', True),
++            ('non_unique_null', models.CharField(max_length=100, null=True), 'nullable non-unique field', False),
++            ('non_unique_default', models.CharField(max_length=100, default='test'), 'non-unique field with default', True),
++        ]
++        
++        for field_name, field, description, should_remake in test_cases:
++            # Reset the table
++            schema_editor.delete_model(TestModel)
++            schema_editor.create_model(TestModel)
++            
++            field.set_attributes_from_name(field_name)
++            field.model = TestModel
++            field.column = field_name
++            
++            # Track if _remake_table was called
++            original_remake = schema_editor._remake_table
++            remake_called = False
++            
++            def track_remake(*args, **kwargs):
++                nonlocal remake_called
++                remake_called = True
++                return original_remake(*args, **kwargs)
++            
++            schema_editor._remake_table = track_remake
++            
++            try:
++                schema_editor.add_field(TestModel, field)
++                
++                if should_remake == remake_called:
++                    print(f"✓ {description}: {'used' if remake_called else 'did not use'} _remake_table as expected")
++                else:
++                    print(f"✗ {description}: {'used' if remake_called else 'did not use'} _remake_table, expected {'to use' if should_remake else 'not to use'}")
++                    return False
++                    
++            except Exception as e:
++                print(f"✗ {description}: Failed with error: {e}")
++                return False
++            finally:
++                schema_editor._remake_table = original_remake
++    
++    return True
++
++
++if __name__ == '__main__':
++    import sys
++    success = test_edge_cases()
++    sys.exit(0 if success else 1)
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 0000000000..7695a7b153
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,116 @@
++"""
++Test case that reproduces the exact issue from the problem statement.
++"""
++import os
++import django
++from django.conf import settings
++from django.db import models, migrations, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.state import ProjectState
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Mock the oauth2_settings.REFRESH_TOKEN_MODEL
++class oauth2_settings:
++    REFRESH_TOKEN_MODEL = 'oauth2_provider.RefreshToken'
++
++# Create the exact migration from the problem statement
++migration_operations = [
++    migrations.AddField(
++        model_name='AccessToken',
++        name='source_refresh_token',
++        field=models.OneToOneField(
++            blank=True, 
++            null=True, 
++            on_delete=models.deletion.SET_NULL, 
++            to=oauth2_settings.REFRESH_TOKEN_MODEL, 
++            related_name="refreshed_access_token"
++        ),
++    ),
++]
++
++# Create test models to simulate the oauth2_provider models
++from django.db import models as django_models
++
++class RefreshToken(django_models.Model):
++    token = django_models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'oauth2_provider'
++        db_table = 'oauth2_provider_refreshtoken'
++
++
++class AccessToken(django_models.Model):
++    token = django_models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'oauth2_provider'
++        db_table = 'oauth2_provider_accesstoken'
++
++
++def test_issue():
++    """Test the exact issue from the problem statement."""
++    with connection.schema_editor() as schema_editor:
++        # Create the initial tables
++        schema_editor.create_model(RefreshToken)
++        schema_editor.create_model(AccessToken)
++        print("✓ Created initial tables")
++        
++        # Try to add the OneToOneField exactly as in the problem statement
++        try:
++            field = models.OneToOneField(
++                RefreshToken,
++                blank=True, 
++                null=True, 
++                on_delete=models.deletion.SET_NULL, 
++                related_name="refreshed_access_token"
++            )
++            field.set_attributes_from_name('source_refresh_token')
++            field.model = AccessToken
++            field.column = 'source_refresh_token_id'
++            
++            # This should work with our fix
++            schema_editor.add_field(AccessToken, field)
++            print("✓ Successfully added nullable OneToOneField!")
++            
++            # Verify the field was added
++            with connection.cursor() as cursor:
++                cursor.execute("PRAGMA table_info(oauth2_provider_accesstoken)")
++                columns = {col[1]: col for col in cursor.fetchall()}
++                if 'source_refresh_token_id' in columns:
++                    print("✓ Field 'source_refresh_token_id' exists in the table")
++                    return True
++                else:
++                    print("✗ Field 'source_refresh_token_id' not found in the table")
++                    return False
++                    
++        except Exception as e:
++            print(f"✗ Failed with error: {e}")
++            import traceback
++            traceback.print_exc()
++            return False
++
++
++if __name__ == '__main__':
++    import sys
++    success = test_issue()
++    sys.exit(0 if success else 1)
+diff --git a/test_sql_generation.py b/test_sql_generation.py
+new file mode 100644
+index 0000000000..5ead2d7b7d
+--- /dev/null
++++ b/test_sql_generation.py
+@@ -0,0 +1,74 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++class RefreshToken(models.Model):
++    token = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'oauth2_provider_refreshtoken'
++
++
++class AccessToken(models.Model):
++    token = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'oauth2_provider_accesstoken'
++
++
++# Test SQL generation
++with connection.schema_editor() as schema_editor:
++    # Create initial tables
++    schema_editor.create_model(RefreshToken)
++    schema_editor.create_model(AccessToken)
++    
++    # Create the OneToOneField
++    field = models.OneToOneField(
++        RefreshToken,
++        blank=True, 
++        null=True, 
++        on_delete=models.deletion.SET_NULL, 
++        related_name="refreshed_access_token"
++    )
++    field.set_attributes_from_name('source_refresh_token')
++    field.model = AccessToken
++    field.column = 'source_refresh_token_id'
++    
++    # Get the column SQL
++    definition, params = schema_editor.column_sql(AccessToken, field, include_default=True)
++    print(f"Column definition: {definition}")
++    print(f"Params: {params}")
++    
++    # Build the full SQL
++    sql = schema_editor.sql_create_column % {
++        "table": schema_editor.quote_name(AccessToken._meta.db_table),
++        "column": schema_editor.quote_name(field.column),
++        "definition": definition,
++    }
++    print(f"\nFull SQL: {sql}")
+diff --git a/test_sqlite_onetoonefield.py b/test_sqlite_onetoonefield.py
+new file mode 100644
+index 0000000000..400f89c4ae
+--- /dev/null
++++ b/test_sqlite_onetoonefield.py
+@@ -0,0 +1,134 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++
++django.setup()
++
++# Create test models
++class RefreshToken(models.Model):
++    token = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'oauth2_provider_refreshtoken'
++
++
++class AccessToken(models.Model):
++    token = models.CharField(max_length=255)
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'oauth2_provider_accesstoken'
++
++
++# Create initial migration to set up tables
++class Migration0001(Migration):
++    initial = True
++    dependencies = []
++    
++    operations = [
++        operations.CreateModel(
++            name='RefreshToken',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('token', models.CharField(max_length=255)),
++            ],
++            options={
++                'db_table': 'oauth2_provider_refreshtoken',
++            },
++        ),
++        operations.CreateModel(
++            name='AccessToken',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('token', models.CharField(max_length=255)),
++            ],
++            options={
++                'db_table': 'oauth2_provider_accesstoken',
++            },
++        ),
++    ]
++
++
++# Create migration to add OneToOneField
++class Migration0002(Migration):
++    dependencies = [('test_app', '0001_initial')]
++    
++    operations = [
++        operations.AddField(
++            model_name='AccessToken',
++            name='source_refresh_token',
++            field=models.OneToOneField(
++                blank=True, 
++                null=True, 
++                on_delete=models.deletion.SET_NULL, 
++                to='test_app.RefreshToken',
++                related_name="refreshed_access_token"
++            ),
++        ),
++    ]
++
++
++def test_add_nullable_onetoonefield():
++    """Test adding a nullable OneToOneField to an existing model."""
++    from django.db import connection
++    from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++    
++    # Create tables manually using schema editor
++    with connection.schema_editor() as schema_editor:
++        # Create initial tables
++        schema_editor.create_model(RefreshToken)
++        schema_editor.create_model(AccessToken)
++        print("Initial tables created successfully")
++        
++        # Try to add the OneToOneField
++        try:
++            field = models.OneToOneField(
++                RefreshToken,
++                blank=True, 
++                null=True, 
++                on_delete=models.deletion.SET_NULL, 
++                related_name="refreshed_access_token"
++            )
++            field.set_attributes_from_name('source_refresh_token')
++            field.model = AccessToken
++            field.column = 'source_refresh_token_id'
++            
++            schema_editor.add_field(AccessToken, field)
++            print("OneToOneField added successfully - issue is fixed!")
++            return True
++        except Exception as e:
++            print(f"Error adding field: {e}")
++            print(f"Error type: {type(e)}")
++            import traceback
++            traceback.print_exc()
++            return False
++
++
++if __name__ == '__main__':
++    success = test_add_nullable_onetoonefield()
++    sys.exit(0 if success else 1)
+diff --git a/test_sqlite_unique_field.py b/test_sqlite_unique_field.py
+new file mode 100644
+index 0000000000..1397cbca3a
+--- /dev/null
++++ b/test_sqlite_unique_field.py
+@@ -0,0 +1,99 @@
++"""
++Test case for SQLite schema editor to ensure unique fields are handled correctly.
++This test should be added to Django's test suite.
++"""
++from django.db import connection, models
++from django.test import TestCase, skipUnlessDBFeature
++from django.test.utils import isolate_apps
++
++
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'schema'
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'schema'
++
++
++class SchemaTests(TestCase):
++    
++    @skipUnlessDBFeature('supports_nullable_unique_constraints')
++    def test_add_nullable_unique_field(self):
++        """Test adding a nullable field with unique=True constraint."""
++        with connection.schema_editor() as editor:
++            editor.create_model(Author)
++            
++            # Add a nullable unique field
++            new_field = models.CharField(max_length=100, unique=True, null=True)
++            new_field.set_attributes_from_name('unique_code')
++            new_field.model = Author
++            
++            editor.add_field(Author, new_field)
++            
++            # Verify the field was added
++            columns = self.get_table_columns('schema_author')
++            self.assertIn('unique_code', columns)
++    
++    @skipUnlessDBFeature('supports_nullable_unique_constraints')
++    def test_add_nullable_onetoonefield(self):
++        """Test adding a nullable OneToOneField."""
++        with connection.schema_editor() as editor:
++            editor.create_model(Author)
++            editor.create_model(Book)
++            
++            # Add a nullable OneToOneField
++            new_field = models.OneToOneField(
++                Author,
++                on_delete=models.SET_NULL,
++                null=True,
++                blank=True,
++                related_name='featured_book'
++            )
++            new_field.set_attributes_from_name('featured_author')
++            new_field.model = Book
++            
++            editor.add_field(Book, new_field)
++            
++            # Verify the field was added
++            columns = self.get_table_columns('schema_book')
++            self.assertIn('featured_author_id', columns)
++    
++    def get_table_columns(self, table):
++        with connection.cursor() as cursor:
++            return [
++                info.name
++                for info in connection.introspection.get_table_description(cursor, table)
++            ]
++
++
++if __name__ == '__main__':
++    # Run the test
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    if not settings.configured:
++        settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++        )
++    
++    django.setup()
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(['__main__'])

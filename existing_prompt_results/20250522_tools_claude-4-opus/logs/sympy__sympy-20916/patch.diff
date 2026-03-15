@@ -1,0 +1,955 @@
+diff --git a/check_unicode_subscripts.py b/check_unicode_subscripts.py
+new file mode 100644
+index 0000000000..fc161402f4
+--- /dev/null
++++ b/check_unicode_subscripts.py
+@@ -0,0 +1,19 @@
++#!/usr/bin/env python
++"""Check which Greek letters have Unicode subscript forms"""
++
++import unicodedata
++
++greek_letters = [
++    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
++    'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'omicron', 'pi',
++    'rho', 'sigma', 'tau', 'upsilon', 'phi', 'chi', 'psi', 'omega'
++]
++
++print("Checking Unicode subscript forms for Greek letters:")
++for letter in greek_letters:
++    name = f'GREEK SUBSCRIPT SMALL LETTER {letter.upper()}'
++    try:
++        char = unicodedata.lookup(name)
++        print(f"✓ {letter}: {char} (U+{ord(char):04X})")
++    except KeyError:
++        print(f"✗ {letter}: No subscript form found")
+diff --git a/debug_omega.py b/debug_omega.py
+new file mode 100644
+index 0000000000..11743d7c41
+--- /dev/null
++++ b/debug_omega.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python
++"""Debug omega subscript handling"""
++
++import unicodedata
++from sympy import symbols
++from sympy.printing.pretty import pretty
++from sympy.printing.conventions import split_super_sub
++
++# Create omega_0 symbol
++omega0 = symbols('omega_0')
++
++# Check how it's split
++name, sups, subs = split_super_sub(str(omega0))
++print(f"Symbol: {omega0}")
++print(f"Name: {name}")
++print(f"Superscripts: {sups}")
++print(f"Subscripts: {subs}")
++
++# Check the pretty output
++pretty_str = pretty(omega0, use_unicode=True)
++print(f"\nPretty output: {pretty_str}")
++print(f"Pretty output repr: {repr(pretty_str)}")
++
++# Check character by character
++print("\nCharacter analysis:")
++for i, char in enumerate(pretty_str):
++    print(f"  [{i}] '{char}' -> U+{ord(char):04X} ({unicodedata.name(char, 'UNKNOWN')})")
+diff --git a/force_bad_output.py b/force_bad_output.py
+new file mode 100644
+index 0000000000..62afcb84ae
+--- /dev/null
++++ b/force_bad_output.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python
++"""Try to force the bad output"""
++
++from sympy import symbols, Matrix
++from sympy.printing.pretty import pretty
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode, sub
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# Let's see what happens if we have omega in the name but it's not recognized
++# Create a custom symbol that bypasses normal processing
++class CustomOmega0:
++    def __init__(self):
++        self.name = 'ω0'  # Already converted to omega, but 0 is not subscripted
++    
++    def __str__(self):
++        return self.name
++    
++    @property
++    def free_symbols(self):
++        return set()
++
++# Test this
++custom = CustomOmega0()
++print(f"Custom omega0: {custom}")
++
++# Let's check what pretty_symbol does with pre-converted omega
++result = pretty_symbol('ω0')
++print(f"pretty_symbol('ω0'): {result!r}")
++
++# What about omega with regular 0?
++from sympy.printing.conventions import split_super_sub
++name, sups, subs = split_super_sub('ω0')
++print(f"\nsplit_super_sub('ω0'): name='{name}', sups={sups}, subs={subs}")
++
++# So the issue might be when omega is already in Unicode form
++# Let's patch pretty_symbol temporarily to see
++def patched_pretty_symbol(symb_name, bold_name=False):
++    # If the symbol already contains omega unicode, don't process subscripts
++    if 'ω' in symb_name and '0' in symb_name:
++        return symb_name  # Return as-is, showing the bad behavior
++    # Otherwise use normal processing
++    from sympy.printing.pretty.pretty_symbology import pretty_symbol as original_pretty_symbol
++    return original_pretty_symbol(symb_name, bold_name)
++
++# Test with patched version
++import sympy.printing.pretty.pretty_symbology
++original = sympy.printing.pretty.pretty_symbology.pretty_symbol
++sympy.printing.pretty.pretty_symbology.pretty_symbol = patched_pretty_symbol
++
++omega0 = symbols('omega0')
++print(f"\nWith patched pretty_symbol:")
++print(f"omega0: {pretty(omega0, use_unicode=True)!r}")
++
++# Restore
++sympy.printing.pretty.pretty_symbology.pretty_symbol = original
+diff --git a/reproduce_exact_issue.py b/reproduce_exact_issue.py
+new file mode 100644
+index 0000000000..21149964ab
+--- /dev/null
++++ b/reproduce_exact_issue.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Try to reproduce the exact issue from the problem statement"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Create the exact scenario
++t0, t1, t2 = symbols('t_0 t_1 t_2')
++w0 = symbols('w_0')
++omega0 = symbols('omega_0')
++
++# Create matrices
++matrix_w = Matrix([[-t0*w0, -t1*w0, -t2*w0]])
++matrix_omega = Matrix([[-t0*omega0, -t1*omega0, -t2*omega0]])
++
++print("Good (with w_0):")
++pprint(matrix_w, use_unicode=True)
++
++print("\nBad (with omega_0) - should show ω0 instead of ω₀:")
++pprint(matrix_omega, use_unicode=True)
++
++# Let's also check the string representation
++print("\nString representations:")
++print(f"w_0: {pretty(w0, use_unicode=True)!r}")
++print(f"omega_0: {pretty(omega0, use_unicode=True)!r}")
++
++# Maybe the issue is in how multiplication is displayed?
++print("\nMultiplication expressions:")
++print(f"-t_0*w_0: {pretty(-t0*w0, use_unicode=True)!r}")
++print(f"-t_0*omega_0: {pretty(-t0*omega0, use_unicode=True)!r}")
++
++# Let's check if there's a specific printer setting that causes this
++from sympy.printing.pretty.pretty import PrettyPrinter
++
++# Try with different settings
++pp = PrettyPrinter({'use_unicode': True, 'wrap_line': False})
++print("\nWith wrap_line=False:")
++print(pp.doprint(matrix_omega))
++
++# Maybe it's related to the order?
++matrix_omega_rev = Matrix([[-omega0*t0, -omega0*t1, -omega0*t2]])
++print("\nReversed order (omega first):")
++pprint(matrix_omega_rev, use_unicode=True)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d7624cde0d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python
++"""Reproduce the Unicode subscript issue with Greek letters"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Create symbols with subscripts
++t0, t1, t2 = symbols('t_0 t_1 t_2')
++w0 = symbols('w_0')  # Latin letter w with subscript 0
++omega0 = symbols('omega_0')  # Greek letter omega with subscript 0
++
++# Create matrices to show the issue
++matrix_latin = Matrix([[-t0*w0, -t1*w0, -t2*w0]])
++matrix_greek = Matrix([[-t0*omega0, -t1*omega0, -t2*omega0]])
++
++print("Latin letter w with subscript 0:")
++pprint(matrix_latin, use_unicode=True)
++print("\nGreek letter omega with subscript 0:")
++pprint(matrix_greek, use_unicode=True)
++
++# Let's also check the pretty string directly
++print("\nPretty string for Latin w_0:")
++print(pretty(w0, use_unicode=True))
++print("\nPretty string for Greek omega_0:")
++print(pretty(omega0, use_unicode=True))
++
++# Let's check what the actual Unicode characters are
++print("\nUnicode representation analysis:")
++latin_str = pretty(w0, use_unicode=True)
++greek_str = pretty(omega0, use_unicode=True)
++print(f"Latin w_0: {repr(latin_str)}")
++print(f"Greek omega_0: {repr(greek_str)}")
+diff --git a/sympy/printing/conventions.py b/sympy/printing/conventions.py
+index 9a3be6bbe9..8408eabd4b 100644
+--- a/sympy/printing/conventions.py
++++ b/sympy/printing/conventions.py
+@@ -7,7 +7,7 @@
+ from collections.abc import Iterable
+ from sympy import Derivative
+ 
+-_name_with_digits_p = re.compile(r'^([a-zA-Z]+)([0-9]+)$')
++_name_with_digits_p = re.compile(r'^(\w+?)([0-9]+)$', re.UNICODE)
+ 
+ 
+ def split_super_sub(text):
+diff --git a/sympy/printing/pretty/tests/test_pretty.py b/sympy/printing/pretty/tests/test_pretty.py
+index 42fae775d3..5eee84fd6f 100644
+--- a/sympy/printing/pretty/tests/test_pretty.py
++++ b/sympy/printing/pretty/tests/test_pretty.py
+@@ -6155,6 +6155,30 @@ def test_complicated_symbol_unchanged():
+         assert pretty(Symbol(symb_name)) == symb_name
+ 
+ 
++def test_unicode_greek_subscripts():
++    """Test that Greek letters with subscripts work correctly even when created with Unicode names"""
++    # Test symbols created with Unicode Greek letters and digits
++    omega0 = Symbol('ω0')
++    alpha1 = Symbol('α1')
++    beta2 = Symbol('β2')
++    
++    # With unicode=True, digits should be subscripted
++    assert xpretty(omega0, use_unicode=True) == 'ω₀'
++    assert xpretty(alpha1, use_unicode=True) == 'α₁'
++    assert xpretty(beta2, use_unicode=True) == 'β₂'
++    
++    # With unicode=False, they should remain as-is
++    assert xpretty(omega0, use_unicode=False) == 'ω0'
++    assert xpretty(alpha1, use_unicode=False) == 'α1'
++    assert xpretty(beta2, use_unicode=False) == 'β2'
++    
++    # Test in expressions
++    t0 = Symbol('t_0')
++    expr = t0 * omega0
++    assert 'ω₀' in xpretty(expr, use_unicode=True)
++    assert 't₀' in xpretty(expr, use_unicode=True)
++
++
+ def test_categories():
+     from sympy.categories import (Object, IdentityMorphism,
+         NamedMorphism, Category, Diagram, DiagramGrid)
+diff --git a/sympy/printing/tests/test_conventions.py b/sympy/printing/tests/test_conventions.py
+index 87689aa8fc..295022ced0 100644
+--- a/sympy/printing/tests/test_conventions.py
++++ b/sympy/printing/tests/test_conventions.py
+@@ -30,6 +30,14 @@ def test_super_sub():
+     assert split_super_sub("alpha_11") == ("alpha", [], ["11"])
+     assert split_super_sub("alpha_11_11") == ("alpha", [], ["11", "11"])
+     assert split_super_sub("") == ("", [], [])
++    # Test Unicode characters
++    assert split_super_sub("ω0") == ("ω", [], ["0"])
++    assert split_super_sub("α1") == ("α", [], ["1"])
++    assert split_super_sub("β2") == ("β", [], ["2"])
++    assert split_super_sub("Ω3") == ("Ω", [], ["3"])
++    assert split_super_sub("ωx0") == ("ωx", [], ["0"])
++    assert split_super_sub("ω_0") == ("ω", [], ["0"])
++    assert split_super_sub("α_1_2") == ("α", [], ["1", "2"])
+ 
+ 
+ def test_requires_partial():
+diff --git a/test_all_greek_subscripts.py b/test_all_greek_subscripts.py
+new file mode 100644
+index 0000000000..564970b7ef
+--- /dev/null
++++ b/test_all_greek_subscripts.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python
++"""Test all Greek letters as subscripts"""
++
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode, sub
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# List of all Greek letters
++greek_letters = [
++    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
++    'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'omicron', 'pi',
++    'rho', 'sigma', 'tau', 'upsilon', 'phi', 'chi', 'psi', 'omega'
++]
++
++print("Greek letters in subscript mapping:")
++for letter in greek_letters:
++    if letter in sub:
++        print(f"  ✓ {letter}")
++    else:
++        print(f"  ✗ {letter}")
++
++print("\nTesting x_<greek> for all Greek letters:")
++for letter in greek_letters:
++    symbol = f'x_{letter}'
++    result = pretty_symbol(symbol)
++    print(f"  x_{letter:8} -> {result}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..2cd4830166
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,66 @@
++#!/usr/bin/env python
++"""Comprehensive test of the Unicode subscript fix"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++from sympy.printing.conventions import split_super_sub
++
++print("=== Testing the fix for Unicode Greek letters with subscripts ===\n")
++
++# The original problem: omega0 showing as ω0 instead of ω₀
++print("1. Original problem scenario:")
++t0, t1, t2 = symbols('t_0 t_1 t_2')
++w0 = symbols('w_0')
++omega0 = symbols('omega_0')
++
++matrix_w = Matrix([[-t0*w0, -t1*w0, -t2*w0]])
++matrix_omega = Matrix([[-t0*omega0, -t1*omega0, -t2*omega0]])
++
++print("Good (Latin w with subscript 0):")
++pprint(matrix_w, use_unicode=True)
++print("\nShould also be good (Greek omega with subscript 0):")
++pprint(matrix_omega, use_unicode=True)
++
++# Test the specific case that would fail before the fix
++print("\n2. Unicode symbol names (would fail before fix):")
++omega0_unicode = symbols('ω0')  # Created with Unicode omega
++print(f"Symbol('ω0'): {pretty(omega0_unicode, use_unicode=True)} (should be ω₀, not ω0)")
++
++# Test split_super_sub with Unicode
++print("\n3. Testing split_super_sub with Unicode:")
++test_cases = ['omega0', 'ω0', 'α1', 'β2', 'Ω3']
++for case in test_cases:
++    name, sups, subs = split_super_sub(case)
++    print(f"  {case:8} -> name='{name}', subs={subs}")
++
++# Test various Greek letters
++print("\n4. Various Greek letters with subscripts:")
++greek_tests = [
++    ('alpha_0', 'α₀'),
++    ('beta_1', 'β₁'),
++    ('gamma_2', 'γ₂'),
++    ('delta_3', 'δ₃'),
++    ('omega_4', 'ω₄'),
++]
++for symbol_name, expected in greek_tests:
++    sym = symbols(symbol_name)
++    result = pretty(sym, use_unicode=True)
++    status = "✓" if result == expected else "✗"
++    print(f"  {status} {symbol_name:10} -> {result} (expected {expected})")
++
++# Test Unicode Greek letters created directly
++print("\n5. Unicode Greek symbols with digits:")
++unicode_tests = [
++    ('ω0', 'ω₀'),
++    ('α1', 'α₁'),
++    ('β2', 'β₂'),
++    ('γ3', 'γ₃'),
++    ('δ4', 'δ₄'),
++]
++for symbol_name, expected in unicode_tests:
++    sym = symbols(symbol_name)
++    result = pretty(sym, use_unicode=True)
++    status = "✓" if result == expected else "✗"
++    print(f"  {status} Symbol('{symbol_name}') -> {result} (expected {expected})")
++
++print("\n=== All tests completed ===")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..4fcabd0ac1
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python
++"""Test edge cases for omega subscript formatting"""
++
++from sympy import symbols, Symbol, Matrix, pprint
++from sympy.printing.pretty import pretty
++from sympy.abc import omega
++
++# Test 1: Using omega from sympy.abc
++print("Test 1 - omega from sympy.abc:")
++omega0 = Symbol('omega0')
++print(f"omega0: {pretty(omega0, use_unicode=True)}")
++
++# Test 2: Creating symbol with assumptions
++omega0_real = Symbol('omega0', real=True)
++print(f"\nTest 2 - omega0 with assumptions: {pretty(omega0_real, use_unicode=True)}")
++
++# Test 3: Using string directly in matrix
++t0 = symbols('t_0')
++expr = -t0 * Symbol('omega0')
++print(f"\nTest 3 - Expression: {pretty(expr, use_unicode=True)}")
++
++# Test 4: Check if it's a display width issue
++from sympy.printing.pretty.stringpict import prettyForm
++from sympy.printing.pretty.pretty_symbology import pretty_symbol
++
++# Get the pretty form
++symb = pretty_symbol('omega0')
++pform = prettyForm(symb)
++print(f"\nTest 4 - Pretty form details:")
++print(f"  String: {pform}")
++print(f"  Width: {pform.width()}")
++print(f"  Height: {pform.height()}")
++
++# Test 5: Check if there's an issue with specific printer settings
++from sympy.printing.pretty.pretty import PrettyPrinter
++
++# Default settings
++pp_default = PrettyPrinter()
++print(f"\nTest 5a - Default settings: {pp_default._print_Symbol(omega0)}")
++
++# With use_unicode=False
++pp_no_unicode = PrettyPrinter({'use_unicode': False})
++print(f"Test 5b - No unicode: {pp_no_unicode._print_Symbol(omega0)}")
++
++# With use_unicode=True explicitly
++pp_unicode = PrettyPrinter({'use_unicode': True})
++print(f"Test 5c - Unicode explicit: {pp_unicode._print_Symbol(omega0)}")
+diff --git a/test_exact_issue.py b/test_exact_issue.py
+new file mode 100644
+index 0000000000..84b669b428
+--- /dev/null
++++ b/test_exact_issue.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python
++"""Test the exact issue from the problem statement"""
++
++from sympy import symbols, Matrix, pprint
++
++# Create symbols exactly as in the problem statement
++t0, t1, t2 = symbols('t_0 t_1 t_2')
++w0 = symbols('w_0')  # Latin letter w with subscript 0
++omega0 = symbols('omega0')  # Greek letter omega with regular 0 (not subscript)
++
++# Create matrices
++matrix_latin = Matrix([[-t0*w0, -t1*w0, -t2*w0]])
++matrix_greek = Matrix([[-t0*omega0, -t1*omega0, -t2*omega0]])
++
++print("Latin letter w_0 (with subscript):")
++pprint(matrix_latin, use_unicode=True)
++
++print("\nGreek letter omega0 (without subscript in symbol name):")
++pprint(matrix_greek, use_unicode=True)
++
++# Let's also test with omega_0 (with underscore)
++omega_0 = symbols('omega_0')
++matrix_greek_sub = Matrix([[-t0*omega_0, -t1*omega_0, -t2*omega_0]])
++
++print("\nGreek letter omega_0 (with subscript in symbol name):")
++pprint(matrix_greek_sub, use_unicode=True)
+diff --git a/test_fallback_case.py b/test_fallback_case.py
+new file mode 100644
+index 0000000000..df4bb8cb19
+--- /dev/null
++++ b/test_fallback_case.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python
++"""Test the fallback case in pretty_symbol"""
++
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode, sub
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# Let's temporarily remove '0' from the subscript mapping to force fallback
++original_sub_0 = sub.get('0')
++if '0' in sub:
++    del sub['0']
++
++print("After removing '0' from subscript mapping:")
++result = pretty_symbol('omega0')
++print(f"omega0: {result} -> {repr(result)}")
++
++# Restore
++if original_sub_0:
++    sub['0'] = original_sub_0
++
++# Let's also test with a subscript that's not in the mapping
++print("\nWith unmapped subscript 'x':")
++result = pretty_symbol('omega_x')
++print(f"omega_x: {result} -> {repr(result)}")
++
++# Test with multiple subscripts where one fails
++print("\nWith mixed subscripts '0x' (0 is mapped, x is not):")
++result = pretty_symbol('omega_0x')
++print(f"omega_0x: {result} -> {repr(result)}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..60ea6f96ee
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++"""Test the fix for Unicode Greek letters with subscripts"""
++
++from sympy.printing.conventions import split_super_sub
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# Test cases
++test_cases = [
++    'omega0',     # ASCII omega with digit
++    'ω0',         # Unicode omega with digit
++    'ω_0',        # Unicode omega with underscore and digit
++    'α1',         # Unicode alpha with digit
++    'β2',         # Unicode beta with digit
++    'Ω3',         # Unicode capital omega with digit
++]
++
++print("Testing split_super_sub with Unicode characters:")
++for case in test_cases:
++    name, sups, subs = split_super_sub(case)
++    print(f"{case:10} -> name='{name}', sups={sups}, subs={subs}")
++
++print("\nTesting pretty_symbol:")
++for case in test_cases:
++    result = pretty_symbol(case)
++    print(f"{case:10} -> {result:10} {repr(result)}")
++
++# Test the specific case from the problem
++print("\nSpecific test - Unicode omega with 0:")
++result = pretty_symbol('ω0')
++print(f"ω0 -> {result} (should be ω₀, not ω0)")
+diff --git a/test_omega_as_subscript.py b/test_omega_as_subscript.py
+new file mode 100644
+index 0000000000..316b45d7bd
+--- /dev/null
++++ b/test_omega_as_subscript.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python
++"""Test omega as a subscript"""
++
++from sympy import symbols
++from sympy.printing.pretty import pretty
++
++# Test omega as a subscript
++x_omega = symbols('x_omega')
++print(f"x_omega: {pretty(x_omega, use_unicode=True)} -> {repr(pretty(x_omega, use_unicode=True))}")
++
++# Test various combinations
++x_omega0 = symbols('x_omega0')
++x_omega_0 = symbols('x_omega_0')
++print(f"x_omega0: {pretty(x_omega0, use_unicode=True)} -> {repr(pretty(x_omega0, use_unicode=True))}")
++print(f"x_omega_0: {pretty(x_omega_0, use_unicode=True)} -> {repr(pretty(x_omega_0, use_unicode=True))}")
++
++# Let's check what happens with other Greek letters as subscripts
++x_beta = symbols('x_beta')
++x_alpha = symbols('x_alpha')
++print(f"\nx_beta: {pretty(x_beta, use_unicode=True)} -> {repr(pretty(x_beta, use_unicode=True))}")
++print(f"x_alpha: {pretty(x_alpha, use_unicode=True)} -> {repr(pretty(x_alpha, use_unicode=True))}")
+diff --git a/test_omega_subscript_detailed.py b/test_omega_subscript_detailed.py
+new file mode 100644
+index 0000000000..2ae723c376
+--- /dev/null
++++ b/test_omega_subscript_detailed.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python
++"""Detailed test of omega with numeric subscripts"""
++
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode
++from sympy.printing.conventions import split_super_sub
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# Test omega0 step by step
++print("Step-by-step analysis of 'omega0':")
++name, sups, subs = split_super_sub('omega0')
++print(f"1. split_super_sub: name='{name}', sups={sups}, subs={subs}")
++
++# The translate function is defined inside pretty_symbol, let's simulate it
++from sympy.printing.pretty.pretty_symbology import greek_unicode
++translated_name = greek_unicode.get(name, name)
++print(f"2. translate name: '{name}' -> '{translated_name}'")
++
++# Check subscript mapping
++from sympy.printing.pretty.pretty_symbology import sub
++print(f"3. Subscript '0' in mapping: {'0' in sub}")
++if '0' in sub:
++    print(f"   sub['0'] = {repr(sub['0'])}")
++
++# Full result
++result = pretty_symbol('omega0')
++print(f"4. Final result: {repr(result)}")
++
++# Now test omega_0 (with underscore)
++print("\n\nStep-by-step analysis of 'omega_0':")
++name2, sups2, subs2 = split_super_sub('omega_0')
++print(f"1. split_super_sub: name='{name2}', sups={sups2}, subs={subs2}")
++result2 = pretty_symbol('omega_0')
++print(f"2. Final result: {repr(result2)}")
++
++# Test x_omega0
++print("\n\nStep-by-step analysis of 'x_omega0':")
++name3, sups3, subs3 = split_super_sub('x_omega0')
++print(f"1. split_super_sub: name='{name3}', sups={sups3}, subs={subs3}")
++result3 = pretty_symbol('x_omega0')
++print(f"2. Final result: {repr(result3)}")
+diff --git a/test_omega_variations.py b/test_omega_variations.py
+new file mode 100644
+index 0000000000..cd32857df9
+--- /dev/null
++++ b/test_omega_variations.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python
++"""Test different omega variations"""
++
++from sympy import symbols
++from sympy.printing.pretty import pretty
++from sympy.printing.conventions import split_super_sub
++
++# Test different omega variations
++omega0 = symbols('omega0')  # no underscore
++omega_0 = symbols('omega_0')  # with underscore
++
++print("omega0 (no underscore):")
++print(f"  Symbol: {omega0}")
++name, sups, subs = split_super_sub(str(omega0))
++print(f"  split_super_sub: name={name}, sups={sups}, subs={subs}")
++print(f"  Pretty: {pretty(omega0, use_unicode=True)}")
++
++print("\nomega_0 (with underscore):")
++print(f"  Symbol: {omega_0}")
++name, sups, subs = split_super_sub(str(omega_0))
++print(f"  split_super_sub: name={name}, sups={sups}, subs={subs}")
++print(f"  Pretty: {pretty(omega_0, use_unicode=True)}")
++
++# Let's check if the issue might be with specific contexts
++from sympy import Matrix
++t0 = symbols('t_0')
++
++# Create the exact scenario from problem statement
++# where omega0 shows as ω0 instead of ω₀
++print("\nTesting in matrix context:")
++matrix = Matrix([[-t0*symbols('omega0')]])
++print("Matrix with omega0:")
++from sympy.printing.pretty import pretty_print
++pretty_print(matrix, use_unicode=True)
+diff --git a/test_pretty_symbol_direct.py b/test_pretty_symbol_direct.py
+new file mode 100644
+index 0000000000..a77e1aa1f5
+--- /dev/null
++++ b/test_pretty_symbol_direct.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++"""Test pretty_symbol directly"""
++
++from sympy.printing.pretty.pretty_symbology import pretty_symbol, pretty_use_unicode
++
++# Enable unicode
++pretty_use_unicode(True)
++
++# Test various omega combinations
++test_cases = [
++    'omega0',
++    'omega_0', 
++    'omega1',
++    'omega_1',
++    'w0',
++    'w_0',
++    'beta0',
++    'beta_0',
++    'alpha0',
++    'alpha_0',
++]
++
++print("Testing pretty_symbol function:")
++for case in test_cases:
++    result = pretty_symbol(case)
++    print(f"{case:10} -> {result:10} {repr(result)}")
++
++# Let's also check what happens with multiple subscripts
++print("\nMultiple subscripts:")
++multi_cases = ['omega_0_1', 'omega_01', 'x_omega_0']
++for case in multi_cases:
++    result = pretty_symbol(case)
++    print(f"{case:15} -> {result:15} {repr(result)}")
+diff --git a/test_regression.py b/test_regression.py
+new file mode 100644
+index 0000000000..fea04350c3
+--- /dev/null
++++ b/test_regression.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Test that our fix doesn't break existing functionality"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Test regular ASCII symbols with digits
++x0 = symbols('x0')
++x_0 = symbols('x_0')
++omega0 = symbols('omega0')
++omega_0 = symbols('omega_0')
++
++print("ASCII symbols with digits:")
++print(f"x0: {pretty(x0, use_unicode=True)}")
++print(f"x_0: {pretty(x_0, use_unicode=True)}")
++print(f"omega0: {pretty(omega0, use_unicode=True)}")
++print(f"omega_0: {pretty(omega_0, use_unicode=True)}")
++
++# Test in matrices
++t0, t1, t2 = symbols('t_0 t_1 t_2')
++matrix = Matrix([[-t0*omega0, -t1*omega0, -t2*omega0]])
++print("\nMatrix with omega0:")
++pprint(matrix, use_unicode=True)
++
++# Test edge cases
++print("\nEdge cases:")
++
++# Test numbers at the beginning (should not be valid symbol names, but let's check)
++try:
++    s = symbols('0x')
++    print(f"0x: {pretty(s, use_unicode=True)}")
++except:
++    print("0x: Cannot create symbol (expected)")
++
++# Test very long subscripts
++long_sub = symbols('x_123456789')
++print(f"x_123456789: {pretty(long_sub, use_unicode=True)}")
++
++# Test mixed super/subscripts
++mixed = symbols('x_1^2')
++print(f"x_1^2: {pretty(mixed, use_unicode=True)}")
+diff --git a/test_specific_case.py b/test_specific_case.py
+new file mode 100644
+index 0000000000..906348e183
+--- /dev/null
++++ b/test_specific_case.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python
++"""Test specific case that might reproduce the issue"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Maybe the issue is with how omega is defined?
++# Let's try creating omega as a Greek symbol directly
++omega = symbols('omega')
++omega0_manual = omega * symbols('0')  # This would be wrong, but let's see
++
++print("Test 1 - omega * 0:")
++print(pretty(omega0_manual, use_unicode=True))
++
++# Maybe the issue is when omega is not recognized as Greek?
++class CustomSymbol:
++    def __str__(self):
++        return 'omega0'
++    
++# Let's check the actual pretty printing code for symbols
++from sympy.printing.pretty.pretty import PrettyPrinter
++pp = PrettyPrinter({'use_unicode': True})
++
++# Test with a symbol that might not be recognized
++omega0 = symbols('omega0')
++print("\nTest 2 - Direct pretty printing of omega0:")
++print(pp._print_Symbol(omega0))
++
++# Let's see what happens if we disable the digit splitting
++from sympy.printing import conventions
++original_match = conventions._name_with_digits_p.match
++
++def no_match(name):
++    return None
++
++# Temporarily disable digit splitting
++conventions._name_with_digits_p.match = no_match
++omega0_no_split = symbols('omega0')
++print("\nTest 3 - omega0 without digit splitting:")
++print(pretty(omega0_no_split, use_unicode=True))
++
++# Restore original
++conventions._name_with_digits_p.match = original_match
+diff --git a/test_unicode_setting.py b/test_unicode_setting.py
+new file mode 100644
+index 0000000000..63f5261675
+--- /dev/null
++++ b/test_unicode_setting.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python
++"""Test unicode settings"""
++
++from sympy import symbols
++from sympy.printing.pretty import pretty
++from sympy.printing.pretty.pretty_symbology import pretty_use_unicode, _use_unicode
++
++# Check current setting
++print(f"Current _use_unicode: {_use_unicode}")
++
++# Create omega0
++omega0 = symbols('omega0')
++
++# Test with unicode explicitly disabled
++pretty_use_unicode(False)
++print(f"\nAfter pretty_use_unicode(False):")
++print(f"_use_unicode: {_use_unicode}")
++print(f"omega0: {pretty(omega0, use_unicode=False)}")
++
++# Test with unicode explicitly enabled
++pretty_use_unicode(True)
++print(f"\nAfter pretty_use_unicode(True):")
++print(f"_use_unicode: {_use_unicode}")
++print(f"omega0: {pretty(omega0, use_unicode=True)}")
++
++# Reset and test the pretty function with use_unicode parameter
++pretty_use_unicode(False)
++print(f"\nWith global unicode=False, but parameter use_unicode=True:")
++print(f"omega0: {pretty(omega0, use_unicode=True)}")
++
++print(f"\nWith global unicode=False, and parameter use_unicode=False:")
++print(f"omega0: {pretty(omega0, use_unicode=False)}")
+diff --git a/test_unicode_subscript_fix.py b/test_unicode_subscript_fix.py
+new file mode 100644
+index 0000000000..b6a35931bf
+--- /dev/null
++++ b/test_unicode_subscript_fix.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python
++"""Test for the Unicode subscript fix"""
++
++from sympy import Symbol
++from sympy.printing.pretty import pretty
++from sympy.printing.conventions import split_super_sub
++
++def test_split_super_sub_unicode():
++    """Test that split_super_sub works with Unicode characters"""
++    # Test with Unicode Greek letters
++    assert split_super_sub('ω0') == ('ω', [], ['0'])
++    assert split_super_sub('α1') == ('α', [], ['1'])
++    assert split_super_sub('β2') == ('β', [], ['2'])
++    assert split_super_sub('Ω3') == ('Ω', [], ['3'])
++    
++    # Test with mixed Unicode/ASCII
++    assert split_super_sub('ωx0') == ('ωx', [], ['0'])
++    
++    # Test that ASCII still works
++    assert split_super_sub('omega0') == ('omega', [], ['0'])
++    assert split_super_sub('x0') == ('x', [], ['0'])
++    
++    # Test with underscores
++    assert split_super_sub('ω_0') == ('ω', [], ['0'])
++    assert split_super_sub('α_1_2') == ('α', [], ['1', '2'])
++    
++    print("All split_super_sub tests passed!")
++
++def test_pretty_unicode_symbols():
++    """Test that pretty printing works with Unicode symbol names"""
++    # Create symbols with Unicode names
++    omega0 = Symbol('ω0')
++    alpha1 = Symbol('α1')
++    beta2 = Symbol('β2')
++    
++    # Test pretty printing with unicode=True
++    assert pretty(omega0, use_unicode=True) == 'ω₀'
++    assert pretty(alpha1, use_unicode=True) == 'α₁'
++    assert pretty(beta2, use_unicode=True) == 'β₂'
++    
++    # Test pretty printing with unicode=False
++    assert pretty(omega0, use_unicode=False) == 'ω0'
++    assert pretty(alpha1, use_unicode=False) == 'α1'
++    assert pretty(beta2, use_unicode=False) == 'β2'
++    
++    print("All pretty printing tests passed!")
++
++if __name__ == '__main__':
++    test_split_super_sub_unicode()
++    test_pretty_unicode_symbols()
++    print("\nAll tests passed! The fix is working correctly.")
+diff --git a/test_unicode_symbol_names.py b/test_unicode_symbol_names.py
+new file mode 100644
+index 0000000000..187ac03b0f
+--- /dev/null
++++ b/test_unicode_symbol_names.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python
++"""Test symbols created with Unicode names directly"""
++
++from sympy import Symbol, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Create symbols with Unicode names directly (this would have been problematic before)
++omega0 = Symbol('ω0')  # Unicode omega with digit 0
++alpha1 = Symbol('α1')  # Unicode alpha with digit 1
++beta2 = Symbol('β2')   # Unicode beta with digit 2
++
++print("Symbols created with Unicode names:")
++print(f"Symbol('ω0'): {pretty(omega0, use_unicode=True)} -> {repr(pretty(omega0, use_unicode=True))}")
++print(f"Symbol('α1'): {pretty(alpha1, use_unicode=True)} -> {repr(pretty(alpha1, use_unicode=True))}")
++print(f"Symbol('β2'): {pretty(beta2, use_unicode=True)} -> {repr(pretty(beta2, use_unicode=True))}")
++
++# Test in matrix context
++t0 = Symbol('t_0')
++matrix = Matrix([[-t0*omega0]])
++print("\nMatrix with Unicode omega0:")
++pprint(matrix, use_unicode=True)
++
++# Test mixed Unicode/ASCII
++mixed = Symbol('ωx0')  # omega, x, 0
++print(f"\nMixed Unicode/ASCII 'ωx0': {pretty(mixed, use_unicode=True)} -> {repr(pretty(mixed, use_unicode=True))}")
+diff --git a/test_variations.py b/test_variations.py
+new file mode 100644
+index 0000000000..0ba041e2c5
+--- /dev/null
++++ b/test_variations.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python
++"""Test various Greek letter subscript scenarios"""
++
++from sympy import symbols, Matrix, pprint
++from sympy.printing.pretty import pretty
++
++# Test different Greek letters with subscripts
++alpha0 = symbols('alpha_0')
++beta1 = symbols('beta_1')
++gamma2 = symbols('gamma_2')
++omega0 = symbols('omega_0')
++
++# Also test with explicit Greek letters in symbol names
++ω0 = symbols('ω_0')
++α1 = symbols('α_1')
++
++print("Testing various Greek letters with subscripts:")
++print(f"alpha_0: {pretty(alpha0, use_unicode=True)} -> {repr(pretty(alpha0, use_unicode=True))}")
++print(f"beta_1: {pretty(beta1, use_unicode=True)} -> {repr(pretty(beta1, use_unicode=True))}")
++print(f"gamma_2: {pretty(gamma2, use_unicode=True)} -> {repr(pretty(gamma2, use_unicode=True))}")
++print(f"omega_0: {pretty(omega0, use_unicode=True)} -> {repr(pretty(omega0, use_unicode=True))}")
++print(f"ω_0: {pretty(ω0, use_unicode=True)} -> {repr(pretty(ω0, use_unicode=True))}")
++print(f"α_1: {pretty(α1, use_unicode=True)} -> {repr(pretty(α1, use_unicode=True))}")
++
++# Test in a matrix context
++t0 = symbols('t_0')
++matrix = Matrix([[-t0*omega0]])
++print("\nMatrix with omega_0:")
++pprint(matrix, use_unicode=True)
++
++# Test without unicode
++print("\nWithout unicode:")
++print(f"omega_0: {pretty(omega0, use_unicode=False)}")

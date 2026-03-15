@@ -1,0 +1,666 @@
+diff --git a/sympy/parsing/tests/test_latex.py b/sympy/parsing/tests/test_latex.py
+index f5c61cde13..e39ff50237 100644
+--- a/sympy/parsing/tests/test_latex.py
++++ b/sympy/parsing/tests/test_latex.py
+@@ -243,6 +243,9 @@ def test_import():
+     (r"\log_2 x", _log(x, 2)),
+     (r"\log_a x", _log(x, a)),
+     (r"5^0 - 4^0", _Add(_Pow(5, 0), _Mul(-1, _Pow(4, 0)))),
++    # Test for issue with nested fractions - missing parentheses
++    (r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}", 
++     _Mul(_Mul(_Add(_Pow(a, 3), b), _Pow(c, -1)), _Pow(_Pow(_Pow(c, 2), -1), -1))),
+ ]
+ 
+ 
+diff --git a/sympy/printing/str.py b/sympy/printing/str.py
+index c3fdcdd435..922ef5dc9b 100644
+--- a/sympy/printing/str.py
++++ b/sympy/printing/str.py
+@@ -336,6 +336,9 @@ def apow(i):
+                             isinstance(item.base, Mul)):
+                         # To avoid situations like #14160
+                         pow_paren.append(item)
++                    # Check if base is a Pow with negative exponent (will print as fraction)
++                    if isinstance(item.base, Pow) and item.base.exp.is_negative:
++                        pow_paren.append(item)
+                     b.append(item.base)
+             elif item.is_Rational and item is not S.Infinity:
+                 if item.p != 1:
+diff --git a/test_args.py b/test_args.py
+new file mode 100644
+index 0000000000..10aee8ab71
+--- /dev/null
++++ b/test_args.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow
++
++# The problematic case
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("Result:", result)
++print("Result args:", result.args)
++print("Result is Mul?", isinstance(result, Mul))
++
++# Check if it's actually correct structurally
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++
++# What we got
++numerator = (a**3 + b)/c
++denominator = 1/(c**2)
++constructed = Mul(numerator, Pow(denominator, -1, evaluate=False), evaluate=False)
++
++print("\nConstructed manually:", constructed)
++print("Constructed args:", constructed.args)
++print("Are they equal?", result == constructed)
++
++# The issue might be in the string representation
++print("\nString representations:")
++print("Result str():", str(result))
++print("Constructed str():", str(constructed))
++
++# Let's check with sympy's printer
++from sympy import pprint, latex as sympy_latex
++print("\nPretty print result:")
++pprint(result)
++print("\nPretty print constructed:")
++pprint(constructed)
++
++print("\nLaTeX of result:", sympy_latex(result))
++print("LaTeX of constructed:", sympy_latex(constructed))
+diff --git a/test_check_structure.py b/test_check_structure.py
+new file mode 100644
+index 0000000000..9da246b742
+--- /dev/null
++++ b/test_check_structure.py
+@@ -0,0 +1,31 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import srepr, Symbol, Mul, Pow, Add
++
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("Parsed result:")
++print(result)
++print("\nsrepr:")
++print(srepr(result))
++
++# Build the expected expression
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++expected = Mul(Mul(Pow(c, -1), Add(Pow(a, 3), b)), Pow(Pow(Pow(c, 2), -1), -1))
++print("\nExpected:")
++print(expected)
++print("\nsrepr:")
++print(srepr(expected))
++
++print("\nAre they equal?", result == expected)
++
++# Try with evaluate=False
++expected2 = Mul(Mul(Pow(c, -1), Add(Pow(a, 3), b), evaluate=False), 
++                Pow(Pow(Pow(c, 2), -1), -1), evaluate=False)
++print("\nExpected2 (evaluate=False):")
++print(expected2)
++print("\nsrepr:")
++print(srepr(expected2))
++
++print("\nAre they equal?", result == expected2)
+diff --git a/test_debug.py b/test_debug.py
+new file mode 100644
+index 0000000000..9a3956df91
+--- /dev/null
++++ b/test_debug.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++# The problematic case
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("Result:", result)
++print("Result args:", result.args)
++
++# Check what b[0] is
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++denom_expr = 1/(c**2)
++print(f"\nDenominator expression: {denom_expr}")
++print(f"Type: {type(denom_expr)}")
++print(f"Precedence: {precedence(denom_expr)}")
++print(f"PRECEDENCE['Mul']: {PRECEDENCE['Mul']}")
++
++# Let's manually trace through the printing
++from sympy.printing.str import StrPrinter
++printer = StrPrinter()
++
++# Check if the issue is in how we're getting b
++print("\n--- Tracing through _print_Mul ---")
++expr = result
++args = expr.args
++print(f"expr.args: {args}")
++
++# Check what goes into b
++for i, item in enumerate(args):
++    print(f"\nArg {i}: {item}")
++    print(f"  Type: {type(item)}")
++    print(f"  is_Pow: {isinstance(item, Pow)}")
++    if isinstance(item, Pow):
++        print(f"  exp: {item.exp}")
++        print(f"  exp < 0: {item.exp.as_coeff_Mul()[0] < 0}")
++        print(f"  base: {item.base}")
+diff --git a/test_debug2.py b/test_debug2.py
+new file mode 100644
+index 0000000000..20e15f3b1e
+--- /dev/null
++++ b/test_debug2.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow, srepr
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++# The problematic case
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++# Get the denominator part
++denom_pow = result.args[1]  # This is Pow(1/(c**2), -1)
++denom_base = denom_pow.base  # This is 1/(c**2)
++
++print(f"Denominator base: {denom_base}")
++print(f"Type: {type(denom_base)}")
++print(f"Precedence: {precedence(denom_base)}")
++print(f"Is Mul?: {isinstance(denom_base, Mul)}")
++print(f"srepr: {srepr(denom_base)}")
++
++# Check if it's being handled correctly
++print(f"\nPrecedence <= PRECEDENCE['Mul']: {precedence(denom_base) <= PRECEDENCE['Mul']}")
+diff --git a/test_debug_bstr.py b/test_debug_bstr.py
+new file mode 100644
+index 0000000000..f4f045d6ea
+--- /dev/null
++++ b/test_debug_bstr.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++from sympy import Symbol, Pow, Add, Mul
++from sympy.printing.str import StrPrinter
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++x = Symbol('x')
++y = Symbol('y')
++
++expr = (x + 1)/(y + 2)
++print(f"Expression: {expr}")
++print(f"Type: {type(expr)}")
++print(f"Args: {expr.args}")
++
++# Manually trace through _print_Mul
++printer = StrPrinter()
++prec = precedence(expr)
++
++# The denominator should be in b
++b = []
++for item in expr.args:
++    if (item.is_commutative and isinstance(item, Pow) and 
++        bool(item.exp.as_coeff_Mul()[0] < 0)):
++        if item.exp is not -1:
++            b.append(item)
++        else:
++            b.append(item.base)
++            
++print(f"\nb list: {b}")
++print(f"b[0]: {b[0] if b else 'empty'}")
++print(f"Type of b[0]: {type(b[0]) if b else 'N/A'}")
++
++# Check what parenthesize does
++if b:
++    b_str = printer.parenthesize(b[0], prec, strict=False)
++    print(f"\nparenthesize(b[0], {prec}, strict=False) = '{b_str}'")
++    
++    # Direct print
++    direct = printer._print(b[0])
++    print(f"Direct _print(b[0]) = '{direct}'")
+diff --git a/test_debug_flow.py b/test_debug_flow.py
+new file mode 100644
+index 0000000000..42d0c1e0d5
+--- /dev/null
++++ b/test_debug_flow.py
+@@ -0,0 +1,20 @@
++#!/usr/bin/env python3
++from sympy import Symbol, Pow, Add, Mul, S
++from sympy.printing.str import StrPrinter
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++x = Symbol('x')
++y = Symbol('y')
++
++expr = (x + 1)/(y + 2)
++print(f"Expression: {expr}")
++
++# Check the actual args
++for i, arg in enumerate(expr.args):
++    print(f"\nArg {i}: {arg}")
++    print(f"  Type: {type(arg)}")
++    if isinstance(arg, Pow):
++        print(f"  Base: {arg.base}")
++        print(f"  Exp: {arg.exp}")
++        print(f"  Exp == S.NegativeOne: {arg.exp == S.NegativeOne}")
++        print(f"  Exp is S.NegativeOne: {arg.exp is S.NegativeOne}")
+diff --git a/test_debug_mul.py b/test_debug_mul.py
+new file mode 100644
+index 0000000000..6f5ff9bf52
+--- /dev/null
++++ b/test_debug_mul.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++from sympy import Symbol, Pow, Add
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++x = Symbol('x')
++y = Symbol('y')
++
++# The denominator
++denom = y + 2
++denom_pow = Pow(denom, -1)
++
++print(f"Denominator: {denom}")
++print(f"Type: {type(denom)}")
++print(f"As Pow^-1: {denom_pow}")
++print(f"denom_pow.exp: {denom_pow.exp}")
++print(f"Is denom_pow.exp == -1?: {denom_pow.exp == -1}")
++
++# Check precedence
++print(f"\nPrecedence of Add: {PRECEDENCE['Add']}")
++print(f"Precedence of Mul: {PRECEDENCE['Mul']}")
++print(f"Precedence of denom: {precedence(denom)}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..902526ba11
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++from sympy import Symbol, Mul, Pow, Add, sqrt, S
++from sympy.printing.str import StrPrinter
++
++# Test various edge cases for our fix
++x, y, z = Symbol('x'), Symbol('y'), Symbol('z')
++printer = StrPrinter()
++
++test_cases = [
++    # Basic division - should not change
++    (x/y, "x/y"),
++    
++    # Division with Add in denominator - should not change  
++    (x/(y + z), "x/(y + z)"),
++    
++    # Division with Mul in denominator - should not change
++    (x/(y*z), "x/(y*z)"),
++    
++    # Division with fraction in denominator - should add parentheses
++    (Mul(x, Pow(Pow(y, -1), -1), evaluate=False), "x/(1/y)"),
++    
++    # Complex nested case
++    (Mul(x, Pow(Mul(2, Pow(y, -1), evaluate=False), -1), evaluate=False), "x/(2/y)"),
++    
++    # With sqrt (Pow with 1/2)
++    (Mul(x, Pow(sqrt(y), -1), evaluate=False), "x/sqrt(y)"),
++    
++    # Multiple terms in numerator
++    (Mul(x + y, Pow(Pow(z, -1), -1), evaluate=False), "(x + y)/(1/z)"),
++]
++
++print("Testing edge cases:")
++for expr, expected in test_cases:
++    result = printer._print(expr)
++    status = "✓" if result == expected else "✗"
++    print(f"{status} {expr} -> '{result}' (expected: '{expected}')")
++    if result != expected:
++        print(f"  MISMATCH!")
++
++print("\nAll edge cases tested.")
+diff --git a/test_fraction_detailed.py b/test_fraction_detailed.py
+new file mode 100644
+index 0000000000..8f3cd9339c
+--- /dev/null
++++ b/test_fraction_detailed.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, sympify, Mul, Pow, Add
++
++# Test various fraction expressions
++test_cases = [
++    # Simple fraction
++    (r"\frac{a}{b}", "a/b"),
++    
++    # Nested fraction - numerator
++    (r"\frac{\frac{a}{b}}{c}", "(a/b)/c"),
++    
++    # Nested fraction - denominator
++    (r"\frac{a}{\frac{b}{c}}", "a/(b/c)"),
++    
++    # The problematic case
++    (r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}", "((a**3 + b)/c)/(1/(c**2))"),
++    
++    # More complex nested fractions
++    (r"\frac{\frac{a}{b}}{\frac{c}{d}}", "(a/b)/(c/d)"),
++]
++
++for latex, expected_str in test_cases:
++    print(f"\nTesting: {latex}")
++    result = parse_latex(latex)
++    print(f"Parsed: {result}")
++    print(f"Type: {type(result)}")
++    
++    # Check the structure
++    if isinstance(result, Mul):
++        print(f"Mul args: {result.args}")
++        for i, arg in enumerate(result.args):
++            print(f"  Arg {i}: {arg} (type: {type(arg)})")
++            if isinstance(arg, Pow) and arg.exp == -1:
++                print(f"    Base of Pow^-1: {arg.base}")
++    
++    # Compare with expected
++    expected = sympify(expected_str)
++    print(f"Expected: {expected}")
++    print(f"Equal? {result == expected}")
++    
++    # Simplify both
++    from sympy import simplify
++    print(f"Simplified result: {simplify(result)}")
++    print(f"Simplified expected: {simplify(expected)}")
++    print(f"Simplified equal? {simplify(result) == simplify(expected)}")
+diff --git a/test_fraction_issue.py b/test_fraction_issue.py
+new file mode 100644
+index 0000000000..88979911f4
+--- /dev/null
++++ b/test_fraction_issue.py
+@@ -0,0 +1,34 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, sympify
++
++# Test the problematic expression
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("LaTeX expression:", latex_expr)
++print("Parsed result:", result)
++print("Result type:", type(result))
++
++# Expected result
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++expected = ((a**3 + b)/c)/(1/(c**2))
++print("\nExpected:", expected)
++
++# Check if they're equal
++print("\nAre they equal?", result == expected)
++
++# Let's also check the string representation
++print("\nString representation of result:", str(result))
++print("String representation of expected:", str(expected))
++
++# Let's simplify both and compare
++from sympy import simplify
++print("\nSimplified result:", simplify(result))
++print("Simplified expected:", simplify(expected))
++
++# Let's also test with specific values
++test_values = {'a': 2, 'b': 3, 'c': 4}
++print("\nWith test values", test_values)
++print("Result evaluates to:", result.subs(test_values))
++print("Expected evaluates to:", expected.subs(test_values))
+diff --git a/test_mul_issue.py b/test_mul_issue.py
+new file mode 100644
+index 0000000000..3713555719
+--- /dev/null
++++ b/test_mul_issue.py
+@@ -0,0 +1,10 @@
++#!/usr/bin/env python3
++from sympy import Symbol
++
++x = Symbol('x')
++y = Symbol('y')
++
++expr = (x + 1)/(y + 2)
++print(f"Expression: {expr}")
++print(f"String: {str(expr)}")
++print(f"Expected: (x + 1)/(y + 2)")
+diff --git a/test_new_testcase.py b/test_new_testcase.py
+new file mode 100644
+index 0000000000..550b36d068
+--- /dev/null
++++ b/test_new_testcase.py
+@@ -0,0 +1,23 @@
++#!/usr/bin/env python3
++# Test case to add to the test suite
++
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, simplify
++
++# Test the specific case from the issue
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++# Check that parentheses are correct
++assert str(result) == "((a**3 + b)/c)/(1/(c**2))"
++
++# Check that it evaluates correctly
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++expected = c*(a**3 + b)
++assert simplify(result) == expected
++
++# Test with specific values
++test_vals = {a: 2, b: 3, c: 4}
++assert result.subs(test_vals) == expected.subs(test_vals)
++
++print("All tests pass!")
+diff --git a/test_order.py b/test_order.py
+new file mode 100644
+index 0000000000..98206693c9
+--- /dev/null
++++ b/test_order.py
+@@ -0,0 +1,35 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow, Add, srepr
++
++# Helper functions
++def _Add(a, b):
++    return Add(a, b, evaluate=False)
++
++def _Mul(a, b):
++    return Mul(a, b, evaluate=False)
++
++def _Pow(a, b):
++    return Pow(a, b, evaluate=False)
++
++# Parse the expression
++result = parse_latex(r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}")
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++
++# Check the exact order
++print("First arg of result:")
++print(f"  {result.args[0]}")
++print(f"  Its args: {result.args[0].args}")
++
++# The first arg is (a**3 + b)/c which is Mul(Pow(c, -1), Add(...))
++# So it seems Mul reorders args
++option1 = _Mul(_Pow(c, -1), _Add(_Pow(a, 3), b))
++option2 = _Mul(_Add(_Pow(a, 3), b), _Pow(c, -1))
++
++print(f"\nOption 1: {option1}")
++print(f"Option 1 args: {option1.args}")
++print(f"Matches? {result.args[0] == option1}")
++
++print(f"\nOption 2: {option2}")  
++print(f"Option 2 args: {option2.args}")
++print(f"Matches? {result.args[0] == option2}")
+diff --git a/test_precedence.py b/test_precedence.py
+new file mode 100644
+index 0000000000..2d294b6568
+--- /dev/null
++++ b/test_precedence.py
+@@ -0,0 +1,21 @@
++#!/usr/bin/env python3
++from sympy import Symbol, Mul, Pow
++from sympy.printing.precedence import precedence, PRECEDENCE
++
++# Check precedences
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++
++# The denominator expression
++denom = 1/(c**2)
++print(f"Precedence of 1/(c**2): {precedence(denom)}")
++print(f"Type: {type(denom)}")
++
++# The full expression
++expr = Mul((a**3 + b)/c, Pow(denom, -1, evaluate=False), evaluate=False)
++print(f"\nPrecedence of full expression: {precedence(expr)}")
++
++# Check PRECEDENCE values
++print(f"\nPRECEDENCE values:")
++print(f"Mul: {PRECEDENCE['Mul']}")
++print(f"Pow: {PRECEDENCE['Pow']}")
++print(f"Add: {PRECEDENCE['Add']}")
+diff --git a/test_structure.py b/test_structure.py
+new file mode 100644
+index 0000000000..3c6c63caf4
+--- /dev/null
++++ b/test_structure.py
+@@ -0,0 +1,25 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import srepr
++
++# The problematic case
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("LaTeX expression:", latex_expr)
++print("\nSymPy representation (srepr):")
++print(srepr(result))
++
++# Let's also check a simpler case
++latex_expr2 = r"\frac{a}{\frac{1}{b}}"
++result2 = parse_latex(latex_expr2)
++print("\n\nSimpler case:", latex_expr2)
++print("SymPy representation (srepr):")
++print(srepr(result2))
++
++# And the expected structure
++from sympy import Symbol
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++expected = ((a**3 + b)/c)/(1/(c**2))
++print("\n\nExpected structure:")
++print(srepr(expected))
+diff --git a/test_structure_match.py b/test_structure_match.py
+new file mode 100644
+index 0000000000..d001f34244
+--- /dev/null
++++ b/test_structure_match.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow, Add, srepr
++
++# Helper functions from test_latex.py
++def _Add(a, b):
++    return Add(a, b, evaluate=False)
++
++def _Mul(a, b):
++    return Mul(a, b, evaluate=False)
++
++def _Pow(a, b):
++    return Pow(a, b, evaluate=False)
++
++# Parse the expression
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("Parsed result:")
++print(result)
++print("\nsrepr:")
++print(srepr(result))
++
++# Try to match the structure
++a, b, c = Symbol('a'), Symbol('b'), Symbol('c')
++
++# The parser creates: Mul(numerator, Pow(denominator, -1))
++# numerator = (a^3 + b)/c = Mul(Pow(c, -1), Add(Pow(a, 3), b))
++# denominator = 1/c^2 = Pow(Pow(c, 2), -1)
++
++# So the full structure should be:
++# Mul(Mul(Pow(c, -1), Add(Pow(a, 3), b)), Pow(Pow(Pow(c, 2), -1), -1))
++
++# But the parser uses evaluate=False, so let's check the exact args
++print("\nDirect args of result:")
++for i, arg in enumerate(result.args):
++    print(f"  Arg {i}: {arg} (srepr: {srepr(arg)})")
++    
++# The issue might be in the order of args or internal evaluation
++# Let's build it step by step
++numerator = _Mul(_Add(_Pow(a, 3), b), _Pow(c, -1))
++denominator = _Mul(1, _Pow(_Pow(c, 2), -1))
++print(f"\nNumerator: {numerator}")
++print(f"Denominator: {denominator}")
++
++# Actually, looking at convert_frac, it does:
++# expr_top = convert_expr(frac.upper)  
++# expr_bot = convert_expr(frac.lower)
++# inverse_denom = sympy.Pow(expr_bot, -1, evaluate=False)
++# return sympy.Mul(expr_top, inverse_denom, evaluate=False)
++
++# So for the inner fractions:
++# Top fraction: a^3+b / c becomes Mul(Add(Pow(a,3), b), Pow(c, -1))
++inner_top = _Mul(_Add(_Pow(a, 3), b), _Pow(c, -1))
++# Bottom fraction: 1 / c^2 becomes Mul(1, Pow(Pow(c, 2), -1)) = Pow(Pow(c, 2), -1)
++inner_bot = _Pow(_Pow(c, 2), -1)
++
++# Then the outer fraction becomes:
++# Mul(inner_top, Pow(inner_bot, -1))
++expected = _Mul(inner_top, _Pow(inner_bot, -1))
++
++print(f"\nExpected: {expected}")
++print(f"Expected srepr: {srepr(expected)}")
++print(f"\nAre they equal? {result == expected}")
+diff --git a/test_trace.py b/test_trace.py
+new file mode 100644
+index 0000000000..5e6d2296c4
+--- /dev/null
++++ b/test_trace.py
+@@ -0,0 +1,29 @@
++#!/usr/bin/env python3
++from sympy.parsing.latex import parse_latex
++from sympy import Symbol, Mul, Pow, srepr
++from sympy.printing.str import StrPrinter
++
++# The problematic case
++latex_expr = r"\frac{\frac{a^3+b}{c}}{\frac{1}{c^2}}"
++result = parse_latex(latex_expr)
++
++print("Full expression:", result)
++print("srepr:", srepr(result))
++
++# Let's manually trace what the printer does
++printer = StrPrinter()
++
++# First, let's see what happens when we print the denominator alone
++denom_pow = result.args[1]  # Pow(1/(c**2), -1)
++denom_base = denom_pow.base  # 1/(c**2) which is Pow(c**2, -1)
++
++print(f"\nDenominator base alone: {printer._print(denom_base)}")
++print(f"Type: {type(denom_base)}")
++
++# The issue is that when denom_base (which is Pow(c**2, -1)) is printed,
++# it becomes "1/(c**2)" but this is not parenthesized when used as a denominator
++
++# Let's check _print_Pow
++print(f"\nChecking _print_Pow for {denom_base}")
++print(f"denom_base.exp: {denom_base.exp}")
++print(f"denom_base.base: {denom_base.base}")

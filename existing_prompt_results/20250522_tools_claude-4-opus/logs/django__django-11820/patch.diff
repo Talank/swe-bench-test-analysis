@@ -1,0 +1,659 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 3ce711f3f1..ac64f6ef0f 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1708,7 +1708,11 @@ class Model(metaclass=ModelBase):
+             fld = None
+             for part in field.split(LOOKUP_SEP):
+                 try:
+-                    fld = _cls._meta.get_field(part)
++                    # Special case: 'pk' is an alias for the primary key field
++                    if part == 'pk':
++                        fld = _cls._meta.pk
++                    else:
++                        fld = _cls._meta.get_field(part)
+                     if fld.is_relation:
+                         _cls = fld.get_path_info()[-1].to_opts.model
+                 except (FieldDoesNotExist, AttributeError):
+diff --git a/test_actual_ordering.py b/test_actual_ordering.py
+new file mode 100644
+index 0000000000..5b2d060fa4
+--- /dev/null
++++ b/test_actual_ordering.py
+@@ -0,0 +1,86 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'test_app',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.db import connection
++from django.test import TestCase
++
++
++@isolate_apps('test_app')
++def test_actual_queries():
++    """Test what actual SQL queries are generated"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++            db_table = 'test_option'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        title = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++            db_table = 'test_somemodel'
++    
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Option)
++        schema_editor.create_model(SomeModel)
++    
++    try:
++        # Test 1: Order by option__pk
++        qs = SomeModel.objects.order_by('option__pk')
++        print("Test 1: order_by('option__pk')")
++        print(f"SQL: {qs.query}")
++        print()
++        
++        # Test 2: Order by option__name
++        qs = SomeModel.objects.order_by('option__name')
++        print("Test 2: order_by('option__name')")
++        print(f"SQL: {qs.query}")
++        print()
++        
++        # Test 3: Try option__name__pk (should fail)
++        try:
++            qs = SomeModel.objects.order_by('option__name__pk')
++            print("Test 3: order_by('option__name__pk')")
++            print(f"SQL: {qs.query}")
++        except Exception as e:
++            print("Test 3: order_by('option__name__pk')")
++            print(f"Error: {type(e).__name__}: {e}")
++        print()
++        
++    finally:
++        # Clean up
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(SomeModel)
++            schema_editor.delete_model(Option)
++
++
++if __name__ == '__main__':
++    test_actual_queries()
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..e28a6babf5
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,122 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core import checks
++
++
++@isolate_apps('test_app')
++def test_ordering_with_pk_and_regular_field():
++    """Test that ordering with both pk and regular field works"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        title = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__pk', 'title']
++    
++    errors = SomeModel.check()
++    print("Test 1: ordering = ['option__pk', 'title']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++    print("PASS: No E015 error for mixed ordering\n")
++
++
++@isolate_apps('test_app')
++def test_ordering_with_negative_pk():
++    """Test that ordering with -option__pk works"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['-option__pk']
++    
++    errors = SomeModel.check()
++    print("Test 2: ordering = ['-option__pk']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++    print("PASS: No E015 error for negative pk ordering\n")
++
++
++@isolate_apps('test_app')
++def test_ordering_with_pk_after_valid_field():
++    """Test that pk after a valid field still works"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__name__pk']  # This should fail - pk after non-relation field
++    
++    errors = SomeModel.check()
++    print("Test 3: ordering = ['option__name__pk'] (should fail)")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    
++    assert len(e015_errors) == 1, f"Expected 1 E015 error, found {len(e015_errors)}"
++    print("PASS: E015 error correctly raised for invalid pk usage\n")
++
++
++if __name__ == '__main__':
++    print("Running edge case tests...\n")
++    test_ordering_with_pk_and_regular_field()
++    test_ordering_with_negative_pk()
++    test_ordering_with_pk_after_valid_field()
++    print("All edge case tests passed!")
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..32b76303fc
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,69 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core import checks
++
++
++@isolate_apps('test_app')
++def test_original_issue():
++    """Test the original issue from the problem statement"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__pk']
++    
++    errors = SomeModel.check()
++    
++    # Check for the specific error mentioned in the problem statement
++    e015_errors = [e for e in errors if e.id == 'models.E015' and 'option__pk' in e.msg]
++    
++    print("Original Issue Test:")
++    print(f"Model: SomeModel with ordering = ['option__pk']")
++    print(f"Total errors: {len(errors)}")
++    print(f"E015 errors mentioning 'option__pk': {len(e015_errors)}")
++    
++    if e015_errors:
++        print("\nE015 errors found:")
++        for error in e015_errors:
++            print(f"  - {error.msg}")
++        print("\nFAILED: The issue is NOT fixed!")
++    else:
++        print("\nSUCCESS: No E015 error for 'option__pk' - the issue is fixed!")
++    
++    return len(e015_errors) == 0
++
++
++if __name__ == '__main__':
++    success = test_original_issue()
++    sys.exit(0 if success else 1)
+diff --git a/test_ordering_pk.py b/test_ordering_pk.py
+new file mode 100644
+index 0000000000..e9533c00f6
+--- /dev/null
++++ b/test_ordering_pk.py
+@@ -0,0 +1,55 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.test import TestCase
++from django.core import checks
++
++
++class Option(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class SomeModel(models.Model):
++    option = models.ForeignKey(Option, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['option__pk']
++
++
++def test_ordering_with_related_pk():
++    """Test that ordering by related field's pk doesn't raise E015"""
++    errors = SomeModel.check()
++    print("Errors found:", errors)
++    for error in errors:
++        print(f"Error ID: {error.id}")
++        print(f"Error message: {error.msg}")
++    
++    # The test should pass without any E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++
++
++if __name__ == '__main__':
++    test_ordering_with_related_pk()
+diff --git a/test_ordering_pk_comprehensive.py b/test_ordering_pk_comprehensive.py
+new file mode 100644
+index 0000000000..315f126956
+--- /dev/null
++++ b/test_ordering_pk_comprehensive.py
+@@ -0,0 +1,158 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core import checks
++
++
++@isolate_apps('test_app')
++def test_ordering_with_related_pk():
++    """Test that ordering by related field's pk doesn't raise E015"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__pk']
++    
++    errors = SomeModel.check()
++    print("Test 1: ordering = ['option__pk']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    for error in e015_errors:
++        print(f"  - {error.msg}")
++    
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++    print("PASS: No E015 error for option__pk\n")
++
++
++@isolate_apps('test_app')
++def test_ordering_with_nested_related_pk():
++    """Test that ordering by nested related field's pk doesn't raise E015"""
++    
++    class Category(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        category = models.ForeignKey(Category, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__category__pk']
++    
++    errors = SomeModel.check()
++    print("Test 2: ordering = ['option__category__pk']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    for error in e015_errors:
++        print(f"  - {error.msg}")
++    
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++    print("PASS: No E015 error for option__category__pk\n")
++
++
++@isolate_apps('test_app')
++def test_ordering_with_invalid_field():
++    """Test that ordering by invalid field still raises E015"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['option__invalid_field']
++    
++    errors = SomeModel.check()
++    print("Test 3: ordering = ['option__invalid_field']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    for error in e015_errors:
++        print(f"  - {error.msg}")
++    
++    assert len(e015_errors) == 1, f"Expected 1 E015 error, found {len(e015_errors)}"
++    print("PASS: E015 error correctly raised for invalid field\n")
++
++
++@isolate_apps('test_app')
++def test_ordering_with_regular_pk():
++    """Test that ordering by regular pk field works"""
++    
++    class SomeModel(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++            ordering = ['pk']
++    
++    errors = SomeModel.check()
++    print("Test 4: ordering = ['pk']")
++    print(f"Errors found: {len(errors)}")
++    
++    # Filter out E015 errors
++    e015_errors = [e for e in errors if e.id == 'models.E015']
++    print(f"E015 errors: {len(e015_errors)}")
++    
++    assert len(e015_errors) == 0, f"Found E015 errors: {e015_errors}"
++    print("PASS: No E015 error for pk\n")
++
++
++if __name__ == '__main__':
++    print("Running ordering validation tests...\n")
++    test_ordering_with_related_pk()
++    test_ordering_with_nested_related_pk()
++    test_ordering_with_invalid_field()
++    test_ordering_with_regular_pk()
++    print("All tests passed!")
+diff --git a/test_pk_behavior.py b/test_pk_behavior.py
+new file mode 100644
+index 0000000000..133c10cb80
+--- /dev/null
++++ b/test_pk_behavior.py
+@@ -0,0 +1,73 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models
++from django.core import checks
++
++
++@isolate_apps('test_app')
++def test_what_happens():
++    """Test what happens when we try to order by option__name__pk"""
++    
++    class Option(models.Model):
++        name = models.CharField(max_length=100)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    class SomeModel(models.Model):
++        option = models.ForeignKey(Option, on_delete=models.CASCADE)
++        
++        class Meta:
++            app_label = 'test_app'
++    
++    # Let's see if this would work in a query
++    try:
++        # This should fail since name is not a relation
++        print("Testing if option__name has pk attribute...")
++        opt_field = SomeModel._meta.get_field('option')
++        print(f"option field: {opt_field}")
++        print(f"option is relation: {opt_field.is_relation}")
++        
++        # Get the related model
++        related_model = opt_field.get_path_info()[-1].to_opts.model
++        print(f"Related model: {related_model}")
++        
++        # Get the name field
++        name_field = related_model._meta.get_field('name')
++        print(f"name field: {name_field}")
++        print(f"name is relation: {name_field.is_relation}")
++        
++        # Try to get pk from name field (should fail)
++        if hasattr(name_field, 'pk'):
++            print(f"name field has pk: {name_field.pk}")
++        else:
++            print("name field does not have pk attribute")
++            
++    except Exception as e:
++        print(f"Error: {e}")
++
++
++if __name__ == '__main__':
++    test_what_happens()
+diff --git a/tests/invalid_models_tests/test_models.py b/tests/invalid_models_tests/test_models.py
+index 0f1d1e4dc3..1e90ae8e7d 100644
+--- a/tests/invalid_models_tests/test_models.py
++++ b/tests/invalid_models_tests/test_models.py
+@@ -836,6 +836,35 @@ class OtherModelTests(SimpleTestCase):
+ 
+         self.assertFalse(Child.check())
+ 
++    def test_ordering_pointing_to_related_model_pk(self):
++        """Test that ordering by related field's pk is allowed."""
++        class Parent(models.Model):
++            pass
++
++        class Child(models.Model):
++            parent = models.ForeignKey(Parent, models.CASCADE)
++
++            class Meta:
++                ordering = ('parent__pk',)
++
++        self.assertFalse(Child.check())
++
++    def test_ordering_pointing_to_nested_related_model_pk(self):
++        """Test that ordering by nested related field's pk is allowed."""
++        class GrandParent(models.Model):
++            pass
++
++        class Parent(models.Model):
++            grandparent = models.ForeignKey(GrandParent, models.CASCADE)
++
++        class Child(models.Model):
++            parent = models.ForeignKey(Parent, models.CASCADE)
++
++            class Meta:
++                ordering = ('parent__grandparent__pk',)
++
++        self.assertFalse(Child.check())
++
+     def test_name_beginning_with_underscore(self):
+         class _Model(models.Model):
+             pass

@@ -1,0 +1,464 @@
+diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py
+index e19c881cda..072a2efc14 100644
+--- a/django/db/migrations/serializer.py
++++ b/django/db/migrations/serializer.py
+@@ -273,7 +273,7 @@ class TupleSerializer(BaseSequenceSerializer):
+ class TypeSerializer(BaseSerializer):
+     def serialize(self):
+         special_cases = [
+-            (models.Model, "models.Model", []),
++            (models.Model, "models.Model", ["from django.db import models"]),
+             (type(None), 'type(None)', []),
+         ]
+         for case, string, imports in special_cases:
+diff --git a/test.db b/test.db
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..42d6b6101c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,81 @@
++"""
++Test edge cases for the models.Model serialization fix.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.serializer import serializer_factory
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++    USE_TZ=True,
++)
++
++django.setup()
++
++print("Testing edge cases for models.Model serialization")
++print("=" * 50)
++
++# Test 1: Direct serialization of models.Model
++print("\nTest 1: Direct serialization of models.Model")
++result, imports = serializer_factory(models.Model).serialize()
++print(f"  Result: {result}")
++print(f"  Imports: {imports}")
++assert result == "models.Model", f"Expected 'models.Model', got '{result}'"
++assert "from django.db import models" in imports, f"Expected models import, got {imports}"
++
++# Test 2: models.Model in different data structures
++print("\nTest 2: models.Model in various data structures")
++
++# In a tuple
++result, imports = serializer_factory((models.Model, str)).serialize()
++print(f"  Tuple: {result}")
++assert "models.Model" in result
++assert "from django.db import models" in imports
++
++# In a list
++result, imports = serializer_factory([models.Model, int]).serialize()
++print(f"  List: {result}")
++assert "models.Model" in result
++assert "from django.db import models" in imports
++
++# In a dict
++result, imports = serializer_factory({"base": models.Model}).serialize()
++print(f"  Dict: {result}")
++assert "models.Model" in result
++assert "from django.db import models" in imports
++
++# Test 3: Subclasses of Model
++print("\nTest 3: Subclasses of Model")
++
++class CustomModel(models.Model):
++    class Meta:
++        abstract = True
++
++# This should use the module path, not the special case
++result, imports = serializer_factory(CustomModel).serialize()
++print(f"  CustomModel: {result}")
++print(f"  Imports: {imports}")
++assert "CustomModel" in result
++assert "__main__" in result  # Since we're in __main__
++
++# Test 4: Type checking
++print("\nTest 4: Type identity check")
++from django.db.models import Model
++assert models.Model is Model, "models.Model should be the same as Model"
++result, imports = serializer_factory(Model).serialize()
++print(f"  Using Model directly: {result}")
++assert result == "models.Model", "Should still serialize as models.Model"
++assert "from django.db import models" in imports
++
++print("\n✓ All edge cases handled correctly!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..a4dd99dfe0
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,75 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.db.migrations.operations import CreateModel
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Define the models as described in the issue
++class MyField(models.TextField):
++    pass
++
++class MyBaseModel(models.Model):
++    class Meta:
++        abstract = True
++
++class MyMixin:
++    pass
++
++# We don't need to actually create the model class, just simulate the migration
++
++# Import what we need for the test
++import __main__
++__main__.MyField = MyField
++__main__.MyMixin = MyMixin
++
++# Create a migration that reproduces the issue
++migration = Migration("test", "testapp")
++migration.operations = [
++    CreateModel(
++        name='MyModel',
++        fields=[
++            ('name', MyField(primary_key=True)),
++        ],
++        options={
++            'abstract': False,
++        },
++        bases=(MyMixin, models.Model),
++    ),
++]
++
++# Write the migration and check the output
++writer = MigrationWriter(migration)
++migration_string = writer.as_string()
++print("Generated migration:")
++print(migration_string)
++print("\n" + "="*50 + "\n")
++
++# Check if the migration string has the issue
++has_models_model = "models.Model" in migration_string
++has_models_import = "from django.db import models" in migration_string or "from django.db import migrations, models" in migration_string
++
++if has_models_model and not has_models_import:
++    print("ISSUE FOUND: models.Model is used but models is not imported!")
++else:
++    print("ISSUE FIXED: models.Model is properly imported!")
+diff --git a/test_migration_generation.py b/test_migration_generation.py
+new file mode 100644
+index 0000000000..9b377657de
+--- /dev/null
++++ b/test_migration_generation.py
+@@ -0,0 +1,126 @@
++"""
++Test that the migration writer properly handles models.Model in bases.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.writer import MigrationWriter
++from django.db.migrations import Migration
++from django.db.migrations.operations import CreateModel
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Test case 1: Simple mixin with models.Model
++print("Test 1: Simple mixin with models.Model")
++print("-" * 50)
++
++class SimpleMixin:
++    pass
++
++migration = Migration("test", "testapp")
++migration.operations = [
++    CreateModel(
++        name='TestModel',
++        fields=[
++            ('id', models.AutoField(primary_key=True)),
++        ],
++        bases=(SimpleMixin, models.Model),
++    ),
++]
++
++writer = MigrationWriter(migration)
++content = writer.as_string()
++
++# Check that models is imported
++assert "from django.db import migrations, models" in content or "from django.db import models" in content, "models not imported!"
++assert "bases=(" in content and "models.Model)" in content, "models.Model not in bases!"
++
++print("✓ Migration correctly imports models when models.Model is in bases")
++print()
++
++# Test case 2: Multiple inheritance with abstract model
++print("Test 2: Multiple inheritance scenarios")
++print("-" * 50)
++
++class MyField(models.TextField):
++    pass
++
++class MyBaseModel(models.Model):
++    class Meta:
++        abstract = True
++
++class MyMixin:
++    def some_method(self):
++        pass
++
++# Store classes in a module-like namespace
++import types
++test_module = types.ModuleType('test_module')
++test_module.MyField = MyField
++test_module.MyBaseModel = MyBaseModel
++test_module.MyMixin = MyMixin
++sys.modules['test_module'] = test_module
++
++migration2 = Migration("test2", "testapp")
++migration2.operations = [
++    CreateModel(
++        name='ComplexModel',
++        fields=[
++            ('name', MyField(primary_key=True)),
++            ('description', models.TextField()),
++        ],
++        options={
++            'abstract': False,
++        },
++        bases=(MyMixin, models.Model),
++    ),
++]
++
++writer2 = MigrationWriter(migration2)
++content2 = writer2.as_string()
++
++# Check imports
++assert "from django.db import migrations, models" in content2 or "from django.db import models" in content2, "models not imported in complex case!"
++assert "models.Model)" in content2, "models.Model not found in bases!"
++assert "models.TextField()" in content2, "models.TextField not properly used!"
++
++print("✓ Complex migration correctly handles all model references")
++print()
++
++# Test case 3: Verify the generated migration is valid Python
++print("Test 3: Verify generated migration is valid Python")
++print("-" * 50)
++
++# Try to compile the migration
++try:
++    compile(content, '<string>', 'exec')
++    print("✓ Simple migration compiles successfully")
++except SyntaxError as e:
++    print(f"✗ Simple migration has syntax error: {e}")
++
++try:
++    compile(content2, '<string>', 'exec')
++    print("✓ Complex migration compiles successfully")
++except SyntaxError as e:
++    print(f"✗ Complex migration has syntax error: {e}")
++
++print()
++print("All tests passed! The fix correctly handles models.Model in bases.")
+diff --git a/test_real_scenario.py b/test_real_scenario.py
+new file mode 100644
+index 0000000000..8b0bb6a0a8
+--- /dev/null
++++ b/test_real_scenario.py
+@@ -0,0 +1,116 @@
++import os
++import sys
++import tempfile
++import shutil
++from pathlib import Path
++
++# Create a temporary Django project structure
++temp_dir = tempfile.mkdtemp()
++project_dir = Path(temp_dir) / "testproject"
++app_dir = project_dir / "testapp"
++
++# Create directories
++os.makedirs(app_dir / "migrations")
++
++# Create __init__.py files
++(project_dir / "__init__.py").touch()
++(app_dir / "__init__.py").touch()
++(app_dir / "migrations" / "__init__.py").touch()
++
++# Create models.py with the exact content from the issue
++models_content = """from django.db import models
++
++class MyField(models.TextField):
++    pass
++
++class MyBaseModel(models.Model):
++    class Meta:
++        abstract = True
++
++class MyMixin:
++    pass
++
++class MyModel(MyMixin, MyBaseModel):
++    name = MyField(primary_key=True)
++"""
++
++with open(app_dir / "models.py", "w") as f:
++    f.write(models_content)
++
++# Create settings.py
++settings_content = """
++SECRET_KEY = 'test'
++DEBUG = True
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': 'test.db',
++    }
++}
++INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++    'testapp',
++]
++USE_TZ = True
++"""
++
++with open(project_dir / "settings.py", "w") as f:
++    f.write(settings_content)
++
++# Add project to Python path
++sys.path.insert(0, str(project_dir))
++
++# Set Django settings
++os.environ['DJANGO_SETTINGS_MODULE'] = 'settings'
++
++# Now run makemigrations
++import django
++django.setup()
++
++from django.core.management import call_command
++from io import StringIO
++
++# Capture output
++out = StringIO()
++try:
++    call_command('makemigrations', 'testapp', stdout=out)
++    print("Migration created successfully!")
++    
++    # Read the generated migration file
++    migration_files = list((app_dir / "migrations").glob("0001_*.py"))
++    if migration_files:
++        migration_file = migration_files[0]
++        with open(migration_file, "r") as f:
++            migration_content = f.read()
++        
++        print("\nGenerated migration content:")
++        print(migration_content)
++        
++        # Check if the issue is fixed
++        has_models_model = "models.Model" in migration_content
++        has_models_import = "from django.db import models" in migration_content or "from django.db import migrations, models" in migration_content
++        
++        if has_models_model and not has_models_import:
++            print("\nISSUE FOUND: models.Model is used but models is not imported!")
++        else:
++            print("\nISSUE FIXED: models.Model is properly imported!")
++            
++        # Try to execute the migration to see if it's valid Python
++        print("\nTrying to import the migration...")
++        try:
++            # Import the migration module
++            import importlib.util
++            spec = importlib.util.spec_from_file_location("migration", migration_file)
++            migration_module = importlib.util.module_from_spec(spec)
++            spec.loader.exec_module(migration_module)
++            print("Migration imported successfully! It's valid Python code.")
++        except Exception as e:
++            print(f"Failed to import migration: {e}")
++            
++except Exception as e:
++    print(f"Error creating migration: {e}")
++finally:
++    # Cleanup
++    os.chdir("/")
++    shutil.rmtree(temp_dir)
+diff --git a/tests/migrations/test_writer.py b/tests/migrations/test_writer.py
+index a590ff4398..3459845f6a 100644
+--- a/tests/migrations/test_writer.py
++++ b/tests/migrations/test_writer.py
+@@ -286,6 +286,21 @@ class WriterTests(SimpleTestCase):
+         lazy_pattern = SimpleLazyObject(lambda: pattern)
+         self.assertEqual(self.serialize_round_trip(lazy_pattern), pattern)
+ 
++    def test_serialize_model_base(self):
++        """
++        Test that models.Model in bases tuple is properly serialized with imports.
++        Regression test for #32956.
++        """
++        self.assertSerializedResultEqual(
++            models.Model,
++            ("models.Model", {"from django.db import models"})
++        )
++        # Also test in a tuple (as it would appear in bases)
++        self.assertSerializedResultEqual(
++            (object, models.Model),
++            ("(object, models.Model)", {"from django.db import models"})
++        )
++
+     def test_serialize_enums(self):
+         self.assertSerializedResultEqual(
+             TextEnum.A,

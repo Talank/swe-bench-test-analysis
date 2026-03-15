@@ -1,0 +1,221 @@
+diff --git a/debug_repr.py b/debug_repr.py
+new file mode 100644
+index 0000000000..8de09666fe
+--- /dev/null
++++ b/debug_repr.py
+@@ -0,0 +1,11 @@
++from decimal import Decimal
++
++# Test what repr does to Decimal
++d = Decimal('42.12345678901234567890')
++print(f"Original Decimal: {d}")
++print(f"repr(Decimal): {repr(d)}")
++print(f"str(Decimal): {str(d)}")
++
++# The issue is that repr() adds quotes around the string representation
++print(f"\nDecimal(repr(d)): {Decimal(repr(d))}")
++print(f"Decimal(str(d)): {Decimal(str(d))}")
+diff --git a/django/template/defaultfilters.py b/django/template/defaultfilters.py
+index 7a5b28d159..caade2906b 100644
+--- a/django/template/defaultfilters.py
++++ b/django/template/defaultfilters.py
+@@ -151,8 +151,13 @@ def floatformat(text, arg=-1):
+             use_l10n = False
+             arg = arg[:-1] or -1
+     try:
+-        input_val = repr(text)
+-        d = Decimal(input_val)
++        # If text is already a Decimal, use it directly
++        if isinstance(text, Decimal):
++            d = text
++            input_val = str(text)
++        else:
++            input_val = repr(text)
++            d = Decimal(input_val)
+     except InvalidOperation:
+         try:
+             d = Decimal(str(float(text)))
+diff --git a/test_decimal_precision.py b/test_decimal_precision.py
+new file mode 100644
+index 0000000000..1d3ea4afa7
+--- /dev/null
++++ b/test_decimal_precision.py
+@@ -0,0 +1,36 @@
++from decimal import Decimal
++from django import setup
++from django.conf import settings
++from django.template import Template, Context
++
++TEMPLATES = [
++    {
++        'BACKEND': 'django.template.backends.django.DjangoTemplates',
++    },
++]
++settings.configure(TEMPLATES=TEMPLATES)
++setup()
++
++# Test case from the problem statement
++t = Template('{{ value|floatformat:20 }}')
++c = Context({'value': Decimal('42.12345678901234567890')})
++result = t.render(c)
++print(f"Result: {result}")
++print(f"Expected: 42.12345678901234567890")
++print(f"Match: {result == '42.12345678901234567890'}")
++
++# Additional test cases
++test_cases = [
++    (Decimal('1.123456789012345678901234567890'), 25),
++    (Decimal('999.999999999999999999999999999'), 20),
++    (Decimal('0.000000000000000000000000001'), 30),
++]
++
++for value, precision in test_cases:
++    t = Template(f'{{{{ value|floatformat:{precision} }}}}')
++    c = Context({'value': value})
++    result = t.render(c)
++    print(f"\nValue: {value}")
++    print(f"Precision: {precision}")
++    print(f"Result: {result}")
++    print(f"Expected: {value}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..ee61fb8440
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,35 @@
++from decimal import Decimal
++from django import setup
++from django.conf import settings
++from django.template.defaultfilters import floatformat
++
++# Configure Django
++settings.configure(USE_I18N=False)
++setup()
++
++# Edge cases to test
++edge_cases = [
++    # Test that string representations of numbers still work
++    ("42.12345678901234567890", 20, "42.12345678901234567890"),
++    # Test that integers still work
++    (42, 5, "42.00000"),
++    # Test that floats still work (with expected precision loss)
++    (42.12345678901234567890, 20, "42.12345678901234400000"),
++    # Test Decimal with scientific notation
++    (Decimal("1E-10"), 15, "0.000000000100000"),
++    # Test very large Decimal
++    (Decimal("123456789012345678901234567890.123456789"), 10, "123456789012345678901234567890.1234567890"),
++    # Test negative Decimal with high precision
++    (Decimal("-99.99999999999999999999"), 20, "-99.99999999999999999999"),
++]
++
++print("Testing edge cases...")
++for value, precision, expected in edge_cases:
++    result = floatformat(value, precision)
++    status = "✓" if result == expected else "✗"
++    print(f"{status} {type(value).__name__} {value} with precision {precision}")
++    print(f"  Expected: {expected}")
++    print(f"  Got:      {result}")
++    if result != expected:
++        print("  MISMATCH!")
++    print()
+diff --git a/test_floatformat_comprehensive.py b/test_floatformat_comprehensive.py
+new file mode 100644
+index 0000000000..5d2ec8e35c
+--- /dev/null
++++ b/test_floatformat_comprehensive.py
+@@ -0,0 +1,68 @@
++from decimal import Decimal
++from django import setup
++from django.conf import settings
++from django.template.defaultfilters import floatformat
++
++# Configure Django
++settings.configure(USE_I18N=False)
++setup()
++
++# Test cases from the original test suite
++test_cases = [
++    # (input, arg, expected)
++    (7.7, None, "7.7"),
++    (7.0, None, "7"),
++    (0.7, None, "0.7"),
++    (-0.7, None, "-0.7"),
++    (0.07, None, "0.1"),
++    (-0.07, None, "-0.1"),
++    (0.007, None, "0.0"),
++    (0.0, None, "0"),
++    (7.7, 0, "8"),
++    (7.7, 3, "7.700"),
++    (6.000000, 3, "6.000"),
++    (6.200000, 3, "6.200"),
++    (6.200000, -3, "6.200"),
++    (13.1031, -3, "13.103"),
++    (11.1197, -2, "11.12"),
++    (11.0000, -2, "11"),
++    (11.000001, -2, "11.00"),
++    (8.2798, 3, "8.280"),
++    (5555.555, 2, "5555.56"),
++    (001.3000, 2, "1.30"),
++    (0.12345, 2, "0.12"),
++    (Decimal("555.555"), 2, "555.56"),
++    (Decimal("09.000"), None, "9"),
++    ("foo", None, ""),
++    (13.1031, "bar", "13.1031"),
++    (18.125, 2, "18.13"),
++    ("foo", "bar", ""),
++    ("¿Cómo esta usted?", None, ""),
++    (None, None, ""),
++    
++    # Test Decimal precision preservation
++    (Decimal('42.12345678901234567890'), 20, "42.12345678901234567890"),
++    (Decimal('1.123456789012345678901234567890'), 10, "1.1234567890"),
++    (Decimal('0.000000000000000000000000001'), 30, "0.000000000000000000000000001000"),
++]
++
++print("Running comprehensive floatformat tests...")
++passed = 0
++failed = 0
++
++for i, (value, arg, expected) in enumerate(test_cases):
++    if arg is None:
++        result = floatformat(value)
++    else:
++        result = floatformat(value, arg)
++    
++    if result == expected:
++        passed += 1
++        print(f"✓ Test {i+1}: {value} with arg {arg} -> {result}")
++    else:
++        failed += 1
++        print(f"✗ Test {i+1}: {value} with arg {arg}")
++        print(f"  Expected: {expected}")
++        print(f"  Got:      {result}")
++
++print(f"\nTotal: {passed + failed}, Passed: {passed}, Failed: {failed}")
+diff --git a/tests/template_tests/filter_tests/test_floatformat.py b/tests/template_tests/filter_tests/test_floatformat.py
+index 8dc69b2437..d005086a45 100644
+--- a/tests/template_tests/filter_tests/test_floatformat.py
++++ b/tests/template_tests/filter_tests/test_floatformat.py
+@@ -147,3 +147,22 @@ class FunctionTests(SimpleTestCase):
+             self.assertEqual(floatformat(15.2042, "-3"), "15.204")
+             self.assertEqual(floatformat(Decimal("1.2345"), 2), "1.23")
+             self.assertEqual(floatformat(Decimal("15.2042"), -3), "15.204")
++
++    def test_decimal_precision_preserved(self):
++        """
++        Ensure that Decimal precision is preserved when using floatformat.
++        """
++        # Test case from the issue
++        self.assertEqual(
++            floatformat(Decimal("42.12345678901234567890"), 20),
++            "42.12345678901234567890",
++        )
++        # Additional test cases
++        self.assertEqual(
++            floatformat(Decimal("1.123456789012345678901234567890"), 25),
++            "1.1234567890123456789012346",
++        )
++        self.assertEqual(
++            floatformat(Decimal("0.000000000000000000000000001"), 30),
++            "0.000000000000000000000000001000",
++        )

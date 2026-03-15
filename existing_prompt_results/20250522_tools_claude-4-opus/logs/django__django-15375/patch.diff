@@ -1,0 +1,57 @@
+diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py
+index 8c4eae7906..b8a50fd992 100644
+--- a/django/db/models/aggregates.py
++++ b/django/db/models/aggregates.py
+@@ -65,7 +65,10 @@ class Aggregate(Func):
+         if hasattr(default, 'resolve_expression'):
+             default = default.resolve_expression(query, allow_joins, reuse, summarize)
+         c.default = None  # Reset the default argument before wrapping.
+-        return Coalesce(c, default, output_field=c._output_field_or_none)
++        coalesce = Coalesce(c, default, output_field=c._output_field_or_none)
++        # Preserve the is_summary attribute when wrapping with Coalesce
++        coalesce.is_summary = c.is_summary
++        return coalesce
+ 
+     @property
+     def default_alias(self):
+diff --git a/tests/aggregation/tests.py b/tests/aggregation/tests.py
+index 87ae945a7e..1f6be35034 100644
+--- a/tests/aggregation/tests.py
++++ b/tests/aggregation/tests.py
+@@ -1643,3 +1643,36 @@ class AggregateTestCase(TestCase):
+             exists=Exists(Author.objects.extra(where=['1=0'])),
+         )
+         self.assertEqual(len(qs), 6)
++
++    def test_aggregate_default_after_annotate(self):
++        """
++        Aggregate with 'default' after annotate() should work correctly.
++        Regression test for issue where aggregate() with 'default' after
++        annotate() would generate invalid SQL.
++        """
++        # Test with simple annotation
++        result = Book.objects.annotate(idx=F("id")).aggregate(
++            total_pages=Sum("pages", default=0)
++        )
++        self.assertEqual(result['total_pages'], 3703)
++        
++        # Test with multiple annotations and aggregates
++        result = Book.objects.annotate(
++            idx=F("id"),
++            double_pages=F("pages") * 2
++        ).aggregate(
++            total_pages=Sum("pages", default=0),
++            total_double=Sum("double_pages", default=0),
++            avg_pages=Avg("pages", default=0)
++        )
++        self.assertEqual(result['total_pages'], 3703)
++        self.assertEqual(result['total_double'], 7406)
++        self.assertAlmostEqual(result['avg_pages'], 617.1666666666666, places=5)
++        
++        # Test with empty queryset
++        result = Book.objects.filter(pages__gt=10000).annotate(
++            idx=F("id")
++        ).aggregate(
++            total=Sum("pages", default=999)
++        )
++        self.assertEqual(result['total'], 999)

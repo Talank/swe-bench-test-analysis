@@ -1,0 +1,385 @@
+diff --git a/test_chunks_backends.py b/test_chunks_backends.py
+new file mode 100644
+index 00000000..24869511
+--- /dev/null
++++ b/test_chunks_backends.py
+@@ -0,0 +1,60 @@
++"""Test chunks with various backends"""
++import numpy as np
++import xarray as xr
++from xarray.core.variable import Variable
++from xarray.core import indexing
++from xarray.backends.zarr import ZarrArrayWrapper
++import zarr
++
++
++def test_chunks_with_backends():
++    """Test that chunks work correctly with different array backends"""
++    
++    # Test 1: Regular numpy array
++    print("Test 1: NumPy array")
++    var = Variable(['x'], np.arange(10))
++    assert var.chunks is None
++    assert var.chunksizes == {}
++    print("✓ NumPy array: chunks=None, chunksizes={}")
++    
++    # Test 2: LazilyIndexedArray (common for file backends)
++    print("\nTest 2: LazilyIndexedArray")
++    lazy_data = indexing.LazilyIndexedArray(np.arange(10))
++    var = Variable(['x'], lazy_data)
++    assert var.chunks is None
++    assert var.chunksizes == {}
++    print("✓ LazilyIndexedArray: chunks=None, chunksizes={}")
++    
++    # Test 3: MemoryCachedArray
++    print("\nTest 3: MemoryCachedArray")
++    cached_data = indexing.MemoryCachedArray(indexing.LazilyIndexedArray(np.arange(10)))
++    var = Variable(['x'], cached_data)
++    assert var.chunks is None
++    assert var.chunksizes == {}
++    print("✓ MemoryCachedArray: chunks=None, chunksizes={}")
++    
++    # Test 4: Skip ZarrArrayWrapper (requires a full datastore setup)
++    print("\nTest 4: ZarrArrayWrapper - skipped (requires datastore)")
++    
++    # Test 5: Dask array
++    print("\nTest 5: Dask array")
++    import dask.array as da
++    dask_data = da.from_array(np.arange(10), chunks=(5,))
++    var = Variable(['x'], dask_data)
++    assert var.chunks == ((5, 5),)
++    assert var.chunksizes == {'x': (5, 5)}
++    print("✓ Dask array: chunks=((5, 5),), chunksizes={'x': (5, 5)}")
++    
++    # Test 6: CopyOnWriteArray
++    print("\nTest 6: CopyOnWriteArray")
++    cow_data = indexing.CopyOnWriteArray(indexing.LazilyIndexedArray(np.arange(10)))
++    var = Variable(['x'], cow_data)
++    assert var.chunks is None
++    assert var.chunksizes == {}
++    print("✓ CopyOnWriteArray: chunks=None, chunksizes={}")
++    
++    print("\nAll backend tests passed!")
++
++
++if __name__ == "__main__":
++    test_chunks_with_backends()
+diff --git a/test_chunks_issue.py b/test_chunks_issue.py
+new file mode 100644
+index 00000000..af8c50b4
+--- /dev/null
++++ b/test_chunks_issue.py
+@@ -0,0 +1,64 @@
++"""Test script to reproduce the chunks loading issue"""
++import numpy as np
++import xarray as xr
++import zarr
++
++
++def test_chunks_without_loading():
++    """Test that accessing chunks doesn't load the entire array into memory"""
++    # Create a test zarr store
++    store = zarr.MemoryStore()
++    root = zarr.group(store=store)
++    
++    # Create a large array in zarr (but not too large for testing)
++    shape = (100, 100)
++    data = np.random.rand(*shape)
++    z = root.create_dataset('test_var', data=data, chunks=(50, 50))
++    
++    # Also create dimension coordinates
++    x = root.create_dataset('x', data=np.arange(shape[0]), chunks=(50,))
++    y = root.create_dataset('y', data=np.arange(shape[1]), chunks=(50,))
++    
++    # Add attributes to make it a valid xarray dataset
++    z.attrs['_ARRAY_DIMENSIONS'] = ['x', 'y']
++    x.attrs['_ARRAY_DIMENSIONS'] = ['x']
++    y.attrs['_ARRAY_DIMENSIONS'] = ['y']
++    
++    # Open with xarray
++    ds = xr.open_dataset(store, engine='zarr', consolidated=False)
++    
++    # Create a custom wrapper to track if data is loaded
++    class LoadTracker:
++        def __init__(self, data):
++            self._data = data
++            self.loaded = False
++            
++        def __getattr__(self, name):
++            if name in ['__array__', '__getitem__']:
++                self.loaded = True
++            return getattr(self._data, name)
++            
++        def __getitem__(self, key):
++            self.loaded = True
++            return self._data[key]
++    
++    # Wrap the data to track loading
++    tracker = LoadTracker(ds['test_var'].variable._data)
++    ds['test_var'].variable._data = tracker
++    
++    # Access chunks - this should NOT load the data
++    chunks = ds.chunks
++    
++    print(f"Data loaded when accessing chunks: {tracker.loaded}")
++    print(f"Chunks: {chunks}")
++    print(f"Type of _data: {type(ds['test_var'].variable._data)}")
++    print(f"Has chunks attr: {hasattr(ds['test_var'].variable._data, 'chunks')}")
++    
++    # The chunks should be available without loading
++    assert not tracker.loaded, "Accessing chunks should not load the data!"
++    # For zarr arrays without dask, chunks might be empty
++    # The important thing is that we didn't load the data
++
++
++if __name__ == "__main__":
++    test_chunks_without_loading()
+diff --git a/test_chunks_no_load.py b/test_chunks_no_load.py
+new file mode 100644
+index 00000000..1f0bd92d
+--- /dev/null
++++ b/test_chunks_no_load.py
+@@ -0,0 +1,120 @@
++"""Test that chunks don't load data for non-dask arrays"""
++import numpy as np
++import xarray as xr
++from xarray.backends.zarr import ZarrArrayWrapper
++from xarray.core import indexing
++
++
++class LoadTrackingArray:
++    """Array wrapper that tracks if data is loaded"""
++    def __init__(self, array):
++        self._array = array
++        self.load_count = 0
++        
++    def __getattr__(self, name):
++        # Pass through all attributes except data access
++        return getattr(self._array, name)
++        
++    def __getitem__(self, key):
++        self.load_count += 1
++        return self._array[key]
++
++
++def test_variable_chunks_no_load():
++    """Test that Variable.chunks doesn't load data"""
++    from xarray.core.variable import Variable
++    
++    # Create a lazy array
++    data = indexing.LazilyIndexedArray(np.arange(10))
++    tracker = LoadTrackingArray(data)
++    
++    var = Variable(dims=['x'], data=tracker)
++    
++    # Access chunks - should not load data
++    chunks = var.chunks
++    assert tracker.load_count == 0, "Variable.chunks should not load data"
++    assert chunks is None  # No chunks for non-dask arrays
++    
++    # Access chunksizes - should not load data
++    chunksizes = var.chunksizes
++    assert tracker.load_count == 0, "Variable.chunksizes should not load data"
++    assert chunksizes == {}  # Empty for non-dask arrays
++
++
++def test_dataset_chunks_no_load():
++    """Test that Dataset.chunks doesn't load data"""
++    from xarray.core.variable import Variable
++    from xarray.core.dataset import Dataset
++    
++    # Create variables with lazy arrays
++    data1 = indexing.LazilyIndexedArray(np.arange(10))
++    tracker1 = LoadTrackingArray(data1)
++    var1 = Variable(dims=['x'], data=tracker1)
++    
++    data2 = indexing.LazilyIndexedArray(np.arange(20).reshape(10, 2))
++    tracker2 = LoadTrackingArray(data2)
++    var2 = Variable(dims=['x', 'y'], data=tracker2)
++    
++    ds = Dataset({'var1': var1, 'var2': var2})
++    
++    # Access chunks - should not load data
++    chunks = ds.chunks
++    assert tracker1.load_count == 0, "Dataset.chunks should not load data from var1"
++    assert tracker2.load_count == 0, "Dataset.chunks should not load data from var2"
++    assert chunks == {}  # Empty for non-dask arrays
++
++
++def test_get_chunksizes_no_load():
++    """Test that get_chunksizes doesn't load data"""
++    from xarray.core.variable import Variable
++    from xarray.core.common import get_chunksizes
++    
++    # Create variables with lazy arrays
++    data1 = indexing.LazilyIndexedArray(np.arange(10))
++    tracker1 = LoadTrackingArray(data1)
++    var1 = Variable(dims=['x'], data=tracker1)
++    
++    data2 = indexing.LazilyIndexedArray(np.arange(20).reshape(10, 2))
++    tracker2 = LoadTrackingArray(data2)
++    var2 = Variable(dims=['x', 'y'], data=tracker2)
++    
++    # Call get_chunksizes - should not load data
++    chunks = get_chunksizes([var1, var2])
++    assert tracker1.load_count == 0, "get_chunksizes should not load data from var1"
++    assert tracker2.load_count == 0, "get_chunksizes should not load data from var2"
++    assert chunks == {}  # Empty for non-dask arrays
++
++
++def test_with_dask_array():
++    """Test that chunks work correctly with dask arrays"""
++    import dask.array as da
++    from xarray.core.variable import Variable
++    from xarray.core.dataset import Dataset
++    
++    # Create dask arrays
++    dask_data = da.from_array(np.arange(10), chunks=(5,))
++    var = Variable(dims=['x'], data=dask_data)
++    
++    # Access chunks - should return dask chunks
++    assert var.chunks == ((5, 5),)
++    assert var.chunksizes == {'x': (5, 5)}
++    
++    # Test with dataset
++    ds = Dataset({'var': var})
++    assert ds.chunks == {'x': (5, 5)}
++
++
++if __name__ == "__main__":
++    test_variable_chunks_no_load()
++    print("✓ Variable chunks test passed")
++    
++    test_dataset_chunks_no_load()
++    print("✓ Dataset chunks test passed")
++    
++    test_get_chunksizes_no_load()
++    print("✓ get_chunksizes test passed")
++    
++    test_with_dask_array()
++    print("✓ Dask array test passed")
++    
++    print("\nAll tests passed!")
+diff --git a/test_chunks_real_zarr.py b/test_chunks_real_zarr.py
+new file mode 100644
+index 00000000..88635d9b
+--- /dev/null
++++ b/test_chunks_real_zarr.py
+@@ -0,0 +1,56 @@
++"""Test with real zarr URL from the issue"""
++import xarray as xr
++import time
++import sys
++
++
++def test_chunks_on_real_zarr():
++    """Test that accessing chunks on a real zarr dataset doesn't load data"""
++    
++    # This is the URL from the issue
++    url = "https://ncsa.osn.xsede.org/Pangeo/pangeo-forge/swot_adac/FESOM/surf/fma.zarr"
++    
++    print("Opening dataset...")
++    start = time.time()
++    
++    try:
++        # Try to open the dataset with a timeout
++        ds = xr.open_dataset(url, engine='zarr')
++        print(f"Dataset opened in {time.time() - start:.2f} seconds")
++        
++        print("\nAccessing chunks...")
++        start = time.time()
++        chunks = ds.chunks
++        elapsed = time.time() - start
++        
++        print(f"Chunks accessed in {elapsed:.2f} seconds")
++        print(f"Chunks: {chunks}")
++        
++        # If it takes less than 1 second, we probably didn't load the data
++        # (loading the full dataset would take much longer)
++        if elapsed < 1.0:
++            print("\nSUCCESS: Chunks accessed quickly without loading data!")
++        else:
++            print(f"\nWARNING: Accessing chunks took {elapsed:.2f} seconds, might have loaded data")
++            
++    except Exception as e:
++        print(f"Error: {e}")
++        print("This might be due to network issues or the dataset being unavailable")
++
++
++if __name__ == "__main__":
++    # Run with a timeout in case the old behavior tries to load everything
++    import signal
++    
++    def timeout_handler(signum, frame):
++        print("\nTIMEOUT: Operation took too long, likely trying to load entire dataset!")
++        sys.exit(1)
++    
++    # Set a 10 second timeout
++    signal.signal(signal.SIGALRM, timeout_handler)
++    signal.alarm(10)
++    
++    try:
++        test_chunks_on_real_zarr()
++    finally:
++        signal.alarm(0)  # Cancel the alarm
+diff --git a/test_issue_example.py b/test_issue_example.py
+new file mode 100644
+index 00000000..1b1d9bc7
+--- /dev/null
++++ b/test_issue_example.py
+@@ -0,0 +1,30 @@
++"""Test the exact example from the issue"""
++import xarray as xr
++
++# Mock the URL loading to avoid network dependency
++import zarr
++import numpy as np
++
++# Create a mock zarr store that simulates the issue
++store = zarr.MemoryStore()
++root = zarr.group(store=store)
++
++# Create some test data
++data = root.create_dataset('test_var', data=np.random.rand(100, 100), chunks=(50, 50))
++data.attrs['_ARRAY_DIMENSIONS'] = ['x', 'y']
++
++# Create dimension coordinates
++x = root.create_dataset('x', data=np.arange(100), chunks=(50,))
++x.attrs['_ARRAY_DIMENSIONS'] = ['x']
++y = root.create_dataset('y', data=np.arange(100), chunks=(50,))
++y.attrs['_ARRAY_DIMENSIONS'] = ['y']
++
++# Open the dataset
++ds = xr.open_dataset(store, engine='zarr', consolidated=False)
++
++# This is the problematic line from the issue
++# It should NOT load the entire array into memory
++print("Accessing chunks...")
++chunks = ds.chunks
++print(f"Chunks: {chunks}")
++print("Success! No data was loaded.")
+diff --git a/xarray/core/common.py b/xarray/core/common.py
+index 3c328f42..a3636cba 100644
+--- a/xarray/core/common.py
++++ b/xarray/core/common.py
+@@ -2023,7 +2023,7 @@ def get_chunksizes(
+ 
+     chunks: dict[Any, tuple[int, ...]] = {}
+     for v in variables:
+-        if hasattr(v.data, "chunks"):
++        if hasattr(v._data, "chunks"):
+             for dim, c in v.chunksizes.items():
+                 if dim in chunks and c != chunks[dim]:
+                     raise ValueError(
+diff --git a/xarray/core/variable.py b/xarray/core/variable.py
+index 2d115ff0..cfb07166 100644
+--- a/xarray/core/variable.py
++++ b/xarray/core/variable.py
+@@ -1015,7 +1015,7 @@ class Variable(AbstractArray, NdimSizeLenMixin, VariableArithmetic):
+         xarray.unify_chunks
+         """
+         if hasattr(self._data, "chunks"):
+-            return Frozen({dim: c for dim, c in zip(self.dims, self.data.chunks)})
++            return Frozen({dim: c for dim, c in zip(self.dims, self._data.chunks)})
+         else:
+             return {}

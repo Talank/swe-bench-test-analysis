@@ -1,0 +1,163 @@
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index ad2f5a7da1..4c018624fb 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -1251,7 +1251,7 @@ class BaseDatabaseSchemaEditor:
+         else:
+             sql = self.sql_create_unique
+         if columns:
+-            columns = self._index_columns(table, columns, col_suffixes=(), opclasses=opclasses)
++            columns = self._index_columns(model._meta.db_table, columns, col_suffixes=(), opclasses=opclasses)
+         else:
+             columns = Expressions(model._meta.db_table, expressions, compiler, self.quote_value)
+         return Statement(
+diff --git a/test_references_column.py b/test_references_column.py
+new file mode 100644
+index 0000000000..54ba5988e3
+--- /dev/null
++++ b/test_references_column.py
+@@ -0,0 +1,78 @@
++"""Test that references_column works correctly after the fix"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.models import UniqueConstraint
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    email = models.EmailField()
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++        constraints = [
++            UniqueConstraint(fields=['name', 'email'], name='unique_name_email')
++        ]
++
++
++# Test various scenarios
++print("Testing references_column functionality after fix:\n")
++
++with connection.schema_editor() as editor:
++    # Test 1: _create_unique_sql with column list
++    sql1 = editor._create_unique_sql(TestModel, ['name', 'email'])
++    if sql1 and hasattr(sql1, 'parts') and 'columns' in sql1.parts:
++        columns_obj = sql1.parts['columns']
++        print("Test 1: _create_unique_sql with column list")
++        print(f"  References 'name' in 'test_model': {columns_obj.references_column('test_model', 'name')}")
++        print(f"  References 'email' in 'test_model': {columns_obj.references_column('test_model', 'email')}")
++        print(f"  References 'other' in 'test_model': {columns_obj.references_column('test_model', 'other')}")
++        print(f"  References 'name' in 'other_table': {columns_obj.references_column('other_table', 'name')}")
++        print()
++
++    # Test 2: UniqueConstraint create_sql
++    constraint = UniqueConstraint(fields=['name', 'email'], name='test_constraint')
++    sql2 = constraint.create_sql(TestModel, editor)
++    if sql2 and hasattr(sql2, 'parts') and 'columns' in sql2.parts:
++        columns_obj = sql2.parts['columns']
++        print("Test 2: UniqueConstraint.create_sql")
++        print(f"  References 'name' in 'test_model': {columns_obj.references_column('test_model', 'name')}")
++        print(f"  References 'email' in 'test_model': {columns_obj.references_column('test_model', 'email')}")
++        print()
++
++    # Test 3: Check rename_column_references works
++    sql3 = editor._create_unique_sql(TestModel, ['name', 'email'])
++    if sql3 and hasattr(sql3, 'parts') and 'columns' in sql3.parts:
++        columns_obj = sql3.parts['columns']
++        print("Test 3: rename_column_references")
++        print(f"  Before rename - columns: {columns_obj.columns}")
++        columns_obj.rename_column_references('test_model', 'name', 'full_name')
++        print(f"  After rename - columns: {columns_obj.columns}")
++        print(f"  References 'name' in 'test_model': {columns_obj.references_column('test_model', 'name')}")
++        print(f"  References 'full_name' in 'test_model': {columns_obj.references_column('test_model', 'full_name')}")
++
++print("\nAll tests completed successfully!")
+diff --git a/test_unique_sql_bug.py b/test_unique_sql_bug.py
+new file mode 100644
+index 0000000000..c6dd28ed8b
+--- /dev/null
++++ b/test_unique_sql_bug.py
+@@ -0,0 +1,60 @@
++"""Test script to reproduce the references_column bug in _create_unique_sql"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++)
++
++django.setup()
++
++from django.db import models, connection
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++from django.db.backends.ddl_references import Table, Columns
++
++
++# Create a test model
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    email = models.EmailField()
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_model'
++
++
++# Test the issue
++with connection.schema_editor() as editor:
++    # Create the SQL for a unique constraint
++    sql = editor._create_unique_sql(TestModel, ['name', 'email'])
++    print(f"Generated SQL: {sql}")
++    
++    # Check if the columns object can properly check references
++    if sql and hasattr(sql, 'parts') and 'columns' in sql.parts:
++        columns_obj = sql.parts['columns']
++        print(f"\nColumns object type: {type(columns_obj)}")
++        print(f"Columns table attribute: {columns_obj.table}")
++        print(f"Columns table attribute type: {type(columns_obj.table)}")
++        
++        # This should return True but will return False due to the bug
++        result = columns_obj.references_column('test_model', 'name')
++        print(f"\nDoes columns reference 'name' column in 'test_model'? {result}")
++        
++        # Let's check what's happening in references_column
++        print(f"\nDebugging references_column:")
++        print(f"  self.table == table: {columns_obj.table} == 'test_model' -> {columns_obj.table == 'test_model'}")
++        print(f"  'name' in self.columns: {'name' in columns_obj.columns}")

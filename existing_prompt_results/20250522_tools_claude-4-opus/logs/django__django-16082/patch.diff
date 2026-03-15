@@ -1,0 +1,474 @@
+diff --git a/demonstrate_fix.py b/demonstrate_fix.py
+new file mode 100644
+index 0000000000..7c18c63f92
+--- /dev/null
++++ b/demonstrate_fix.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++"""
++Demonstrate that the MOD operator now correctly resolves output_field
++when combining numeric expressions with different types.
++"""
++
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++from decimal import Decimal
++from django.db.models import fields
++from django.db.models.expressions import Combinable, _resolve_combined_type
++
++print("MOD Operator Output Field Resolution Fix")
++print("=" * 50)
++
++print("\nTesting type resolution for MOD operator with mixed numeric types:")
++print("-" * 50)
++
++# Test all combinations
++test_cases = [
++    (fields.IntegerField, fields.DecimalField, "Integer % Decimal"),
++    (fields.DecimalField, fields.IntegerField, "Decimal % Integer"),
++    (fields.IntegerField, fields.FloatField, "Integer % Float"),
++    (fields.FloatField, fields.IntegerField, "Float % Integer"),
++    (fields.DecimalField, fields.FloatField, "Decimal % Float"),
++    (fields.FloatField, fields.DecimalField, "Float % Decimal"),
++]
++
++for lhs_type, rhs_type, description in test_cases:
++    result_type = _resolve_combined_type(Combinable.MOD, lhs_type, rhs_type)
++    if result_type:
++        print(f"✓ {description}: {lhs_type.__name__} % {rhs_type.__name__} -> {result_type.__name__}")
++    else:
++        print(f"✗ {description}: {lhs_type.__name__} % {rhs_type.__name__} -> None (ERROR)")
++
++print("\nComparing with other operators (ADD, MUL, DIV):")
++print("-" * 50)
++
++operators = [
++    (Combinable.ADD, "ADD"),
++    (Combinable.MUL, "MUL"),
++    (Combinable.DIV, "DIV"),
++    (Combinable.MOD, "MOD"),
++]
++
++# Test Integer + Decimal for all operators
++for op, op_name in operators:
++    result_type = _resolve_combined_type(op, fields.IntegerField, fields.DecimalField)
++    if result_type:
++        print(f"✓ {op_name}: IntegerField & DecimalField -> {result_type.__name__}")
++    else:
++        print(f"✗ {op_name}: IntegerField & DecimalField -> None (ERROR)")
++
++print("\nConclusion:")
++print("-" * 50)
++print("The MOD operator now correctly resolves output fields for mixed numeric types,")
++print("following the same pattern as other mathematical operators (ADD, SUB, MUL, DIV).")
++print("\nWhen combining:")
++print("- Integer % Decimal -> Decimal (preserves precision)")
++print("- Integer % Float -> Float")
++print("- Decimal % Float -> Float (follows Python's behavior)")
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 5e3c7cab82..cbf4fd8296 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -533,6 +533,7 @@ _connector_combinations = [
+             Combinable.SUB,
+             Combinable.MUL,
+             Combinable.DIV,
++            Combinable.MOD,
+         )
+     },
+     # Bitwise operators.
+diff --git a/test_mod_expressions.py b/test_mod_expressions.py
+new file mode 100644
+index 0000000000..7242491c01
+--- /dev/null
++++ b/test_mod_expressions.py
+@@ -0,0 +1,88 @@
++#!/usr/bin/env python
++"""Test MOD operator with mixed numeric types in Django expressions"""
++import os
++import sys
++import django
++from decimal import Decimal
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from django.db import models, connection
++from django.db.models import F, Value, DecimalField, IntegerField, FloatField
++from django.test import TestCase
++
++# Create a test model
++class TestNumber(models.Model):
++    integer = models.IntegerField()
++    decimal = models.DecimalField(max_digits=10, decimal_places=2)
++    float = models.FloatField()
++    
++    class Meta:
++        app_label = 'test_mod_expressions'
++        db_table = 'test_mod_number'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestNumber)
++
++try:
++    # Create test data
++    obj = TestNumber.objects.create(
++        integer=10,
++        decimal=Decimal('7.5'),
++        float=3.2
++    )
++    
++    print("Testing MOD operator with mixed numeric types...")
++    
++    # Test 1: Integer % Decimal (F objects)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('integer') % F('decimal')
++    ).first()
++    print(f"✓ Integer % Decimal (F): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, Decimal), f"Expected Decimal, got {type(result.mod_result)}"
++    
++    # Test 2: Decimal % Integer (F objects)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('decimal') % F('integer')
++    ).first()
++    print(f"✓ Decimal % Integer (F): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, Decimal), f"Expected Decimal, got {type(result.mod_result)}"
++    
++    # Test 3: Integer % Float (F objects)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('integer') % F('float')
++    ).first()
++    print(f"✓ Integer % Float (F): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, float), f"Expected float, got {type(result.mod_result)}"
++    
++    # Test 4: Float % Integer (F objects)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('float') % F('integer')
++    ).first()
++    print(f"✓ Float % Integer (F): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, float), f"Expected float, got {type(result.mod_result)}"
++    
++    # Test 5: Integer % Decimal (Value)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('integer') % Value(Decimal('3.0'))
++    ).first()
++    print(f"✓ Integer % Decimal (Value): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, Decimal), f"Expected Decimal, got {type(result.mod_result)}"
++    
++    # Test 6: Decimal % Integer (Value)
++    result = TestNumber.objects.filter(pk=obj.pk).annotate(
++        mod_result=F('decimal') % Value(3)
++    ).first()
++    print(f"✓ Decimal % Integer (Value): {result.mod_result} (type: {type(result.mod_result).__name__})")
++    assert isinstance(result.mod_result, Decimal), f"Expected Decimal, got {type(result.mod_result)}"
++    
++    print("\nAll tests passed!")
++    
++finally:
++    # Clean up
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(TestNumber)
+diff --git a/test_mod_mixed.py b/test_mod_mixed.py
+new file mode 100644
+index 0000000000..8b6a4a9405
+--- /dev/null
++++ b/test_mod_mixed.py
+@@ -0,0 +1,37 @@
++import os
++import sys
++import django
++from decimal import Decimal
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++
++# Test the expressions module directly
++from django.db.models import fields
++from django.db.models.expressions import Combinable, _resolve_combined_type, register_combinable_fields
++
++print("Testing MOD operator with mixed numeric types...")
++
++# Test current behavior
++print("\nBefore fix:")
++print(f"DecimalField % IntegerField -> {_resolve_combined_type(Combinable.MOD, fields.DecimalField, fields.IntegerField)}")
++print(f"IntegerField % DecimalField -> {_resolve_combined_type(Combinable.MOD, fields.IntegerField, fields.DecimalField)}")
++print(f"FloatField % IntegerField -> {_resolve_combined_type(Combinable.MOD, fields.FloatField, fields.IntegerField)}")
++print(f"IntegerField % FloatField -> {_resolve_combined_type(Combinable.MOD, fields.IntegerField, fields.FloatField)}")
++
++# Apply the fix - register mixed type combinations for MOD
++print("\nApplying fix...")
++
++# Register MOD combinations for mixed numeric types (following the same pattern as other operators)
++register_combinable_fields(fields.IntegerField, Combinable.MOD, fields.DecimalField, fields.DecimalField)
++register_combinable_fields(fields.DecimalField, Combinable.MOD, fields.IntegerField, fields.DecimalField)
++register_combinable_fields(fields.IntegerField, Combinable.MOD, fields.FloatField, fields.FloatField)
++register_combinable_fields(fields.FloatField, Combinable.MOD, fields.IntegerField, fields.FloatField)
++
++# Test after fix
++print("\nAfter fix:")
++print(f"DecimalField % IntegerField -> {_resolve_combined_type(Combinable.MOD, fields.DecimalField, fields.IntegerField).__name__}")
++print(f"IntegerField % DecimalField -> {_resolve_combined_type(Combinable.MOD, fields.IntegerField, fields.DecimalField).__name__}")
++print(f"FloatField % IntegerField -> {_resolve_combined_type(Combinable.MOD, fields.FloatField, fields.IntegerField).__name__}")
++print(f"IntegerField % FloatField -> {_resolve_combined_type(Combinable.MOD, fields.IntegerField, fields.FloatField).__name__}")
+diff --git a/test_mod_mixed_types.py b/test_mod_mixed_types.py
+new file mode 100644
+index 0000000000..27c92ab9f3
+--- /dev/null
++++ b/test_mod_mixed_types.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python
++import os
++import sys
++import django
++from decimal import Decimal
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++django.setup()
++
++from django.db import models
++from django.db.models import F, Value
++from django.test import TestCase
++from tests.expressions.models import Number
++
++# Run test
++try:
++    # Create test data
++    n = Number.objects.create(integer=7, float=5.5)
++    
++    # Test 1: Integer field % Decimal value
++    print("Test 1: Integer field % Decimal value")
++    try:
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F('integer') % Value(Decimal('3.5'))
++        ).first()
++        print(f"  Success: {result.mod_result}")
++    except Exception as e:
++        print(f"  Failed: {e}")
++    
++    # Test 2: Float field % Integer value
++    print("\nTest 2: Float field % Integer value")
++    try:
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F('float') % Value(2)
++        ).first()
++        print(f"  Success: {result.mod_result}")
++    except Exception as e:
++        print(f"  Failed: {e}")
++    
++    # Test 3: Decimal value % Integer field
++    print("\nTest 3: Decimal value % Integer field")
++    try:
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=Value(Decimal('10.5')) % F('integer')
++        ).first()
++        print(f"  Success: {result.mod_result}")
++    except Exception as e:
++        print(f"  Failed: {e}")
++        
++    # Compare with ADD operator (should work)
++    print("\nCompare with ADD operator:")
++    try:
++        result = Number.objects.filter(pk=n.pk).annotate(
++            add_result=F('integer') + Value(Decimal('3.5'))
++        ).first()
++        print(f"  Integer + Decimal Success: {result.add_result}")
++    except Exception as e:
++        print(f"  Integer + Decimal Failed: {e}")
++        
++finally:
++    # Cleanup
++    Number.objects.filter(pk=n.pk).delete()
+diff --git a/test_mod_output_field.py b/test_mod_output_field.py
+new file mode 100644
+index 0000000000..40d24311c4
+--- /dev/null
++++ b/test_mod_output_field.py
+@@ -0,0 +1,86 @@
++import os
++import django
++from decimal import Decimal
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++django.setup()
++
++from django.db import models
++from django.db.models import F, Value, DecimalField, IntegerField
++from django.test import TestCase
++from django.db import connection
++# Create a test model
++class TestModel(models.Model):
++    decimal_field = models.DecimalField(max_digits=10, decimal_places=2)
++    integer_field = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test_mod'
++        db_table = 'test_mod_model'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Insert test data
++TestModel.objects.create(decimal_field=Decimal('10.50'), integer_field=3)
++
++# Test MOD with different field types
++print("Testing MOD operator with different field types...")
++
++# Test 1: Decimal MOD Integer (using F objects)
++try:
++    result = TestModel.objects.annotate(
++        mod_result=F('decimal_field') % F('integer_field')
++    ).first()
++    print(f"✓ Decimal MOD Integer (F objects): {result.mod_result}")
++    print(f"  Result type: {type(result.mod_result)}")
++except Exception as e:
++    print(f"✗ Decimal MOD Integer (F objects) failed: {e}")
++
++# Test 2: Integer MOD Decimal (using F objects)
++try:
++    result = TestModel.objects.annotate(
++        mod_result=F('integer_field') % F('decimal_field')
++    ).first()
++    print(f"✓ Integer MOD Decimal (F objects): {result.mod_result}")
++    print(f"  Result type: {type(result.mod_result)}")
++except Exception as e:
++    print(f"✗ Integer MOD Decimal (F objects) failed: {e}")
++
++# Test 3: Decimal MOD Integer (using Value)
++try:
++    result = TestModel.objects.annotate(
++        mod_result=F('decimal_field') % Value(3)
++    ).first()
++    print(f"✓ Decimal MOD Integer (Value): {result.mod_result}")
++    print(f"  Result type: {type(result.mod_result)}")
++except Exception as e:
++    print(f"✗ Decimal MOD Integer (Value) failed: {e}")
++
++# Test 4: Integer MOD Decimal (using Value)
++try:
++    result = TestModel.objects.annotate(
++        mod_result=F('integer_field') % Value(Decimal('2.5'))
++    ).first()
++    print(f"✓ Integer MOD Decimal (Value): {result.mod_result}")
++    print(f"  Result type: {type(result.mod_result)}")
++except Exception as e:
++    print(f"✗ Integer MOD Decimal (Value) failed: {e}")
++
++# Compare with other operators
++print("\nComparing with other operators...")
++
++# Test ADD with different types (should work)
++try:
++    result = TestModel.objects.annotate(
++        add_result=F('decimal_field') + F('integer_field')
++    ).first()
++    print(f"✓ Decimal ADD Integer: {result.add_result}")
++    print(f"  Result type: {type(result.add_result)}")
++except Exception as e:
++    print(f"✗ Decimal ADD Integer failed: {e}")
++
++# Clean up
++with connection.schema_editor() as schema_editor:
++    schema_editor.delete_model(TestModel)
+diff --git a/test_mod_simple.py b/test_mod_simple.py
+new file mode 100644
+index 0000000000..3b908eb6be
+--- /dev/null
++++ b/test_mod_simple.py
+@@ -0,0 +1,35 @@
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++from decimal import Decimal
++from django.db.models import fields
++from django.db.models.expressions import Combinable, _connector_combinations, _connector_combinators, _resolve_combined_type
++
++# Test the current behavior
++print("Testing current behavior...")
++
++# Check what's defined for MOD
++print("\nChecking MOD combinations for different types:")
++mod_combinators = _connector_combinators.get(Combinable.MOD, [])
++for lhs, rhs, result in mod_combinators:
++    print(f"  {lhs.__name__} % {rhs.__name__} -> {result.__name__}")
++
++# Test resolution
++print("\nTesting type resolution:")
++# Test Decimal % Integer
++result = _resolve_combined_type(Combinable.MOD, fields.DecimalField, fields.IntegerField)
++print(f"DecimalField % IntegerField -> {result}")
++
++# Test Integer % Decimal  
++result = _resolve_combined_type(Combinable.MOD, fields.IntegerField, fields.DecimalField)
++print(f"IntegerField % DecimalField -> {result}")
++
++# Compare with ADD
++print("\nComparing with ADD operator:")
++add_combinators = _connector_combinators.get(Combinable.ADD, [])
++for lhs, rhs, result in add_combinators:
++    if (lhs in [fields.IntegerField, fields.DecimalField] and 
++        rhs in [fields.IntegerField, fields.DecimalField] and
++        lhs != rhs):
++        print(f"  {lhs.__name__} + {rhs.__name__} -> {result.__name__}")
+diff --git a/tests/expressions/tests.py b/tests/expressions/tests.py
+index 39e6c18b1a..4c959cd16a 100644
+--- a/tests/expressions/tests.py
++++ b/tests/expressions/tests.py
+@@ -1412,6 +1412,48 @@ class ExpressionOperatorTests(TestCase):
+         qs = Employee.objects.annotate(modsalary=F("salary") % 20)
+         self.assertIsNone(qs.get().salary)
+ 
++    def test_lefthand_modulo_mixed_types(self):
++        # Test MOD operator with mixed numeric types
++        from decimal import Decimal
++        
++        # Create test data
++        n = Number.objects.create(integer=10, float=3.0, decimal_value=Decimal("3.0"))
++        
++        # Integer % Decimal
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F("integer") % F("decimal_value")
++        ).first()
++        self.assertIsInstance(result.mod_result, Decimal)
++        self.assertEqual(result.mod_result, Decimal("1.0"))  # 10 % 3.0 = 1.0
++        
++        # Decimal % Integer
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F("decimal_value") % F("integer")
++        ).first()
++        self.assertIsInstance(result.mod_result, Decimal)
++        self.assertEqual(result.mod_result, Decimal("3.0"))  # 3.0 % 10 = 3.0
++        
++        # Float % Integer
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F("float") % F("integer")
++        ).first()
++        self.assertIsInstance(result.mod_result, float)
++        self.assertAlmostEqual(result.mod_result, 3.0)  # 3.0 % 10 = 3.0
++        
++        # Integer % Float
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F("integer") % F("float")
++        ).first()
++        self.assertIsInstance(result.mod_result, float)
++        self.assertAlmostEqual(result.mod_result, 1.0)  # 10 % 3.0 = 1.0
++        
++        # Test with Value objects
++        result = Number.objects.filter(pk=n.pk).annotate(
++            mod_result=F("integer") % Value(Decimal("4.0"))
++        ).first()
++        self.assertIsInstance(result.mod_result, Decimal)
++        self.assertEqual(result.mod_result, Decimal("2.0"))  # 10 % 4.0 = 2.0
++
+     def test_lefthand_bitwise_and(self):
+         # LH Bitwise ands on integers
+         Number.objects.filter(pk=self.n.pk).update(integer=F("integer").bitand(56))

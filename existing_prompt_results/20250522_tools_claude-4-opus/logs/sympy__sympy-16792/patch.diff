@@ -1,0 +1,212 @@
+diff --git a/debug_codegen.py b/debug_codegen.py
+new file mode 100644
+index 0000000000..6afe586ae6
+--- /dev/null
++++ b/debug_codegen.py
+@@ -0,0 +1,29 @@
++from sympy.utilities.codegen import make_routine, get_code_generator, C99CodeGen
++from sympy import MatrixSymbol
++
++# Test case: array argument not appearing in expression
++x = MatrixSymbol('x', 2, 1)
++expr = 1.0
++
++# Check what code generator is used
++code_gen = get_code_generator('C')
++print(f"Code generator type: {type(code_gen)}")
++
++routine = make_routine('test_func', expr, argument_sequence=[x], language='C')
++
++print("Routine name:", routine.name)
++print("Arguments:")
++for arg in routine.arguments:
++    print(f"  - {arg.name}: type={type(arg).__name__}, dimensions={getattr(arg, 'dimensions', 'None')}")
++print("Results:")
++for res in routine.results:
++    print(f"  - {res}")
++
++# Let's also check if the symbol is in symbols
++from sympy.utilities.codegen import CodeGen
++cg = C99CodeGen()
++routine2 = cg.routine('test_func2', expr, argument_sequence=[x])
++print("\nDirect call to routine method:")
++print("Arguments:")
++for arg in routine2.arguments:
++    print(f"  - {arg.name}: type={type(arg).__name__}, dimensions={getattr(arg, 'dimensions', 'None')}")
+diff --git a/debug_codegen2.py b/debug_codegen2.py
+new file mode 100644
+index 0000000000..9d0d453433
+--- /dev/null
++++ b/debug_codegen2.py
+@@ -0,0 +1,21 @@
++from sympy.utilities.codegen import get_code_generator
++from sympy import MatrixSymbol, Tuple
++
++# Test case: array argument not appearing in expression
++x = MatrixSymbol('x', 2, 1)
++expr = 1.0
++
++# Simulate what happens in the routine method
++expressions = Tuple(expr)
++local_expressions = Tuple()
++
++# symbols that should be arguments
++symbols = (expressions.free_symbols | local_expressions.free_symbols)
++print(f"Free symbols in expressions: {symbols}")
++print(f"x in symbols: {x in symbols}")
++
++# Check if x is passed in argument_sequence
++argument_sequence = [x]
++print(f"\nArgument sequence: {argument_sequence}")
++print(f"Type of x: {type(x)}")
++print(f"x.shape: {x.shape}")
+diff --git a/sympy/utilities/codegen.py b/sympy/utilities/codegen.py
+index f0befb2bd7..5e4acbf269 100644
+--- a/sympy/utilities/codegen.py
++++ b/sympy/utilities/codegen.py
+@@ -274,9 +274,9 @@ def get_default_datatype(expr, complex_allowed=None):
+         #check all entries
+         dt = "int"
+         for element in expr:
+-            if dt is "int" and not element.is_integer:
++            if dt == "int" and not element.is_integer:
+                 dt = "float"
+-            if dt is "float" and not element.is_real:
++            if dt == "float" and not element.is_real:
+                 return default_datatypes[final_dtype]
+         return default_datatypes[dt]
+     else:
+@@ -700,6 +700,12 @@ def routine(self, name, expr, argument_sequence=None, global_vars=None):
+             array_symbols[array.base.label] = array
+         for array in expressions.atoms(MatrixSymbol) | local_expressions.atoms(MatrixSymbol):
+             array_symbols[array] = array
++        
++        # Also check argument_sequence for array symbols that may not appear in expressions
++        if argument_sequence is not None:
++            for arg in argument_sequence:
++                if isinstance(arg, MatrixSymbol) and arg not in array_symbols:
++                    array_symbols[arg] = arg
+ 
+         for symbol in sorted(symbols, key=str):
+             if symbol in array_symbols:
+@@ -739,7 +745,14 @@ def routine(self, name, expr, argument_sequence=None, global_vars=None):
+                 try:
+                     new_args.append(name_arg_dict[symbol])
+                 except KeyError:
+-                    new_args.append(InputArgument(symbol))
++                    # Handle MatrixSymbol that may not appear in expressions
++                    if isinstance(symbol, MatrixSymbol):
++                        dims = []
++                        for dim in symbol.shape:
++                            dims.append((S.Zero, dim - 1))
++                        new_args.append(InputArgument(symbol, dimensions=dims))
++                    else:
++                        new_args.append(InputArgument(symbol))
+             arg_list = new_args
+ 
+         return Routine(name, arg_list, return_val, local_vars, global_vars)
+diff --git a/sympy/utilities/tests/test_codegen.py b/sympy/utilities/tests/test_codegen.py
+index 1cd56e12d1..7d772c15dc 100644
+--- a/sympy/utilities/tests/test_codegen.py
++++ b/sympy/utilities/tests/test_codegen.py
+@@ -1556,3 +1556,24 @@ def test_fcode_complex():
+         )
+     assert source==expected
+     sympy.utilities.codegen.COMPLEX_ALLOWED = False
++
++
++def test_matrixsymbol_without_expression():
++    # Test for issue where MatrixSymbol arguments that don't appear
++    # in the expression should still be treated as arrays (with pointer type)
++    from sympy.utilities.codegen import make_routine, CCodeGen, get_code_generator
++    from sympy import MatrixSymbol
++    
++    x = MatrixSymbol('x', 2, 1)
++    # Expression that doesn't use x
++    expr = 1.0
++    routine = make_routine("test", expr, argument_sequence=[x], language="C")
++    
++    # Check that x has dimensions
++    assert routine.arguments[0].dimensions == [(0, 1), (0, 0)]
++    
++    # Check C code generation
++    code_gen = CCodeGen()
++    source = get_string(code_gen.dump_c, [routine])
++    # x should be a pointer (double *x) not a scalar (double x)
++    assert "double test(double *x)" in source
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..56d4245199
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,39 @@
++from sympy.utilities.autowrap import autowrap
++from sympy import MatrixSymbol, Symbol
++import numpy as np
++
++print("Test 1: Single MatrixSymbol not in expression")
++x = MatrixSymbol('x', 2, 1)
++expr = 1.0
++f = autowrap(expr, args=(x,), backend='cython', tempdir='/tmp/test1')
++result = f(np.array([[1.0], [2.0]]))
++print(f"Result: {result}")
++assert result == 1.0
++
++print("\nTest 2: Multiple MatrixSymbols, one not in expression")
++x = MatrixSymbol('x', 2, 1)
++y = MatrixSymbol('y', 3, 1)
++expr = x[0, 0] + x[1, 0]  # y not used
++f = autowrap(expr, args=(x, y), backend='cython', tempdir='/tmp/test2')
++result = f(np.array([[1.0], [2.0]]), np.array([[3.0], [4.0], [5.0]]))
++print(f"Result: {result}")
++assert result == 3.0
++
++print("\nTest 3: Mix of regular symbols and MatrixSymbols")
++x = MatrixSymbol('x', 2, 1)
++a = Symbol('a')
++expr = a  # x not used
++f = autowrap(expr, args=(a, x), backend='cython', tempdir='/tmp/test3')
++result = f(5.0, np.array([[1.0], [2.0]]))
++print(f"Result: {result}")
++assert result == 5.0
++
++print("\nTest 4: Larger matrix")
++x = MatrixSymbol('x', 5, 3)
++expr = 42.0  # x not used
++f = autowrap(expr, args=(x,), backend='cython', tempdir='/tmp/test4')
++result = f(np.ones((5, 3)))
++print(f"Result: {result}")
++assert result == 42.0
++
++print("\nAll tests passed!")
+diff --git a/test_issue.py b/test_issue.py
+new file mode 100644
+index 0000000000..9bd976cc59
+--- /dev/null
++++ b/test_issue.py
+@@ -0,0 +1,25 @@
++from sympy.utilities.autowrap import autowrap
++from sympy import MatrixSymbol
++import numpy as np
++
++# Test case 1: array argument not appearing in expression
++x = MatrixSymbol('x', 2, 1)
++expr = 1.0
++print("Test case 1: array argument not appearing in expression")
++try:
++    f = autowrap(expr, args=(x,), backend='cython', tempdir='/tmp/test_autowrap')
++    result = f(np.array([[1.0, 2.0]]))
++    print(f"Success! Result: {result}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")
++
++# Test case 2: array argument appearing in expression (should work)
++print("\nTest case 2: array argument appearing in expression")
++x = MatrixSymbol('x', 2, 1)
++expr = x[0,0]
++try:
++    f = autowrap(expr, args=(x,), backend='cython', tempdir='/tmp/test_autowrap2')
++    result = f(np.array([[1.0, 2.0]]))
++    print(f"Success! Result: {result}")
++except Exception as e:
++    print(f"Error: {type(e).__name__}: {e}")

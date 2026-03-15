@@ -1,0 +1,579 @@
+diff --git a/django/db/migrations/executor.py b/django/db/migrations/executor.py
+index 57042a8690..6a8200ddfa 100644
+--- a/django/db/migrations/executor.py
++++ b/django/db/migrations/executor.py
+@@ -254,6 +254,8 @@ class MigrationExecutor:
+         if migration.replaces:
+             for app_label, name in migration.replaces:
+                 self.recorder.record_unapplied(app_label, name)
++            # Also mark the squashed migration itself as unapplied
++            self.recorder.record_unapplied(migration.app_label, migration.name)
+         else:
+             self.recorder.record_unapplied(migration.app_label, migration.name)
+         # Report progress
+diff --git a/test_apply_behavior.py b/test_apply_behavior.py
+new file mode 100644
+index 0000000000..2d799a1a6b
+--- /dev/null
++++ b/test_apply_behavior.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++"""
++Test to verify that applying a squashed migration works correctly.
++"""
++import os
++import sys
++import django
++from django.db import connection
++from django.conf import settings
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++# Setup Django
++django.setup()
++
++# Now import Django components
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.db.migrations.state import ProjectState
++from django.test import override_settings
++
++def test_apply_behavior():
++    """Test that applying a squashed migration works correctly."""
++    
++    with override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"}):
++        # Create executor and recorder
++        executor = MigrationExecutor(connection)
++        recorder = MigrationRecorder(connection)
++        
++        # Ensure schema exists
++        recorder.ensure_schema()
++        
++        # Clear any existing migration records
++        recorder.Migration.objects.all().delete()
++        
++        print("Initial state - no migrations applied")
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Apply the squashed migration
++        print("\nApplying squashed migration...")
++        executor.migrate([("migrations", "0001_squashed_0002")])
++        
++        # Check what's applied before check_replacements
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations before check_replacements: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # The individual migrations should be applied (not the squashed one yet)
++        assert ("migrations", "0001_initial") in applied
++        assert ("migrations", "0002_second") in applied
++        
++        # Run check_replacements
++        print("\nRunning check_replacements()...")
++        executor.check_replacements()
++        
++        # Check final state
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations after check_replacements: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Now the squashed migration should also be marked as applied
++        assert ("migrations", "0001_squashed_0002") in applied
++        
++        print("\n✓ Apply behavior is correct!")
++        return True
++
++if __name__ == "__main__":
++    test_apply_behavior()
+diff --git a/test_bug_reproduction.py b/test_bug_reproduction.py
+new file mode 100644
+index 0000000000..2aa8d0bf41
+--- /dev/null
++++ b/test_bug_reproduction.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python
++"""
++Reproduce the bug where squashed migration is not marked as unapplied.
++"""
++import os
++import sys
++import django
++from django.db import connection
++from django.conf import settings
++
++# Configure Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++# Setup Django
++django.setup()
++
++# Now import Django components
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.db.migrations.state import ProjectState
++from django.test import override_settings
++
++def demonstrate_bug():
++    """Demonstrate the squashed migration bug."""
++    
++    with override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"}):
++        # Create executor and recorder
++        executor = MigrationExecutor(connection)
++        recorder = MigrationRecorder(connection)
++        
++        # Ensure schema exists
++        recorder.ensure_schema()
++        
++        # Clear any existing migration records
++        recorder.Migration.objects.all().delete()
++        
++        print("Initial state - no migrations applied")
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Apply individual migrations manually (simulating a scenario where they were applied before squashing)
++        print("\nManually recording individual migrations as applied...")
++        recorder.record_applied("migrations", "0001_initial")
++        recorder.record_applied("migrations", "0002_second")
++        
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Run check_replacements - this should mark the squashed migration as applied
++        print("\nRunning check_replacements()...")
++        executor.check_replacements()
++        
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations after check_replacements: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Now unapply the squashed migration
++        print("\nUnapplying the squashed migration...")
++        executor.loader.build_graph()
++        migration = executor.loader.graph.nodes[("migrations", "0001_squashed_0002")]
++        
++        # Create a dummy state
++        state = ProjectState()
++        
++        # Unapply the migration (with fake=True to avoid actual DB operations)
++        executor.unapply_migration(state, migration, fake=True)
++        
++        # Check final state
++        applied = recorder.applied_migrations()
++        print(f"\nFinal applied migrations: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # Check for the bug
++        if ("migrations", "0001_squashed_0002") in applied:
++            print("\n❌ BUG CONFIRMED: The squashed migration '0001_squashed_0002' is still marked as applied!")
++            print("   Expected: It should have been marked as unapplied.")
++            return False
++        else:
++            print("\n✓ BUG FIXED: The squashed migration is correctly marked as unapplied!")
++            return True
++
++if __name__ == "__main__":
++    success = demonstrate_bug()
++    sys.exit(0 if success else 1)
+diff --git a/test_comprehensive_squash.py b/test_comprehensive_squash.py
+new file mode 100644
+index 0000000000..8148b3e6cb
+--- /dev/null
++++ b/test_comprehensive_squash.py
+@@ -0,0 +1,110 @@
++"""
++Comprehensive test for squashed migration behavior.
++"""
++import os
++import sys
++import django
++from django.test import TestCase, TransactionTestCase, override_settings
++from django.db import connection
++
++# Setup Django
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++django.setup()
++
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.db.migrations.state import ProjectState
++
++@override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"})
++class TestSquashedMigrationScenarios(TransactionTestCase):
++    """Test various scenarios with squashed migrations."""
++    
++    available_apps = []
++    
++    def setUp(self):
++        self.executor = MigrationExecutor(connection)
++        self.recorder = MigrationRecorder(connection)
++        self.recorder.ensure_schema()
++        # Clear any existing migration records
++        self.recorder.Migration.objects.all().delete()
++    
++    def test_scenario_1_apply_then_unapply_squashed(self):
++        """Apply a squashed migration from scratch, then unapply it."""
++        print("\n=== Scenario 1: Apply then unapply squashed migration ===")
++        
++        # Apply the squashed migration
++        self.executor.migrate([("migrations", "0001_squashed_0002")])
++        
++        # Check that individual migrations are recorded
++        applied = self.recorder.applied_migrations()
++        self.assertIn(("migrations", "0001_initial"), applied)
++        self.assertIn(("migrations", "0002_second"), applied)
++        
++        # Run check_replacements to mark squashed as applied
++        self.executor.check_replacements()
++        applied = self.recorder.applied_migrations()
++        self.assertIn(("migrations", "0001_squashed_0002"), applied)
++        
++        # Now unapply everything
++        self.executor.migrate([("migrations", None)])
++        
++        # All migrations should be unapplied
++        applied = self.recorder.applied_migrations()
++        self.assertNotIn(("migrations", "0001_initial"), applied)
++        self.assertNotIn(("migrations", "0002_second"), applied)
++        self.assertNotIn(("migrations", "0001_squashed_0002"), applied)
++        print("✓ Scenario 1 passed")
++    
++    def test_scenario_2_individual_then_squash_then_unapply(self):
++        """Apply individual migrations, mark squashed as applied, then unapply."""
++        print("\n=== Scenario 2: Individual migrations -> squash -> unapply ===")
++        
++        # Manually record individual migrations as applied
++        self.recorder.record_applied("migrations", "0001_initial")
++        self.recorder.record_applied("migrations", "0002_second")
++        
++        # Run check_replacements to mark squashed as applied
++        self.executor.check_replacements()
++        applied = self.recorder.applied_migrations()
++        self.assertIn(("migrations", "0001_squashed_0002"), applied)
++        
++        # Unapply the squashed migration
++        self.executor.loader.build_graph()
++        migration = self.executor.loader.graph.nodes[("migrations", "0001_squashed_0002")]
++        state = ProjectState()
++        self.executor.unapply_migration(state, migration, fake=True)
++        
++        # All should be unapplied
++        applied = self.recorder.applied_migrations()
++        self.assertNotIn(("migrations", "0001_initial"), applied)
++        self.assertNotIn(("migrations", "0002_second"), applied)
++        self.assertNotIn(("migrations", "0001_squashed_0002"), applied)
++        print("✓ Scenario 2 passed")
++    
++    def test_scenario_3_partial_apply_then_complete(self):
++        """Apply only first migration, then apply squashed."""
++        print("\n=== Scenario 3: Partial apply then complete with squashed ===")
++        
++        # Apply only the first migration
++        self.recorder.record_applied("migrations", "0001_initial")
++        
++        # Apply the squashed migration (should only apply what's missing)
++        self.executor.loader.build_graph()
++        self.executor.migrate([("migrations", "0001_squashed_0002")])
++        
++        # Check final state
++        self.executor.check_replacements()
++        applied = self.recorder.applied_migrations()
++        self.assertIn(("migrations", "0001_initial"), applied)
++        self.assertIn(("migrations", "0002_second"), applied)
++        self.assertIn(("migrations", "0001_squashed_0002"), applied)
++        print("✓ Scenario 3 passed")
++
++if __name__ == "__main__":
++    import unittest
++    suite = unittest.TestLoader().loadTestsFromTestCase(TestSquashedMigrationScenarios)
++    runner = unittest.TextTestRunner(verbosity=2)
++    result = runner.run(suite)
++    sys.exit(0 if result.wasSuccessful() else 1)
+diff --git a/test_squashed_migration_bug.py b/test_squashed_migration_bug.py
+new file mode 100644
+index 0000000000..fe54782c36
+--- /dev/null
++++ b/test_squashed_migration_bug.py
+@@ -0,0 +1,103 @@
++"""
++Test to reproduce the issue where a squashed migration is not marked as unapplied
++when unapplying it while the replaced migration files are still around.
++"""
++import os
++import sys
++from django.conf import settings
++from django.db import connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.test import TestCase, override_settings
++from unittest.mock import patch
++from django.test.utils import isolate_apps
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ]
++    )
++
++import django
++django.setup()
++
++def test_squashed_migration_unapply():
++    """Test that squashed migration is marked as unapplied when unapplying it."""
++    
++    # Add the test migrations to the path
++    import sys
++    sys.path.insert(0, '/testbed/tests')
++    
++    # Create executor with the test migrations module
++    from unittest.mock import patch
++    with patch.dict('sys.modules', {'migrations': __import__('migrations')}):
++        with override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"}):
++            executor = MigrationExecutor(connection)
++    
++    recorder = MigrationRecorder(connection)
++    
++    # Ensure schema exists
++    recorder.ensure_schema()
++    
++    # First, apply the individual migrations (0001 and 0002)
++    print("Applying individual migrations...")
++    recorder.record_applied("migrations", "0001_initial")
++    recorder.record_applied("migrations", "0002_second")
++    
++    # Check replacements - this should mark the squashed migration as applied
++    executor.check_replacements()
++    
++    # Verify all three are marked as applied
++    applied = recorder.applied_migrations()
++    print(f"Applied migrations after check_replacements: {applied}")
++    
++    assert ("migrations", "0001_initial") in applied
++    assert ("migrations", "0002_second") in applied
++    assert ("migrations", "0001_squashed_0002") in applied
++    
++    # Now, let's unapply the squashed migration
++    print("\nUnapplying squashed migration...")
++    
++    # Reload to get fresh state
++    executor.loader.build_graph()
++    migration = executor.loader.graph.nodes[("migrations", "0001_squashed_0002")]
++    
++    # Create a dummy state (we're just testing the recording, not actual DB operations)
++    from django.db.migrations.state import ProjectState
++    state = ProjectState()
++    
++    # Unapply the migration
++    executor.unapply_migration(state, migration, fake=True)
++    
++    # Check what's marked as applied now
++    applied = recorder.applied_migrations()
++    print(f"Applied migrations after unapplying squashed: {applied}")
++    
++    # The individual migrations should be unapplied
++    assert ("migrations", "0001_initial") not in applied
++    assert ("migrations", "0002_second") not in applied
++    
++    # The bug: the squashed migration is still marked as applied!
++    if ("migrations", "0001_squashed_0002") in applied:
++        print("\nBUG CONFIRMED: Squashed migration is still marked as applied!")
++        return False
++    else:
++        print("\nBUG FIXED: Squashed migration is correctly marked as unapplied!")
++        return True
++
++if __name__ == "__main__":
++    # Need to set up the test migrations module
++    import sys
++    sys.path.insert(0, '/testbed/tests')
++    
++    success = test_squashed_migration_unapply()
++    sys.exit(0 if success else 1)
+diff --git a/test_squashed_simple.py b/test_squashed_simple.py
+new file mode 100644
+index 0000000000..ee57faffbc
+--- /dev/null
++++ b/test_squashed_simple.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python
++"""
++Simple test to reproduce the squashed migration bug.
++"""
++import os
++import sys
++
++# Add Django to path
++sys.path.insert(0, '/testbed')
++sys.path.insert(0, '/testbed/tests')
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_sqlite')
++
++import django
++from django.conf import settings
++from django.test import TestCase, TransactionTestCase, override_settings
++from django.db import connection
++
++# Import after Django setup
++django.setup()
++
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.recorder import MigrationRecorder
++from django.db.migrations.state import ProjectState
++
++@override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"})
++class TestSquashedMigrationBug(TransactionTestCase):
++    """Test that squashed migration is marked as unapplied when unapplying it."""
++    
++    available_apps = ['migrations']
++    
++    def test_unapply_squashed_migration(self):
++        # Create executor and recorder
++        executor = MigrationExecutor(connection)
++        recorder = MigrationRecorder(connection)
++        
++        # Ensure schema exists
++        recorder.ensure_schema()
++        
++        # First, apply the individual migrations (0001 and 0002)
++        print("Applying individual migrations...")
++        recorder.record_applied("migrations", "0001_initial")
++        recorder.record_applied("migrations", "0002_second")
++        
++        # Check replacements - this should mark the squashed migration as applied
++        executor.check_replacements()
++        
++        # Verify all three are marked as applied
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations after check_replacements: {[m for m in applied if m[0] == 'migrations']}")
++        
++        self.assertIn(("migrations", "0001_initial"), applied)
++        self.assertIn(("migrations", "0002_second"), applied)
++        self.assertIn(("migrations", "0001_squashed_0002"), applied)
++        
++        # Now, let's unapply the squashed migration
++        print("\nUnapplying squashed migration...")
++        
++        # Reload to get fresh state
++        executor.loader.build_graph()
++        migration = executor.loader.graph.nodes[("migrations", "0001_squashed_0002")]
++        
++        # Create a dummy state
++        state = ProjectState()
++        
++        # Unapply the migration
++        executor.unapply_migration(state, migration, fake=True)
++        
++        # Check what's marked as applied now
++        applied = recorder.applied_migrations()
++        print(f"Applied migrations after unapplying squashed: {[m for m in applied if m[0] == 'migrations']}")
++        
++        # The individual migrations should be unapplied
++        self.assertNotIn(("migrations", "0001_initial"), applied)
++        self.assertNotIn(("migrations", "0002_second"), applied)
++        
++        # The bug: the squashed migration should also be unapplied!
++        self.assertNotIn(("migrations", "0001_squashed_0002"), applied, 
++                        "BUG: Squashed migration is still marked as applied!")
++
++if __name__ == "__main__":
++    # Run the test
++    import unittest
++    suite = unittest.TestLoader().loadTestsFromTestCase(TestSquashedMigrationBug)
++    runner = unittest.TextTestRunner(verbosity=2)
++    result = runner.run(suite)
++    sys.exit(0 if result.wasSuccessful() else 1)
+diff --git a/tests/migrations/test_executor.py b/tests/migrations/test_executor.py
+index e61d8f1276..059297d56e 100644
+--- a/tests/migrations/test_executor.py
++++ b/tests/migrations/test_executor.py
+@@ -104,6 +104,77 @@ class ExecutorTests(MigrationTestBase):
+         self.assertTableNotExists("migrations_author")
+         self.assertTableNotExists("migrations_book")
+ 
++    @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed"})
++    def test_unapply_squashed_migration_marks_it_unapplied(self):
++        """
++        When unapplying a squashed migration, it should be marked as unapplied
++        in the migration recorder, not just its replaced migrations.
++        """
++        executor = MigrationExecutor(connection)
++        recorder = MigrationRecorder(connection)
++        
++        # First, manually mark the individual migrations as applied
++        # (simulating a scenario where they were applied before squashing)
++        recorder.record_applied("migrations", "0001_initial")
++        recorder.record_applied("migrations", "0002_second")
++        
++        # Run check_replacements to mark the squashed migration as applied
++        executor.check_replacements()
++        
++        # Verify all three are marked as applied
++        applied = recorder.applied_migrations()
++        self.assertIn(("migrations", "0001_initial"), applied)
++        self.assertIn(("migrations", "0002_second"), applied)
++        self.assertIn(("migrations", "0001_squashed_0002"), applied)
++        
++        # Now unapply the squashed migration
++        executor.loader.build_graph()
++        migration = executor.loader.graph.nodes[("migrations", "0001_squashed_0002")]
++        state = ProjectState()
++        executor.unapply_migration(state, migration, fake=True)
++        
++        # Check that all migrations are marked as unapplied
++        applied = recorder.applied_migrations()
++        self.assertNotIn(("migrations", "0001_initial"), applied)
++        self.assertNotIn(("migrations", "0002_second"), applied)
++        # This is the bug - the squashed migration should also be unapplied
++        self.assertNotIn(("migrations", "0001_squashed_0002"), applied)
++
++    @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_squashed_complex"})
++    def test_unapply_nested_squashed_migration(self):
++        """
++        When unapplying a squashed migration in a complex scenario with multiple
++        squashed migrations, ensure all are correctly marked as unapplied.
++        """
++        executor = MigrationExecutor(connection)
++        recorder = MigrationRecorder(connection)
++        
++        # Manually mark migrations 3, 4, 5 as applied
++        recorder.record_applied("migrations", "3_auto")
++        recorder.record_applied("migrations", "4_auto")
++        recorder.record_applied("migrations", "5_auto")
++        
++        # Run check_replacements to mark the squashed migration as applied
++        executor.check_replacements()
++        
++        # Verify the squashed migration is marked as applied
++        applied = recorder.applied_migrations()
++        self.assertIn(("migrations", "3_squashed_5"), applied)
++        
++        # Now unapply the squashed migration
++        executor.loader.build_graph()
++        migration = executor.loader.graph.nodes[("migrations", "3_squashed_5")]
++        state = ProjectState()
++        executor.unapply_migration(state, migration, fake=True)
++        
++        # Check that all migrations are marked as unapplied
++        applied = recorder.applied_migrations()
++        self.assertNotIn(("migrations", "3_auto"), applied)
++        self.assertNotIn(("migrations", "4_auto"), applied)
++        self.assertNotIn(("migrations", "5_auto"), applied)
++        # The squashed migration should also be unapplied
++        self.assertNotIn(("migrations", "3_squashed_5"), applied)
++
+     @override_settings(MIGRATION_MODULES={"migrations": "migrations.test_migrations_non_atomic"})
+     def test_non_atomic_migration(self):
+         """

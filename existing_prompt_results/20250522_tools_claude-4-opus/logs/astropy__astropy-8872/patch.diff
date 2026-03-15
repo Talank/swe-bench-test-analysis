@@ -1,0 +1,416 @@
+diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py
+index ded609cbe9..0a21facfa2 100644
+--- a/astropy/units/quantity.py
++++ b/astropy/units/quantity.py
+@@ -296,7 +296,7 @@ class Quantity(np.ndarray, metaclass=InheritDocstrings):
+                 if not copy:
+                     return value
+ 
+-                if not (np.can_cast(np.float32, value.dtype) or
++                if not (value.dtype.kind in 'fc' or
+                         value.dtype.fields):
+                     dtype = float
+ 
+@@ -377,7 +377,7 @@ class Quantity(np.ndarray, metaclass=InheritDocstrings):
+                             "Numpy numeric type.")
+ 
+         # by default, cast any integer, boolean, etc., to float
+-        if dtype is None and (not (np.can_cast(np.float32, value.dtype)
++        if dtype is None and (not (value.dtype.kind in 'fc'
+                                    or value.dtype.fields)
+                               or value.dtype.kind == 'O'):
+             value = value.astype(float)
+diff --git a/astropy/units/tests/test_quantity.py b/astropy/units/tests/test_quantity.py
+index be18e65c5b..497fe8df9b 100644
+--- a/astropy/units/tests/test_quantity.py
++++ b/astropy/units/tests/test_quantity.py
+@@ -150,6 +150,26 @@ class TestQuantityCreation:
+         q5 = u.Quantity(decimal.Decimal('10.25'), u.m, dtype=object)
+         assert q5.dtype == object
+ 
++    def test_float16_dtype_preserved(self):
++        """Test that float16 dtype is preserved when creating Quantities."""
++        # Test scalar
++        f16_scalar = np.float16(1.5)
++        q16_scalar = f16_scalar * u.km
++        assert q16_scalar.dtype == np.float16
++        
++        # Test array
++        f16_array = np.array([1.0, 2.0, 3.0], dtype=np.float16)
++        q16_array = f16_array * u.km
++        assert q16_array.dtype == np.float16
++        
++        # Test Quantity constructor directly
++        q16_direct = u.Quantity(np.float16(1.5), u.km)
++        assert q16_direct.dtype == np.float16
++        
++        # Test that explicit dtype parameter still works
++        q16_to_32 = u.Quantity(np.float16(1.5), u.km, dtype=np.float32)
++        assert q16_to_32.dtype == np.float32
++
+     def test_copy(self):
+ 
+         # By default, a new quantity is constructed, but not if copy=False
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..389f834cdf
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,44 @@
++import numpy as np
++import astropy.units as u
++
++print("Testing float16 quantity dtype preservation:")
++print("=" * 50)
++
++# Test float16
++f16 = np.float16(1)
++q16 = f16 * u.km
++print(f"np.float16(1) dtype: {f16.dtype}")
++print(f"(np.float16(1) * u.km) dtype: {q16.dtype}")
++print(f"Expected: float16, Got: {q16.dtype}")
++print()
++
++# Test other float types for comparison
++print("Testing other float types:")
++print("-" * 30)
++
++# float32
++f32 = np.float32(1)
++q32 = f32 * u.km
++print(f"np.float32(1) dtype: {f32.dtype}")
++print(f"(np.float32(1) * u.km) dtype: {q32.dtype}")
++
++# float64
++f64 = np.float64(1)
++q64 = f64 * u.km
++print(f"np.float64(1) dtype: {f64.dtype}")
++print(f"(np.float64(1) * u.km) dtype: {q64.dtype}")
++
++# float128 (if available)
++try:
++    f128 = np.float128(1)
++    q128 = f128 * u.km
++    print(f"np.float128(1) dtype: {f128.dtype}")
++    print(f"(np.float128(1) * u.km) dtype: {q128.dtype}")
++except AttributeError:
++    print("float128 not available on this platform")
++
++# Also test with Quantity constructor directly
++print("\nTesting Quantity constructor directly:")
++print("-" * 30)
++q16_direct = u.Quantity(np.float16(1), u.km)
++print(f"u.Quantity(np.float16(1), u.km) dtype: {q16_direct.dtype}")
+diff --git a/test_can_cast.py b/test_can_cast.py
+new file mode 100644
+index 0000000000..7774f97746
+--- /dev/null
++++ b/test_can_cast.py
+@@ -0,0 +1,14 @@
++import numpy as np
++
++# Test np.can_cast behavior
++print("Testing np.can_cast(np.float32, dtype):")
++print(f"float16: {np.can_cast(np.float32, np.float16)}")
++print(f"float32: {np.can_cast(np.float32, np.float32)}")
++print(f"float64: {np.can_cast(np.float32, np.float64)}")
++print(f"float128: {np.can_cast(np.float32, np.float128)}")
++
++print("\nTesting np.can_cast(dtype, np.float32):")
++print(f"float16: {np.can_cast(np.float16, np.float32)}")
++print(f"float32: {np.can_cast(np.float32, np.float32)}")
++print(f"float64: {np.can_cast(np.float64, np.float32)}")
++print(f"float128: {np.can_cast(np.float128, np.float32)}")
+diff --git a/test_complex_dtype.py b/test_complex_dtype.py
+new file mode 100644
+index 0000000000..80fd8ff927
+--- /dev/null
++++ b/test_complex_dtype.py
+@@ -0,0 +1,10 @@
++import numpy as np
++
++# Test complex dtypes
++complex_types = [np.complex64, np.complex128]
++
++for ctype in complex_types:
++    val = np.array([1+2j], dtype=ctype)
++    print(f"{ctype.__name__}:")
++    print(f"  dtype.kind: {val.dtype.kind}")
++    print(f"  dtype.kind == 'c': {val.dtype.kind == 'c'}")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..4a8606cc70
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,60 @@
++import numpy as np
++import astropy.units as u
++
++def test_dtype_preservation():
++    """Test that various dtypes are preserved when creating Quantities."""
++    
++    # Test floating point types
++    float_types = [np.float16, np.float32, np.float64]
++    if hasattr(np, 'float128'):
++        float_types.append(np.float128)
++    
++    print("Testing floating point types:")
++    for ftype in float_types:
++        val = ftype(1.5)
++        q = val * u.km
++        assert q.dtype == val.dtype, f"Failed for {ftype}: expected {val.dtype}, got {q.dtype}"
++        print(f"  {ftype.__name__}: OK (preserved)")
++    
++    # Test integer types (should be converted to float)
++    int_types = [np.int8, np.int16, np.int32, np.int64]
++    print("\nTesting integer types (should convert to float):")
++    for itype in int_types:
++        val = itype(1)
++        q = val * u.km
++        assert q.dtype == np.float64, f"Failed for {itype}: expected float64, got {q.dtype}"
++        print(f"  {itype.__name__}: OK (converted to float64)")
++    
++    # Test bool (should be converted to float)
++    print("\nTesting bool (should convert to float):")
++    val = np.bool_(True)
++    q = val * u.km
++    assert q.dtype == np.float64, f"Failed for bool: expected float64, got {q.dtype}"
++    print(f"  bool_: OK (converted to float64)")
++    
++    # Test complex types (should be preserved)
++    complex_types = [np.complex64, np.complex128]
++    print("\nTesting complex types:")
++    for ctype in complex_types:
++        val = ctype(1+2j)
++        q = val * u.km
++        assert q.dtype == val.dtype, f"Failed for {ctype}: expected {val.dtype}, got {q.dtype}"
++        print(f"  {ctype.__name__}: OK (preserved)")
++    
++    # Test with explicit dtype parameter
++    print("\nTesting explicit dtype parameter:")
++    q = u.Quantity(np.float16(1), u.km, dtype=np.float32)
++    assert q.dtype == np.float32, f"Failed with explicit dtype: expected float32, got {q.dtype}"
++    print("  float16 -> float32: OK")
++    
++    # Test arrays
++    print("\nTesting arrays:")
++    arr16 = np.array([1, 2, 3], dtype=np.float16)
++    q16 = arr16 * u.km
++    assert q16.dtype == np.float16, f"Failed for float16 array: expected float16, got {q16.dtype}"
++    print("  float16 array: OK (preserved)")
++    
++    print("\nAll tests passed!")
++
++if __name__ == "__main__":
++    test_dtype_preservation()
+diff --git a/test_dtype_check.py b/test_dtype_check.py
+new file mode 100644
+index 0000000000..edc27668af
+--- /dev/null
++++ b/test_dtype_check.py
+@@ -0,0 +1,14 @@
++import numpy as np
++
++# Test different ways to check if dtype is floating point
++dtypes = [np.float16, np.float32, np.float64, np.float128, np.int32, np.bool_]
++
++print("Testing different methods to check if dtype is floating point:")
++print("-" * 60)
++
++for dtype in dtypes:
++    arr = np.array([1], dtype=dtype)
++    print(f"\ndtype: {dtype}")
++    print(f"  kind == 'f': {arr.dtype.kind == 'f'}")
++    print(f"  np.issubdtype(dtype, np.floating): {np.issubdtype(arr.dtype, np.floating)}")
++    print(f"  np.can_cast(np.float32, dtype): {np.can_cast(np.float32, arr.dtype)}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..35a64e20b3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,52 @@
++"""Test edge cases for dtype preservation fix."""
++import numpy as np
++import astropy.units as u
++
++
++def test_edge_cases():
++    """Test edge cases for dtype preservation."""
++    
++    # Test structured array (should preserve)
++    dt = np.dtype([('x', np.float16), ('y', np.float32)])
++    arr = np.array([(1.0, 2.0)], dtype=dt)
++    q = arr * u.km
++    assert q.dtype == dt, f"Expected {dt}, got {q.dtype}"
++    print("Structured array: OK")
++    
++    # Test object dtype (should convert to float - original behavior)
++    obj_arr = np.array([1, 2, 3], dtype=object)
++    q_obj = obj_arr * u.km
++    assert q_obj.dtype == np.float64, f"Expected float64, got {q_obj.dtype}"
++    print("Object dtype conversion: OK")
++    
++    # Test that integers still get converted to float
++    int_arr = np.array([1, 2, 3], dtype=np.int32)
++    q_int = int_arr * u.km
++    assert q_int.dtype == np.float64, f"Expected float64, got {q_int.dtype}"
++    print("Integer conversion: OK")
++    
++    # Test bool conversion
++    bool_arr = np.array([True, False], dtype=bool)
++    q_bool = bool_arr * u.km
++    assert q_bool.dtype == np.float64, f"Expected float64, got {q_bool.dtype}"
++    print("Bool conversion: OK")
++    
++    # Test all float types
++    for ftype in [np.float16, np.float32, np.float64]:
++        arr = np.array([1.5], dtype=ftype)
++        q = arr * u.km
++        assert q.dtype == ftype, f"Expected {ftype}, got {q.dtype}"
++    print("All float types preserved: OK")
++    
++    # Test complex types
++    for ctype in [np.complex64, np.complex128]:
++        arr = np.array([1+2j], dtype=ctype)
++        q = arr * u.km
++        assert q.dtype == ctype, f"Expected {ctype}, got {q.dtype}"
++    print("All complex types preserved: OK")
++    
++    print("\nAll edge case tests passed!")
++
++
++if __name__ == "__main__":
++    test_edge_cases()
+diff --git a/test_float16_fix.py b/test_float16_fix.py
+new file mode 100644
+index 0000000000..9a1fd80629
+--- /dev/null
++++ b/test_float16_fix.py
+@@ -0,0 +1,30 @@
++"""Test to ensure float16 dtype is preserved in Quantity creation."""
++import numpy as np
++import astropy.units as u
++
++
++def test_float16_dtype_preserved():
++    """Test that float16 dtype is preserved when creating Quantities."""
++    # Test scalar
++    f16_scalar = np.float16(1.5)
++    q16_scalar = f16_scalar * u.km
++    assert q16_scalar.dtype == np.float16, f"Expected float16, got {q16_scalar.dtype}"
++    
++    # Test array
++    f16_array = np.array([1.0, 2.0, 3.0], dtype=np.float16)
++    q16_array = f16_array * u.km
++    assert q16_array.dtype == np.float16, f"Expected float16, got {q16_array.dtype}"
++    
++    # Test Quantity constructor directly
++    q16_direct = u.Quantity(np.float16(1.5), u.km)
++    assert q16_direct.dtype == np.float16, f"Expected float16, got {q16_direct.dtype}"
++    
++    # Test that explicit dtype parameter still works
++    q16_to_32 = u.Quantity(np.float16(1.5), u.km, dtype=np.float32)
++    assert q16_to_32.dtype == np.float32, f"Expected float32, got {q16_to_32.dtype}"
++    
++    print("All float16 tests passed!")
++
++
++if __name__ == "__main__":
++    test_float16_dtype_preserved()
+diff --git a/test_float16_quantity_to_quantity.py b/test_float16_quantity_to_quantity.py
+new file mode 100644
+index 0000000000..f821b5eae9
+--- /dev/null
++++ b/test_float16_quantity_to_quantity.py
+@@ -0,0 +1,27 @@
++"""Test float16 preservation when creating Quantity from another Quantity."""
++import numpy as np
++import astropy.units as u
++
++
++def test_float16_quantity_to_quantity():
++    """Test that float16 dtype is preserved when creating Quantity from Quantity."""
++    # Create a float16 quantity
++    q16 = u.Quantity(np.float16(1.5), u.km)
++    
++    # Create a new quantity from it without unit conversion
++    q16_copy = u.Quantity(q16)
++    assert q16_copy.dtype == np.float16, f"Expected float16, got {q16_copy.dtype}"
++    
++    # Create with copy=True (default)
++    q16_copy2 = u.Quantity(q16, copy=True)
++    assert q16_copy2.dtype == np.float16, f"Expected float16, got {q16_copy2.dtype}"
++    
++    # Create with copy=False
++    q16_nocopy = u.Quantity(q16, copy=False)
++    assert q16_nocopy.dtype == np.float16, f"Expected float16, got {q16_nocopy.dtype}"
++    
++    print("All float16 quantity-to-quantity tests passed!")
++
++
++if __name__ == "__main__":
++    test_float16_quantity_to_quantity()
+diff --git a/test_problem_statement.py b/test_problem_statement.py
+new file mode 100644
+index 0000000000..ea8bc44ae9
+--- /dev/null
++++ b/test_problem_statement.py
+@@ -0,0 +1,58 @@
++"""Test the exact behavior described in the problem statement."""
++import numpy as np
++import astropy.units as u
++
++
++def test_problem_statement():
++    """Test the exact examples from the problem statement."""
++    
++    print("Testing examples from problem statement:")
++    print("=" * 50)
++    
++    # Test float16
++    print("np.float16(1):", np.float16(1))
++    q16 = np.float16(1) * u.km
++    print("(np.float16(1) * u.km):", q16)
++    print("(np.float16(1) * u.km).dtype:", q16.dtype)
++    assert q16.dtype == np.float16, f"float16 not preserved! Got {q16.dtype}"
++    print("✓ float16 is now preserved (was float64 before fix)")
++    
++    print("\nTesting other float types remain unchanged:")
++    print("-" * 40)
++    
++    # Test float32
++    q32 = np.float32(1) * u.km
++    print(f"(np.float32(1) * u.km).dtype: {q32.dtype}")
++    assert q32.dtype == np.float32
++    
++    # Test float64
++    q64 = np.float64(1) * u.km
++    print(f"(np.float64(1) * u.km).dtype: {q64.dtype}")
++    assert q64.dtype == np.float64
++    
++    # Test float128
++    try:
++        q128 = np.float128(1) * u.km
++        print(f"(np.float128(1) * u.km).dtype: {q128.dtype}")
++        assert q128.dtype == np.float128
++    except AttributeError:
++        print("float128 not available on this platform")
++    
++    # Test float (should be float64)
++    try:
++        qf = np.float(1) * u.km
++        print(f"(np.float(1) * u.km).dtype: {qf.dtype}")
++        assert qf.dtype == np.float64
++    except AttributeError:
++        print("np.float is deprecated in newer numpy versions")
++    
++    # Test float_ (should be float64)
++    qf_ = np.float_(1) * u.km
++    print(f"(np.float_(1) * u.km).dtype: {qf_.dtype}")
++    assert qf_.dtype == np.float64
++    
++    print("\n✓ All tests pass! float16 is now preserved like other float types.")
++
++
++if __name__ == "__main__":
++    test_problem_statement()

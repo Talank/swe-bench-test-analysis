@@ -1,0 +1,509 @@
+diff --git a/IMPLEMENTATION_SUMMARY.md b/IMPLEMENTATION_SUMMARY.md
+new file mode 100644
+index 0000000000..e7eef083b8
+--- /dev/null
++++ b/IMPLEMENTATION_SUMMARY.md
+@@ -0,0 +1,52 @@
++# Implementation Summary: Reduce AddIndex/RemoveIndex Migration Operations
++
++## Problem Statement
++The Django migration optimizer was not reducing AddIndex/RemoveIndex operations when they could be optimized away.
++
++## Solution
++Added `reduce` methods to both `AddIndex` and `RemoveIndex` classes in `/testbed/django/db/migrations/operations/models.py`:
++
++### 1. AddIndex.reduce()
++- When followed by a `RemoveIndex` operation on the same model with the same index name, the operations cancel each other out and return an empty list `[]`.
++- When followed by another `AddIndex` operation on the same model, it returns `True` to allow the operation to pass through, enabling optimization with `RemoveIndex` operations that come later.
++
++### 2. RemoveIndex.reduce()
++- Simply calls the parent class's reduce method, as RemoveIndex doesn't need special reduction logic.
++
++## Key Changes
++
++1. **AddIndex.reduce() method** (lines 865-878):
++   ```python
++   def reduce(self, operation, app_label):
++       if (
++           isinstance(operation, RemoveIndex)
++           and self.model_name_lower == operation.model_name_lower
++           and self.index.name == operation.name
++       ):
++           # AddIndex followed by RemoveIndex with same index name can be reduced to nothing
++           return []
++       # Allow AddIndex to pass through other AddIndex operations on the same model
++       # so it can potentially be optimized with a RemoveIndex later
++       if (
++           isinstance(operation, AddIndex)
++           and self.model_name_lower == operation.model_name_lower
++       ):
++           return True
++       return super().reduce(operation, app_label)
++   ```
++
++2. **RemoveIndex.reduce() method** (lines 917-919):
++   ```python
++   def reduce(self, operation, app_label):
++       # RemoveIndex can't reduce with anything that follows it
++       return super().reduce(operation, app_label)
++   ```
++
++## Behavior
++- `AddIndex` followed by `RemoveIndex` with the same index name on the same model: **Optimized to nothing**
++- `RemoveIndex` followed by `AddIndex`: **Not optimized** (they remain separate operations)
++- Multiple `AddIndex` operations followed by corresponding `RemoveIndex` operations: **All optimized away**
++- Operations on different models or with different index names: **Not optimized**
++
++## Testing
++All existing Django migration tests pass, and the new optimization behavior is covered by tests in the test suite.
+diff --git a/django/db/migrations/operations/models.py b/django/db/migrations/operations/models.py
+index 967a91fdc8..3223dc1531 100644
+--- a/django/db/migrations/operations/models.py
++++ b/django/db/migrations/operations/models.py
+@@ -861,6 +861,23 @@ class AddIndex(IndexOperation):
+     def migration_name_fragment(self):
+         return "%s_%s" % (self.model_name_lower, self.index.name.lower())
+ 
++    def reduce(self, operation, app_label):
++        if (
++            isinstance(operation, RemoveIndex)
++            and self.model_name_lower == operation.model_name_lower
++            and self.index.name == operation.name
++        ):
++            # AddIndex followed by RemoveIndex with same index name can be reduced to nothing
++            return []
++        # Allow AddIndex to pass through other AddIndex operations on the same model
++        # so it can potentially be optimized with a RemoveIndex later
++        if (
++            isinstance(operation, AddIndex)
++            and self.model_name_lower == operation.model_name_lower
++        ):
++            return True
++        return super().reduce(operation, app_label)
++
+ 
+ class RemoveIndex(IndexOperation):
+     """Remove an index from a model."""
+@@ -904,6 +921,10 @@ class RemoveIndex(IndexOperation):
+     def migration_name_fragment(self):
+         return "remove_%s_%s" % (self.model_name_lower, self.name.lower())
+ 
++    def reduce(self, operation, app_label):
++        # RemoveIndex can't reduce with anything that follows it
++        return super().reduce(operation, app_label)
++
+ 
+ class RenameIndex(IndexOperation):
+     """Rename an index."""
+diff --git a/test_field_optimization_comparison.py b/test_field_optimization_comparison.py
+new file mode 100644
+index 0000000000..0dacc22436
+--- /dev/null
++++ b/test_field_optimization_comparison.py
+@@ -0,0 +1,49 @@
++"""Compare AddField/RemoveField optimization with AddIndex/RemoveIndex"""
++
++from django.db import models
++from django.db.migrations.operations.models import CreateModel, AddField, RemoveField
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def test_add_remove_field():
++    """Test how AddField/RemoveField behaves with multiple operations"""
++    operations = [
++        CreateModel("TestModel", []),
++        AddField('TestModel', 'field1', models.CharField(max_length=255)),
++        AddField('TestModel', 'field2', models.CharField(max_length=255)),
++        RemoveField('TestModel', 'field1'),
++        RemoveField('TestModel', 'field2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - Multiple AddField/RemoveField operations:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++def test_interleaved_field_operations():
++    """Test interleaved AddField/RemoveField"""
++    operations = [
++        CreateModel("TestModel", []),
++        AddField('TestModel', 'field1', models.CharField(max_length=255)),
++        RemoveField('TestModel', 'field1'),
++        AddField('TestModel', 'field2', models.CharField(max_length=255)),
++        RemoveField('TestModel', 'field2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - Interleaved AddField/RemoveField operations:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++if __name__ == '__main__':
++    print("Testing AddField/RemoveField optimization for comparison...")
++    print("=" * 60)
++    test_add_remove_field()
++    test_interleaved_field_operations()
+diff --git a/test_index_optimization.py b/test_index_optimization.py
+new file mode 100644
+index 0000000000..94c9927fb7
+--- /dev/null
++++ b/test_index_optimization.py
+@@ -0,0 +1,85 @@
++"""Test script for AddIndex/RemoveIndex optimization"""
++
++from django.db import models
++from django.db.migrations.operations.models import AddIndex, RemoveIndex
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Test 1: AddIndex followed by RemoveIndex with same index name should be reduced to nothing
++def test_add_remove_same_index():
++    index = models.Index(fields=['field1'], name='test_index')
++    operations = [
++        AddIndex('TestModel', index),
++        RemoveIndex('TestModel', 'test_index'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test 1 - AddIndex followed by RemoveIndex:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 0 operations")
++    print(f"  Result: {'PASS' if len(result) == 0 else 'FAIL'}")
++    print()
++
++# Test 2: RemoveIndex followed by AddIndex with same index should be kept (they're different operations)
++def test_remove_add_same_index():
++    index = models.Index(fields=['field1'], name='test_index')
++    operations = [
++        RemoveIndex('TestModel', 'test_index'),
++        AddIndex('TestModel', index),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test 2 - RemoveIndex followed by AddIndex:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 2 operations (no reduction)")
++    print(f"  Result: {'PASS' if len(result) == 2 else 'FAIL'}")
++    print()
++
++# Test 3: AddIndex with different models should not be reduced
++def test_add_remove_different_models():
++    index1 = models.Index(fields=['field1'], name='test_index')
++    operations = [
++        AddIndex('TestModel1', index1),
++        RemoveIndex('TestModel2', 'test_index'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test 3 - AddIndex/RemoveIndex on different models:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 2 operations (no reduction)")
++    print(f"  Result: {'PASS' if len(result) == 2 else 'FAIL'}")
++    print()
++
++# Test 4: AddIndex with different index names should not be reduced
++def test_add_remove_different_names():
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    operations = [
++        AddIndex('TestModel', index1),
++        RemoveIndex('TestModel', 'test_index2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test 4 - AddIndex/RemoveIndex with different index names:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 2 operations (no reduction)")
++    print(f"  Result: {'PASS' if len(result) == 2 else 'FAIL'}")
++    print()
++
++if __name__ == '__main__':
++    print("Testing AddIndex/RemoveIndex optimization...")
++    print("=" * 50)
++    test_add_remove_same_index()
++    test_remove_add_same_index()
++    test_add_remove_different_models()
++    test_add_remove_different_names()
+diff --git a/test_index_optimization_edge_cases.py b/test_index_optimization_edge_cases.py
+new file mode 100644
+index 0000000000..307cd24b26
+--- /dev/null
++++ b/test_index_optimization_edge_cases.py
+@@ -0,0 +1,118 @@
++"""Test edge cases for AddIndex/RemoveIndex optimization"""
++
++from django.db import models
++from django.db.migrations.operations.models import AddIndex, RemoveIndex, CreateModel, DeleteModel
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def test_add_remove_with_create_delete_model():
++    """Test that AddIndex/RemoveIndex optimization works with CreateModel/DeleteModel"""
++    index = models.Index(fields=['field1'], name='test_index')
++    operations = [
++        CreateModel("TestModel", [("field1", models.CharField(max_length=255))]),
++        AddIndex('TestModel', index),
++        RemoveIndex('TestModel', 'test_index'),
++        DeleteModel('TestModel'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - AddIndex/RemoveIndex with CreateModel/DeleteModel:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 0 operations (all should collapse)")
++    print(f"  Result: {'PASS' if len(result) == 0 else 'FAIL'}")
++    if result:
++        print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++def test_multiple_indexes():
++    """Test optimization with multiple indexes"""
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    index2 = models.Index(fields=['field2'], name='test_index2')
++    operations = [
++        CreateModel("TestModel", [
++            ("field1", models.CharField(max_length=255)),
++            ("field2", models.CharField(max_length=255))
++        ]),
++        AddIndex('TestModel', index1),
++        AddIndex('TestModel', index2),
++        RemoveIndex('TestModel', 'test_index1'),
++        RemoveIndex('TestModel', 'test_index2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - Multiple AddIndex/RemoveIndex operations:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 1 operation (CreateModel only)")
++    print(f"  Result: {'PASS' if len(result) == 1 and result[0].__class__.__name__ == 'CreateModel' else 'FAIL'}")
++    if result:
++        print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++def test_interleaved_operations():
++    """Test optimization with interleaved operations"""
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    index2 = models.Index(fields=['field2'], name='test_index2')
++    operations = [
++        CreateModel("TestModel", [
++            ("field1", models.CharField(max_length=255)),
++            ("field2", models.CharField(max_length=255))
++        ]),
++        AddIndex('TestModel', index1),
++        RemoveIndex('TestModel', 'test_index1'),
++        AddIndex('TestModel', index2),
++        RemoveIndex('TestModel', 'test_index2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - Interleaved AddIndex/RemoveIndex operations:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 1 operation (CreateModel only)")
++    print(f"  Result: {'PASS' if len(result) == 1 and result[0].__class__.__name__ == 'CreateModel' else 'FAIL'}")
++    if result:
++        print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++def test_partial_optimization():
++    """Test partial optimization - some indexes remain"""
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    index2 = models.Index(fields=['field2'], name='test_index2')
++    index3 = models.Index(fields=['field3'], name='test_index3')
++    operations = [
++        CreateModel("TestModel", [
++            ("field1", models.CharField(max_length=255)),
++            ("field2", models.CharField(max_length=255)),
++            ("field3", models.CharField(max_length=255))
++        ]),
++        AddIndex('TestModel', index1),
++        AddIndex('TestModel', index2),
++        RemoveIndex('TestModel', 'test_index1'),
++        AddIndex('TestModel', index3),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print("Test - Partial optimization:")
++    print(f"  Original: {len(operations)} operations")
++    print(f"  Optimized: {len(result)} operations")
++    print(f"  Expected: 3 operations (CreateModel, AddIndex for index2 and index3)")
++    print(f"  Result: {'PASS' if len(result) == 3 else 'FAIL'}")
++    if result:
++        print(f"  Remaining operations: {[op.__class__.__name__ for op in result]}")
++    print()
++
++if __name__ == '__main__':
++    print("Testing AddIndex/RemoveIndex optimization edge cases...")
++    print("=" * 60)
++    test_add_remove_with_create_delete_model()
++    test_multiple_indexes()
++    test_interleaved_operations()
++    test_partial_optimization()
+diff --git a/test_index_passthrough.py b/test_index_passthrough.py
+new file mode 100644
+index 0000000000..7e24a131e8
+--- /dev/null
++++ b/test_index_passthrough.py
+@@ -0,0 +1,28 @@
++"""Test if AddIndex operations can pass through each other"""
++
++from django.db import models
++from django.db.migrations.operations.models import AddIndex, RemoveIndex
++
++def test_passthrough():
++    """Test if AddIndex can pass through another AddIndex"""
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    index2 = models.Index(fields=['field2'], name='test_index2')
++    
++    add1 = AddIndex('TestModel', index1)
++    add2 = AddIndex('TestModel', index2)
++    remove1 = RemoveIndex('TestModel', 'test_index1')
++    
++    # Test if add1 can reduce with add2
++    result1 = add1.reduce(add2, 'testapp')
++    print(f"add1.reduce(add2) = {result1}")
++    
++    # Test if add1 can reduce with remove1
++    result2 = add1.reduce(remove1, 'testapp')
++    print(f"add1.reduce(remove1) = {result2}")
++    
++    # Test if add2 can pass through for add1 to reach remove1
++    result3 = add2.reduce(remove1, 'testapp')
++    print(f"add2.reduce(remove1) = {result3}")
++
++if __name__ == '__main__':
++    test_passthrough()
+diff --git a/test_optimizer_passes.py b/test_optimizer_passes.py
+new file mode 100644
+index 0000000000..7502be663d
+--- /dev/null
++++ b/test_optimizer_passes.py
+@@ -0,0 +1,45 @@
++"""Test to see how many passes the optimizer makes"""
++
++from django.db import models
++from django.db.migrations.operations.models import AddIndex, RemoveIndex, CreateModel
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def test_optimizer_passes():
++    """Test how many passes the optimizer makes"""
++    index1 = models.Index(fields=['field1'], name='test_index1')
++    index2 = models.Index(fields=['field2'], name='test_index2')
++    
++    operations = [
++        CreateModel("TestModel", [
++            ("field1", models.CharField(max_length=255)),
++            ("field2", models.CharField(max_length=255))
++        ]),
++        AddIndex('TestModel', index1),
++        AddIndex('TestModel', index2),
++        RemoveIndex('TestModel', 'test_index1'),
++        RemoveIndex('TestModel', 'test_index2'),
++    ]
++    
++    optimizer = MigrationOptimizer()
++    result = optimizer.optimize(operations, 'testapp')
++    
++    print(f"Original operations: {len(operations)}")
++    print(f"Optimized operations: {len(result)}")
++    print(f"Number of optimizer passes: {optimizer._iterations}")
++    print(f"Remaining operations: {[op.__class__.__name__ for op in result]}")
++    
++    # Let's trace what happens in each pass
++    print("\nManual step-by-step optimization:")
++    current_ops = operations[:]
++    pass_num = 1
++    while True:
++        new_ops = optimizer.optimize_inner(current_ops, 'testapp')
++        print(f"Pass {pass_num}: {len(current_ops)} -> {len(new_ops)} operations")
++        print(f"  Operations: {[op.__class__.__name__ for op in new_ops]}")
++        if new_ops == current_ops:
++            break
++        current_ops = new_ops
++        pass_num += 1
++
++if __name__ == '__main__':
++    test_optimizer_passes()
+diff --git a/tests/migrations/test_optimizer.py b/tests/migrations/test_optimizer.py
+index 8cd4c67fbd..3c6567ba9e 100644
+--- a/tests/migrations/test_optimizer.py
++++ b/tests/migrations/test_optimizer.py
+@@ -1158,3 +1158,52 @@ class OptimizerTests(SimpleTestCase):
+                 ),
+             ]
+         )
++
++    def test_add_remove_index(self):
++        """
++        AddIndex and RemoveIndex should collapse into nothing when index names match.
++        """
++        index = models.Index(fields=["weight", "pink"], name="test_index")
++        self.assertOptimizesTo(
++            [
++                migrations.AddIndex("Pony", index),
++                migrations.RemoveIndex("Pony", "test_index"),
++            ],
++            [],
++        )
++
++    def test_add_remove_index_different_names(self):
++        """
++        AddIndex and RemoveIndex should not collapse when index names differ.
++        """
++        index = models.Index(fields=["weight", "pink"], name="test_index_1")
++        self.assertDoesNotOptimize(
++            [
++                migrations.AddIndex("Pony", index),
++                migrations.RemoveIndex("Pony", "test_index_2"),
++            ]
++        )
++
++    def test_add_remove_index_different_models(self):
++        """
++        AddIndex and RemoveIndex should not collapse when model names differ.
++        """
++        index = models.Index(fields=["weight", "pink"], name="test_index")
++        self.assertDoesNotOptimize(
++            [
++                migrations.AddIndex("Pony", index),
++                migrations.RemoveIndex("Horse", "test_index"),
++            ]
++        )
++
++    def test_remove_add_index(self):
++        """
++        RemoveIndex followed by AddIndex should not be optimized.
++        """
++        index = models.Index(fields=["weight", "pink"], name="test_index")
++        self.assertDoesNotOptimize(
++            [
++                migrations.RemoveIndex("Pony", "test_index"),
++                migrations.AddIndex("Pony", index),
++            ]
++        )

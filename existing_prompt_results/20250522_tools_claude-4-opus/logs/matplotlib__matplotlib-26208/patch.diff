@@ -1,0 +1,639 @@
+diff --git a/debug_autoscale.py b/debug_autoscale.py
+new file mode 100644
+index 0000000000..6d7ffb45aa
+--- /dev/null
++++ b/debug_autoscale.py
+@@ -0,0 +1,45 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++# Monkey patch autoscale_view to debug
++original_autoscale_view = plt.Axes.autoscale_view
++
++def debug_autoscale_view(self, tight=None, scalex=True, scaley=True):
++    print(f"\n=== autoscale_view called on {self} ===")
++    print(f"  scalex={scalex}, scaley={scaley}")
++    print(f"  self.dataLim.intervaly = {self.dataLim.intervaly}")
++    
++    # Check shared axes
++    if scaley:
++        print(f"  Shared y-axes siblings:")
++        for ax in self._shared_axes["y"].get_siblings(self):
++            print(f"    {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
++    
++    # Call original
++    result = original_autoscale_view(self, tight=tight, scalex=scalex, scaley=scaley)
++    
++    print(f"  After autoscale: self.dataLim.intervaly = {self.dataLim.intervaly}")
++    return result
++
++plt.Axes.autoscale_view = debug_autoscale_view
++
++# Original test
++df1_index = ['16 May', '17 May']
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++print("Creating stackplot on ax1...")
++ax1.stackplot(df1_index, df1_values)
++print(f"After stackplot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++
++print("\nCreating twinx...")
++ax2 = ax1.twinx()
++print(f"After twinx: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After twinx: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++print("\nPlotting on ax2...")
++ax2.plot(df1_index, df2_values)
++print(f"After plot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After plot: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
+diff --git a/debug_datalim_change.py b/debug_datalim_change.py
+new file mode 100644
+index 0000000000..6bebe9da3a
+--- /dev/null
++++ b/debug_datalim_change.py
+@@ -0,0 +1,55 @@
++import matplotlib.pyplot as plt
++import matplotlib.transforms as mtransforms
++import numpy as np
++
++# Monkey patch Bbox to track changes
++original_set_points = mtransforms.Bbox.set_points
++
++def debug_set_points(self, points):
++    if hasattr(self, '_owner_ax'):
++        old_y = self.intervaly.copy()
++        result = original_set_points(self, points)
++        new_y = self.intervaly
++        if not np.array_equal(old_y, new_y):
++            print(f"\n!!! dataLim changed for {self._owner_ax} !!!")
++            print(f"    Old intervaly: {old_y}")
++            print(f"    New intervaly: {new_y}")
++            import traceback
++            traceback.print_stack()
++        return result
++    else:
++        return original_set_points(self, points)
++
++mtransforms.Bbox.set_points = debug_set_points
++
++# Monkey patch axes creation to track owner
++original_set_figure = plt.Axes.set_figure
++
++def debug_set_figure(self, fig):
++    result = original_set_figure(self, fig)
++    if hasattr(self, 'dataLim'):
++        self.dataLim._owner_ax = self
++    return result
++
++plt.Axes.set_figure = debug_set_figure
++
++# Original test
++df1_index = ['16 May', '17 May']
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++print("Creating stackplot on ax1...")
++ax1.stackplot(df1_index, df1_values)
++print(f"After stackplot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++
++print("\nCreating twinx...")
++ax2 = ax1.twinx()
++print(f"After twinx: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After twinx: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++print("\nPlotting on ax2...")
++ax2.plot(df1_index, df2_values)
++print(f"After plot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After plot: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
+diff --git a/debug_handle_axis.py b/debug_handle_axis.py
+new file mode 100644
+index 0000000000..60254ffdba
+--- /dev/null
++++ b/debug_handle_axis.py
+@@ -0,0 +1,139 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++# Monkey patch autoscale_view to debug
++original_autoscale_view = plt.Axes.autoscale_view
++
++def debug_autoscale_view(self, tight=None, scalex=True, scaley=True):
++    print(f"\n=== autoscale_view called on {self} ===")
++    print(f"  scalex={scalex}, scaley={scaley}")
++    print(f"  self.dataLim.intervaly = {self.dataLim.intervaly}")
++    
++    if tight is not None:
++        self._tight = bool(tight)
++
++    x_stickies = y_stickies = np.array([])
++    if self.use_sticky_edges:
++        if self._xmargin and scalex and self.get_autoscalex_on():
++            x_stickies = np.sort(np.concatenate([
++                artist.sticky_edges.x
++                for ax in self._shared_axes["x"].get_siblings(self)
++                for artist in ax.get_children()]))
++        if self._ymargin and scaley and self.get_autoscaley_on():
++            y_stickies = np.sort(np.concatenate([
++                artist.sticky_edges.y
++                for ax in self._shared_axes["y"].get_siblings(self)
++                for artist in ax.get_children()]))
++    if self.get_xscale() == 'log':
++        x_stickies = x_stickies[x_stickies > 0]
++    if self.get_yscale() == 'log':
++        y_stickies = y_stickies[y_stickies > 0]
++
++    def handle_single_axis(
++            scale, shared_axes, name, axis, margin, stickies, set_bound):
++
++        if not (scale and axis._get_autoscale_on()):
++            return  # nothing to do...
++
++        print(f"\n  === handle_single_axis for {name}-axis ===")
++        shared = shared_axes.get_siblings(self)
++        print(f"    Shared siblings: {shared}")
++        
++        # Base autoscaling on finite data limits when there is at least one
++        # finite data limit among all the shared_axes and intervals.
++        values = [val for ax in shared
++                  for val in getattr(ax.dataLim, f"interval{name}")
++                  if np.isfinite(val)]
++        print(f"    Values from siblings: {values}")
++        
++        if values:
++            x0, x1 = (min(values), max(values))
++        elif getattr(self._viewLim, f"mutated{name}")():
++            # No data, but explicit viewLims already set:
++            # in mutatedx or mutatedy.
++            return
++        else:
++            x0, x1 = (-np.inf, np.inf)
++        
++        print(f"    Computed bounds: ({x0}, {x1})")
++        
++        # If x0 and x1 are nonfinite, get default limits from the locator.
++        locator = axis.get_major_locator()
++        x0, x1 = locator.nonsingular(x0, x1)
++        # Find the minimum minpos for use in the margin calculation.
++        minimum_minpos = min(
++            getattr(ax.dataLim, f"minpos{name}") for ax in shared)
++
++        # Prevent margin addition from crossing a sticky value.  A small
++        # tolerance must be added due to floating point issues with
++        # streamplot; it is defined relative to x0, x1, x1-x0 but has
++        # no absolute term (e.g. "+1e-8") to avoid issues when working with
++        # datasets where all values are tiny (less than 1e-8).
++        tol = 1e-5 * max(abs(x0), abs(x1), abs(x1 - x0))
++        # Index of largest element < x0 + tol, if any.
++        i0 = stickies.searchsorted(x0 + tol) - 1
++        x0bound = stickies[i0] if i0 != -1 else None
++        # Index of smallest element > x1 - tol, if any.
++        i1 = stickies.searchsorted(x1 - tol)
++        x1bound = stickies[i1] if i1 != len(stickies) else None
++
++        # Add the margin in figure space and then transform back, to handle
++        # non-linear scales.
++        transform = axis.get_transform()
++        inverse_trans = transform.inverted()
++        x0, x1 = axis._scale.limit_range_for_scale(x0, x1, minimum_minpos)
++        x0t, x1t = transform.transform([x0, x1])
++        delta = (x1t - x0t) * margin
++        if not np.isfinite(delta):
++            delta = 0  # If a bound isn't finite, set margin to zero.
++        x0, x1 = inverse_trans.transform([x0t - delta, x1t + delta])
++
++        # Apply sticky bounds.
++        if x0bound is not None:
++            x0 = max(x0, x0bound)
++        if x1bound is not None:
++            x1 = min(x1, x1bound)
++
++        if not self._tight:
++            x0, x1 = locator.view_limits(x0, x1)
++        set_bound(x0, x1)
++        print(f"    Final bounds set: ({x0}, {x1})")
++        # End of definition of internal function 'handle_single_axis'.
++
++    handle_single_axis(
++        scalex, self._shared_axes["x"], 'x', self.xaxis, self._xmargin,
++        x_stickies, self.set_xbound)
++    handle_single_axis(
++        scaley, self._shared_axes["y"], 'y', self.yaxis, self._ymargin,
++        y_stickies, self.set_ybound)
++    
++    print(f"\n  After autoscale: self.dataLim.intervaly = {self.dataLim.intervaly}")
++
++plt.Axes.autoscale_view = debug_autoscale_view
++
++# Original test
++df1_index = ['16 May', '17 May']
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++print("Creating stackplot on ax1...")
++ax1.stackplot(df1_index, df1_values)
++print(f"After stackplot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++
++print("\nCreating twinx...")
++ax2 = ax1.twinx()
++print(f"After twinx: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After twinx: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++print("\nPlotting on ax2...")
++ax2.plot(df1_index, df2_values)
++print(f"After plot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After plot: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++# Force a draw to trigger unstale
++print("\nForcing draw...")
++fig.canvas.draw()
++print(f"After draw: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After draw: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
+diff --git a/debug_shared_axes.py b/debug_shared_axes.py
+new file mode 100644
+index 0000000000..7ecc35c4aa
+--- /dev/null
++++ b/debug_shared_axes.py
+@@ -0,0 +1,43 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++def print_datalim(*ax):
++    for ax_ in ax:
++        print(f"{ax_}: {ax_.dataLim.intervaly}", end=' / ')
++    print()
++
++df1_index = ['16 May', '17 May']  # == df2_index
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++ax1.stackplot(df1_index, df1_values)
++print("After stackplot on ax1:")
++print_datalim(ax1)
++
++ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
++print("\nAfter creating twinx:")
++print_datalim(ax1, ax2)
++
++# Check shared axes
++print("\nShared x-axes siblings:")
++for ax in ax1._shared_axes["x"].get_siblings(ax1):
++    print(f"  {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
++
++print("\nShared y-axes siblings for ax1:")
++for ax in ax1._shared_axes["y"].get_siblings(ax1):
++    print(f"  {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
++    
++print("\nShared y-axes siblings for ax2:")
++for ax in ax2._shared_axes["y"].get_siblings(ax2):
++    print(f"  {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
++
++ax2.plot(df1_index, df2_values)
++print("\nAfter plot on ax2:")
++print_datalim(ax1, ax2)
++
++# Check shared axes again
++print("\nShared x-axes siblings after plot:")
++for ax in ax1._shared_axes["x"].get_siblings(ax1):
++    print(f"  {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
+diff --git a/debug_unstale.py b/debug_unstale.py
+new file mode 100644
+index 0000000000..d457ca7693
+--- /dev/null
++++ b/debug_unstale.py
+@@ -0,0 +1,56 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++# Monkey patch _unstale_viewLim to debug
++original_unstale_viewLim = plt.Axes._unstale_viewLim
++
++def debug_unstale_viewLim(self):
++    print(f"\n=== _unstale_viewLim called on {self} ===")
++    print(f"  self.dataLim.intervaly = {self.dataLim.intervaly}")
++    
++    # Check stale viewlims
++    print(f"  _stale_viewlims = {self._stale_viewlims}")
++    
++    # Check shared axes
++    print(f"  Shared x-axes siblings:")
++    for ax in self._shared_axes["x"].get_siblings(self):
++        print(f"    {ax}: dataLim.intervaly = {ax.dataLim.intervaly}, _stale_viewlims = {ax._stale_viewlims}")
++    
++    # Call original
++    result = original_unstale_viewLim(self)
++    
++    print(f"  After unstale: self.dataLim.intervaly = {self.dataLim.intervaly}")
++    
++    # Check shared axes again
++    print(f"  Shared x-axes siblings after:")
++    for ax in self._shared_axes["x"].get_siblings(self):
++        print(f"    {ax}: dataLim.intervaly = {ax.dataLim.intervaly}")
++    
++    return result
++
++plt.Axes._unstale_viewLim = debug_unstale_viewLim
++
++# Original test
++df1_index = ['16 May', '17 May']
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++print("Creating stackplot on ax1...")
++ax1.stackplot(df1_index, df1_values)
++print(f"After stackplot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++
++print("\nCreating twinx...")
++ax2 = ax1.twinx()
++print(f"After twinx: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After twinx: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++print("\nPlotting on ax2...")
++ax2.plot(df1_index, df2_values)
++print(f"After plot: ax1.dataLim.intervaly = {ax1.dataLim.intervaly}")
++print(f"After plot: ax2.dataLim.intervaly = {ax2.dataLim.intervaly}")
++
++# Force a draw to trigger unstale
++print("\nForcing draw...")
++fig.canvas.draw()
+diff --git a/lib/matplotlib/axes/_base.py b/lib/matplotlib/axes/_base.py
+index 5203e3232c..79cf6e0454 100644
+--- a/lib/matplotlib/axes/_base.py
++++ b/lib/matplotlib/axes/_base.py
+@@ -2444,7 +2444,25 @@ class _AxesBase(martist.Artist):
+         _api.check_in_list(self._axis_map, axis_name=axis_name)
+         for line in self.lines:
+             line.recache_always()
++        
++        # For shared axes (e.g., twinx/twiny), we only want to reset the dimension
++        # that corresponds to the axis that changed units, not both dimensions.
++        # Store the current limits for the non-affected dimension.
++        if axis_name == 'x':
++            # X-axis changed, preserve Y limits
++            old_ylim = self.dataLim.intervaly.copy() if np.all(np.isfinite(self.dataLim.intervaly)) else None
++        elif axis_name == 'y':
++            # Y-axis changed, preserve X limits  
++            old_xlim = self.dataLim.intervalx.copy() if np.all(np.isfinite(self.dataLim.intervalx)) else None
++        
+         self.relim()
++        
++        # Restore the non-affected dimension if it had finite values
++        if axis_name == 'x' and old_ylim is not None:
++            self.dataLim.intervaly = old_ylim
++        elif axis_name == 'y' and old_xlim is not None:
++            self.dataLim.intervalx = old_xlim
++            
+         self._request_autoscale_view(axis_name)
+ 
+     def relim(self, visible_only=False):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..a8fa8bd151
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,21 @@
++import matplotlib.pyplot as plt
++
++def print_datalim(*ax):
++    for ax_ in ax:
++        print(ax_.dataLim.intervaly, end=' / ')
++    print()
++
++df1_index = ['16 May', '17 May']  # == df2_index
++df1_values = [-22.717708333333402, 26.584999999999937]
++df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++fig, ax1 = plt.subplots()
++
++ax1.stackplot(df1_index, df1_values)
++print_datalim(ax1)
++
++ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
++print_datalim(ax1, ax2)
++
++ax2.plot(df1_index, df2_values)
++print_datalim(ax1, ax2)
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..2606b2e406
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,98 @@
++import matplotlib.pyplot as plt
++import numpy as np
++
++def test_twinx_stackplot_datalim():
++    """Test that dataLims are preserved correctly with twinx and stackplot."""
++    
++    # Test 1: stackplot on ax1, plot on ax2 (the reported issue)
++    print("Test 1: stackplot on ax1, plot on ax2")
++    df1_index = ['16 May', '17 May']
++    df1_values = [-22.717708333333402, 26.584999999999937]
++    df2_values = [-0.08501399999999998, -2.9833019999999966]
++    
++    fig, ax1 = plt.subplots()
++    ax1.stackplot(df1_index, df1_values)
++    ax1_ylim_before = ax1.dataLim.intervaly.copy()
++    print(f"  ax1 dataLim.intervaly before twinx: {ax1_ylim_before}")
++    
++    ax2 = ax1.twinx()
++    ax2.plot(df1_index, df2_values)
++    ax1_ylim_after = ax1.dataLim.intervaly
++    ax2_ylim_after = ax2.dataLim.intervaly
++    
++    print(f"  ax1 dataLim.intervaly after plot on ax2: {ax1_ylim_after}")
++    print(f"  ax2 dataLim.intervaly after plot: {ax2_ylim_after}")
++    
++    # Check that ax1's y limits are preserved
++    assert np.allclose(ax1_ylim_before, ax1_ylim_after), \
++        f"ax1 y limits changed from {ax1_ylim_before} to {ax1_ylim_after}"
++    print("  ✓ ax1 y limits preserved correctly")
++    
++    plt.close(fig)
++    
++    # Test 2: plot on ax1, stackplot on ax2 (mentioned as working in the issue)
++    print("\nTest 2: plot on ax1, stackplot on ax2")
++    fig, ax1 = plt.subplots()
++    ax1.plot(df1_index, df1_values)
++    ax1_ylim_before = ax1.dataLim.intervaly.copy()
++    print(f"  ax1 dataLim.intervaly before twinx: {ax1_ylim_before}")
++    
++    ax2 = ax1.twinx()
++    ax2.stackplot(df1_index, df2_values)
++    ax1_ylim_after = ax1.dataLim.intervaly
++    ax2_ylim_after = ax2.dataLim.intervaly
++    
++    print(f"  ax1 dataLim.intervaly after stackplot on ax2: {ax1_ylim_after}")
++    print(f"  ax2 dataLim.intervaly after stackplot: {ax2_ylim_after}")
++    
++    # Check that ax1's y limits are preserved
++    assert np.allclose(ax1_ylim_before, ax1_ylim_after), \
++        f"ax1 y limits changed from {ax1_ylim_before} to {ax1_ylim_after}"
++    print("  ✓ ax1 y limits preserved correctly")
++    
++    plt.close(fig)
++    
++    # Test 3: twiny case (similar issue should apply)
++    print("\nTest 3: twiny case")
++    fig, ax1 = plt.subplots()
++    ax1.plot([1, 2, 3], [4, 5, 6])
++    ax1_xlim_before = ax1.dataLim.intervalx.copy()
++    print(f"  ax1 dataLim.intervalx before twiny: {ax1_xlim_before}")
++    
++    ax2 = ax1.twiny()
++    ax2.plot([10, 20, 30], [4, 5, 6])
++    ax1_xlim_after = ax1.dataLim.intervalx
++    
++    print(f"  ax1 dataLim.intervalx after plot on ax2: {ax1_xlim_after}")
++    
++    # Check that ax1's x limits are preserved
++    assert np.allclose(ax1_xlim_before, ax1_xlim_after), \
++        f"ax1 x limits changed from {ax1_xlim_before} to {ax1_xlim_after}"
++    print("  ✓ ax1 x limits preserved correctly")
++    
++    plt.close(fig)
++    
++    # Test 4: Numeric data (no unit conversion)
++    print("\nTest 4: Numeric data (no unit conversion)")
++    fig, ax1 = plt.subplots()
++    ax1.stackplot([1, 2], [-22.7, 26.6])
++    ax1_ylim_before = ax1.dataLim.intervaly.copy()
++    
++    ax2 = ax1.twinx()
++    ax2.plot([1, 2], [-0.085, -2.98])
++    ax1_ylim_after = ax1.dataLim.intervaly
++    
++    print(f"  ax1 dataLim.intervaly before: {ax1_ylim_before}")
++    print(f"  ax1 dataLim.intervaly after: {ax1_ylim_after}")
++    
++    # With numeric data, there's no unit conversion, so limits should be preserved
++    assert np.allclose(ax1_ylim_before, ax1_ylim_after), \
++        f"ax1 y limits changed from {ax1_ylim_before} to {ax1_ylim_after}"
++    print("  ✓ ax1 y limits preserved correctly with numeric data")
++    
++    plt.close(fig)
++    
++    print("\nAll tests passed! ✓")
++
++if __name__ == "__main__":
++    test_twinx_stackplot_datalim()
+diff --git a/test_twinx_stackplot_datalim.py b/test_twinx_stackplot_datalim.py
+new file mode 100644
+index 0000000000..579f73430f
+--- /dev/null
++++ b/test_twinx_stackplot_datalim.py
+@@ -0,0 +1,104 @@
++"""Test for the fix of twinx stackplot dataLim issue."""
++
++import matplotlib.pyplot as plt
++import numpy as np
++import pytest
++
++
++def test_twinx_stackplot_preserves_datalim():
++    """Test that ax1's dataLim is preserved when plotting on ax2 after twinx."""
++    # This is the exact scenario from the bug report
++    df1_index = ['16 May', '17 May']
++    df1_values = [-22.717708333333402, 26.584999999999937]
++    df2_values = [-0.08501399999999998, -2.9833019999999966]
++
++    fig, ax1 = plt.subplots()
++    
++    # Create stackplot on ax1
++    ax1.stackplot(df1_index, df1_values)
++    
++    # Store ax1's y-limits before creating twin
++    ax1_ylim_before = ax1.dataLim.intervaly.copy()
++    
++    # Create twin axis
++    ax2 = ax1.twinx()
++    
++    # Plot on ax2 (this triggers unit conversion for categorical x-data)
++    ax2.plot(df1_index, df2_values)
++    
++    # Check that ax1's y-limits are preserved
++    ax1_ylim_after = ax1.dataLim.intervaly
++    
++    # Before the fix, ax1_ylim_after would be [inf, -inf]
++    assert np.allclose(ax1_ylim_before, ax1_ylim_after), \
++        f"ax1 dataLim.intervaly changed from {ax1_ylim_before} to {ax1_ylim_after}"
++    
++    # Also verify the expected values
++    assert np.allclose(ax1_ylim_after, [-22.71770833, 26.585]), \
++        f"Unexpected ax1 dataLim.intervaly: {ax1_ylim_after}"
++    
++    # Verify ax2 has the correct limits
++    assert np.allclose(ax2.dataLim.intervaly, [-2.983302, -0.085014], atol=1e-6), \
++        f"Unexpected ax2 dataLim.intervaly: {ax2.dataLim.intervaly}"
++    
++    plt.close(fig)
++
++
++def test_twiny_preserves_datalim():
++    """Test that ax1's dataLim is preserved when plotting on ax2 after twiny."""
++    x1 = [1, 2, 3]
++    y1 = [4, 5, 6]
++    x2 = ['A', 'B', 'C']  # Categorical data to trigger unit conversion
++    y2 = [4, 5, 6]
++    
++    fig, ax1 = plt.subplots()
++    
++    # Plot on ax1
++    ax1.plot(x1, y1)
++    
++    # Store ax1's x-limits before creating twin
++    ax1_xlim_before = ax1.dataLim.intervalx.copy()
++    
++    # Create twin axis
++    ax2 = ax1.twiny()
++    
++    # Plot on ax2 (this triggers unit conversion for categorical x-data)
++    ax2.plot(x2, y2)
++    
++    # Check that ax1's x-limits are preserved
++    ax1_xlim_after = ax1.dataLim.intervalx
++    
++    assert np.allclose(ax1_xlim_before, ax1_xlim_after), \
++        f"ax1 dataLim.intervalx changed from {ax1_xlim_before} to {ax1_xlim_after}"
++    
++    plt.close(fig)
++
++
++def test_unit_change_preserves_orthogonal_limits():
++    """Test that unit changes only affect the relevant axis dimension."""
++    # Create figure with numeric data
++    fig, ax = plt.subplots()
++    ax.plot([1, 2, 3], [10, 20, 30])
++    
++    # Store original limits
++    xlim_before = ax.dataLim.intervalx.copy()
++    ylim_before = ax.dataLim.intervaly.copy()
++    
++    # Trigger x-axis unit change by plotting categorical data
++    ax.plot(['A', 'B', 'C'], [15, 25, 35])
++    
++    # Y-limits should be updated but x-limits should reflect the categorical data
++    ylim_after = ax.dataLim.intervaly
++    
++    # Y limits should include both datasets
++    assert ylim_after[0] <= 10 and ylim_after[1] >= 35, \
++        f"Y limits don't include all data: {ylim_after}"
++    
++    plt.close(fig)
++
++
++if __name__ == "__main__":
++    test_twinx_stackplot_preserves_datalim()
++    test_twiny_preserves_datalim()
++    test_unit_change_preserves_orthogonal_limits()
++    print("All tests passed!")

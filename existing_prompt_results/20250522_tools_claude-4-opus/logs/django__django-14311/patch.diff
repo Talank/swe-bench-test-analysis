@@ -1,0 +1,413 @@
+diff --git a/django/utils/autoreload.py b/django/utils/autoreload.py
+index b6af5f5491..42175227c9 100644
+--- a/django/utils/autoreload.py
++++ b/django/utils/autoreload.py
+@@ -223,9 +223,26 @@ def get_child_arguments():
+     # __spec__ is set when the server was started with the `-m` option,
+     # see https://docs.python.org/3/reference/import.html#main-spec
+     # __spec__ may not exist, e.g. when running in a Conda env.
+-    if getattr(__main__, '__spec__', None) is not None and __main__.__spec__.parent:
+-        args += ['-m', __main__.__spec__.parent]
+-        args += sys.argv[1:]
++    if getattr(__main__, '__spec__', None) is not None:
++        spec = __main__.__spec__
++        # Determine the module name to use with -m
++        if spec.name == '__main__':
++            # Running a package with __main__.py (e.g. python -m foo.bar where bar is a package)
++            module_name = spec.parent
++        else:
++            # Running a module directly (e.g. python -m foo.bar.baz where baz is a module)
++            # or when __main__ module has been imported with its full name
++            module_name = spec.name
++            # Handle case where __main__ module was imported (e.g., django.__main__)
++            if module_name.endswith('.__main__'):
++                module_name = module_name[:-9]  # Remove .__main__ suffix
++        
++        if module_name:
++            args += ['-m', module_name]
++            args += sys.argv[1:]
++        else:
++            # Fall through to handle as a regular script
++            args += sys.argv
+     elif not py_script.exists():
+         # sys.argv[0] may not exist for several reasons on Windows.
+         # It may exist with a .exe extension or have a -script.py suffix.
+diff --git a/manage.py b/manage.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_bug_exists.py b/test_bug_exists.py
+new file mode 100644
+index 0000000000..fb219d2cfc
+--- /dev/null
++++ b/test_bug_exists.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++"""Test script to confirm the autoreload bug with dotted module names."""
++
++import sys
++import types
++from unittest import mock
++from django.utils import autoreload
++
++def test_module_spec():
++    """Test that running with -m foo.bar.baz incorrectly uses parent."""
++    
++    # Create a mock __main__ module as if we ran: python -m foo.bar.baz
++    fake_main = types.ModuleType('__main__')
++    fake_main.__spec__ = types.SimpleNamespace()
++    fake_main.__spec__.name = 'foo.bar.baz'  # Full module name
++    fake_main.__spec__.parent = 'foo.bar'    # Parent package
++    
++    # Mock the environment
++    with mock.patch.dict(sys.modules, {'__main__': fake_main}):
++        with mock.patch('sys.argv', ['/path/to/foo/bar/baz.py', 'runserver']):
++            with mock.patch('sys.warnoptions', []):
++                args = autoreload.get_child_arguments()
++                print(f"Current implementation returns: {args}")
++                print(f"Expected: ['{sys.executable}', '-m', 'foo.bar.baz', 'runserver']")
++                
++                # The bug is that it returns '-m', 'foo.bar' instead of '-m', 'foo.bar.baz'
++                if args == [sys.executable, '-m', 'foo.bar', 'runserver']:
++                    print("\nBUG CONFIRMED: Using parent 'foo.bar' instead of full name 'foo.bar.baz'")
++                    return False
++                else:
++                    print("\nNo bug found - implementation is correct")
++                    return True
++
++if __name__ == '__main__':
++    print("Testing for the autoreload bug with dotted module names...")
++    print("=" * 60)
++    
++    if not test_module_spec():
++        print("\nThe bug exists: Django uses __spec__.parent instead of the full module name")
++    else:
++        print("\nThe bug has been fixed")
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..b63b229392
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python
++"""Comprehensive test for the autoreload fix."""
++
++import sys
++import types
++from unittest import mock
++from django.utils import autoreload
++
++def test_case(spec_name, spec_parent, expected_module, description):
++    """Test a specific case."""
++    print(f"\nTest: {description}")
++    print(f"  spec.name = {spec_name}")
++    print(f"  spec.parent = {spec_parent}")
++    
++    # Create a mock __main__ module
++    fake_main = types.ModuleType('__main__')
++    if spec_name is not None:  # Handle case where there's no spec
++        fake_main.__spec__ = types.SimpleNamespace()
++        fake_main.__spec__.name = spec_name
++        fake_main.__spec__.parent = spec_parent
++    
++    # Mock the environment
++    # Use a real file for testing to avoid "Script does not exist" errors
++    test_script = '/testbed/manage.py' if expected_module is None else '/some/fake/module.py'
++    
++    with mock.patch.dict(sys.modules, {'__main__': fake_main}):
++        with mock.patch('sys.argv', [test_script, 'runserver']):
++            with mock.patch('sys.warnoptions', []):
++                args = autoreload.get_child_arguments()
++                
++                if expected_module:
++                    expected = [sys.executable, '-m', expected_module, 'runserver']
++                else:
++                    expected = [sys.executable, test_script, 'runserver']
++                
++                if args == expected:
++                    print(f"  ✓ PASS: {args}")
++                    return True
++                else:
++                    print(f"  ✗ FAIL: Expected {expected}")
++                    print(f"         Got      {args}")
++                    return False
++
++def main():
++    print("Comprehensive test of autoreload fix")
++    print("=" * 60)
++    
++    test_cases = [
++        # (spec_name, spec_parent, expected_module, description)
++        ('foo.bar.baz', 'foo.bar', 'foo.bar.baz', 'Module: python -m foo.bar.baz'),
++        ('__main__', 'foo.bar', 'foo.bar', 'Package: python -m foo.bar'),
++        ('__main__', 'foo', 'foo', 'Package: python -m foo'),
++        ('__main__', '', None, 'Top-level package: python -m __main__'),
++        ('django', '', 'django', 'Single module: python -m django'),
++        (None, None, None, 'No spec (direct script execution)'),
++    ]
++    
++    passed = 0
++    failed = 0
++    
++    for spec_name, spec_parent, expected_module, description in test_cases:
++        if test_case(spec_name, spec_parent, expected_module, description):
++            passed += 1
++        else:
++            failed += 1
++    
++    print(f"\n{'='*60}")
++    print(f"Results: {passed} passed, {failed} failed")
++    
++    if failed == 0:
++        print("All tests passed! ✓")
++    else:
++        print("Some tests failed! ✗")
++        sys.exit(1)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_pkg/foo/__init__.py b/test_pkg/foo/__init__.py
+new file mode 100644
+index 0000000000..7c8a2623fc
+--- /dev/null
++++ b/test_pkg/foo/__init__.py
+@@ -0,0 +1 @@
++# Package foo
+\ No newline at end of file
+diff --git a/test_pkg/foo/bar/__init__.py b/test_pkg/foo/bar/__init__.py
+new file mode 100644
+index 0000000000..9a20b065ea
+--- /dev/null
++++ b/test_pkg/foo/bar/__init__.py
+@@ -0,0 +1 @@
++# Package foo.bar
+\ No newline at end of file
+diff --git a/test_pkg/foo/bar/baz.py b/test_pkg/foo/bar/baz.py
+new file mode 100644
+index 0000000000..a941c4dc5e
+--- /dev/null
++++ b/test_pkg/foo/bar/baz.py
+@@ -0,0 +1,16 @@
++#!/usr/bin/env python
++"""Module foo.bar.baz - a regular module, not a package."""
++
++import sys
++
++if __name__ == '__main__':
++    print(f"Running as __main__")
++    print(f"__name__ = {__name__}")
++    print(f"__package__ = {__package__}")
++    if hasattr(sys.modules['__main__'], '__spec__'):
++        spec = sys.modules['__main__'].__spec__
++        print(f"__spec__.name = {spec.name}")
++        print(f"__spec__.parent = {spec.parent}")
++        print(f"__spec__.loader = {spec.loader}")
++    else:
++        print("No __spec__ attribute")
+diff --git a/test_real_scenario.py b/test_real_scenario.py
+new file mode 100644
+index 0000000000..948344220a
+--- /dev/null
++++ b/test_real_scenario.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python
++"""Test the real-world scenario of running Django with python -m"""
++
++import subprocess
++import sys
++import os
++
++# Create a test module structure
++test_dir = '/tmp/test_django_module'
++os.makedirs(f'{test_dir}/myapp/management/commands', exist_ok=True)
++
++# Create __init__.py files
++for path in [
++    f'{test_dir}/myapp/__init__.py',
++    f'{test_dir}/myapp/management/__init__.py',
++    f'{test_dir}/myapp/management/commands/__init__.py',
++]:
++    with open(path, 'w') as f:
++        f.write('')
++
++# Create a custom runserver command
++with open(f'{test_dir}/myapp/management/commands/runserver.py', 'w') as f:
++    f.write('''
++import sys
++from django.utils import autoreload
++
++if __name__ == '__main__':
++    # Print the child arguments that would be used for reloading
++    args = autoreload.get_child_arguments()
++    print("Child arguments:", args)
++    
++    # Check if -m is preserved correctly
++    if '-m' in args:
++        m_index = args.index('-m')
++        module_name = args[m_index + 1]
++        print(f"Module name: {module_name}")
++        
++        # For our test, we expect the full module name
++        if module_name == 'myapp.management.commands.runserver':
++            print("SUCCESS: Full module name preserved!")
++        else:
++            print(f"FAIL: Expected 'myapp.management.commands.runserver', got '{module_name}'")
++    else:
++        print("FAIL: No -m option found")
++''')
++
++# Add test directory to Python path
++sys.path.insert(0, test_dir)
++
++# Run the module
++print("Testing: python -m myapp.management.commands.runserver")
++print("="*60)
++
++try:
++    result = subprocess.run(
++        [sys.executable, '-m', 'myapp.management.commands.runserver'],
++        capture_output=True,
++        text=True,
++        cwd=test_dir
++    )
++    print(result.stdout)
++    if result.stderr:
++        print("STDERR:", result.stderr)
++except Exception as e:
++    print(f"Error: {e}")
++finally:
++    # Cleanup
++    import shutil
++    shutil.rmtree(test_dir, ignore_errors=True)
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..79a1b399b8
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++"""Test script to reproduce the autoreload issue with dotted module names."""
++
++import sys
++import types
++from unittest import mock
++from django.utils import autoreload
++
++# Create a mock module structure to simulate running with -m foo.bar.baz
++def test_dotted_module_name():
++    """Test that running with -m foo.bar.baz correctly preserves the full module name."""
++    
++    # Create a mock __main__ module as if we ran: python -m foo.bar.baz
++    fake_main = types.ModuleType('__main__')
++    fake_main.__spec__ = types.SimpleNamespace()
++    fake_main.__spec__.name = '__main__'
++    fake_main.__spec__.parent = 'foo.bar.baz'  # This is what happens with -m foo.bar.baz
++    
++    # Mock the environment
++    with mock.patch.dict(sys.modules, {'__main__': fake_main}):
++        with mock.patch('sys.argv', ['foo/bar/baz.py', 'runserver']):
++            with mock.patch('sys.warnoptions', []):
++                args = autoreload.get_child_arguments()
++                print(f"Current implementation returns: {args}")
++                print(f"Expected: ['{sys.executable}', '-m', 'foo.bar.baz', 'runserver']")
++                
++                # The bug is that it returns '-m', 'foo.bar' instead of '-m', 'foo.bar.baz'
++                assert args == [sys.executable, '-m', 'foo.bar.baz', 'runserver'], \
++                    f"Expected '-m foo.bar.baz' but got {args}"
++
++def test_package_with_main():
++    """Test that running with -m foo.bar where bar is a package works correctly."""
++    
++    # Create a mock __main__ module as if we ran: python -m foo.bar (where bar has __main__.py)
++    fake_main = types.ModuleType('__main__')
++    fake_main.__spec__ = types.SimpleNamespace()
++    fake_main.__spec__.name = '__main__'
++    fake_main.__spec__.parent = 'foo.bar'  # This is what happens with -m foo.bar
++    
++    # Mock the environment
++    with mock.patch.dict(sys.modules, {'__main__': fake_main}):
++        with mock.patch('sys.argv', ['foo/bar/__main__.py', 'runserver']):
++            with mock.patch('sys.warnoptions', []):
++                args = autoreload.get_child_arguments()
++                print(f"\nPackage test returns: {args}")
++                # This should work correctly already
++                assert args == [sys.executable, '-m', 'foo.bar', 'runserver']
++
++if __name__ == '__main__':
++    print("Testing dotted module name handling in autoreloader...")
++    print("=" * 60)
++    
++    try:
++        test_dotted_module_name()
++        print("\nTest PASSED: Dotted module name is preserved correctly!")
++    except AssertionError as e:
++        print(f"\nTest FAILED: {e}")
++        print("\nThis demonstrates the bug where foo.bar.baz becomes foo.bar")
++    
++    print("\n" + "=" * 60)
++    print("\nTesting package with __main__.py...")
++    test_package_with_main()
++    print("\nPackage test PASSED!")
+diff --git a/test_spec_details.py b/test_spec_details.py
+new file mode 100644
+index 0000000000..0b4e062965
+--- /dev/null
++++ b/test_spec_details.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python
++"""Test to understand how Python sets __spec__ attributes."""
++
++import sys
++import types
++
++# Test different scenarios
++scenarios = [
++    # (module_name, spec_name, spec_parent, description)
++    ('foo.bar.baz', '__main__', 'foo.bar', 'Module baz.py in package foo.bar'),
++    ('foo.bar', '__main__', 'foo', 'Package bar with __main__.py in package foo'),
++    ('foo', '__main__', '', 'Package foo with __main__.py'),
++]
++
++for module_name, spec_name, spec_parent, description in scenarios:
++    print(f"\nScenario: {description}")
++    print(f"Running: python -m {module_name}")
++    print(f"Expected __spec__.name: {spec_name}")
++    print(f"Expected __spec__.parent: {spec_parent}")
++    
++    # When running python -m foo.bar.baz:
++    # - If baz is a module (baz.py), then __spec__.parent = 'foo.bar'
++    # - If baz is a package with __main__.py, then __spec__.parent = 'foo.bar.baz'
++    # But we want to use the full module name in both cases!
++
++print("\n" + "="*60)
++print("\nThe issue is that when running 'python -m foo.bar.baz':")
++print("- If baz.py is a module file, __spec__.parent = 'foo.bar'")
++print("- But we need to reconstruct the command as '-m foo.bar.baz'")
++print("\nThe current code uses __spec__.parent directly, which loses the module name!")
+diff --git a/tests/utils_tests/test_autoreload.py b/tests/utils_tests/test_autoreload.py
+index 7b91686bf5..2387f208ad 100644
+--- a/tests/utils_tests/test_autoreload.py
++++ b/tests/utils_tests/test_autoreload.py
+@@ -230,6 +230,23 @@ class TestChildArguments(SimpleTestCase):
+                 [sys.executable, __file__, 'runserver']
+             )
+ 
++    def test_run_as_module_non_package(self):
++        """Test running a module directly with -m (not a package with __main__.py)."""
++        # Create a mock __main__ module as if we ran: python -m foo.bar.baz
++        # where baz is a module file, not a package
++        fake_main = types.ModuleType('__main__')
++        fake_main.__spec__ = types.SimpleNamespace()
++        fake_main.__spec__.name = 'foo.bar.baz'
++        fake_main.__spec__.parent = 'foo.bar'
++        
++        with mock.patch.dict(sys.modules, {'__main__': fake_main}):
++            with mock.patch('sys.argv', ['/path/to/foo/bar/baz.py', 'runserver']):
++                with mock.patch('sys.warnoptions', []):
++                    self.assertEqual(
++                        autoreload.get_child_arguments(),
++                        [sys.executable, '-m', 'foo.bar.baz', 'runserver']
++                    )
++
+ 
+ class TestUtilities(SimpleTestCase):
+     def test_is_django_module(self):

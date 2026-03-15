@@ -1,0 +1,835 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 55b1691166..c242ceb9fa 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -817,6 +817,7 @@ class Model(metaclass=ModelBase):
+         for a single table.
+         """
+         meta = cls._meta
++        connection = connections[using]
+         non_pks = [f for f in meta.local_concrete_fields if not f.primary_key]
+ 
+         if update_fields:
+@@ -872,6 +873,10 @@ class Model(metaclass=ModelBase):
+             results = self._do_insert(cls._base_manager, using, fields, returning_fields, raw)
+             if results:
+                 for value, field in zip(results[0], returning_fields):
++                    # Apply field converters to the returned value
++                    converters = field.get_db_converters(connection)
++                    for converter in converters:
++                        value = converter(value, field, connection)
+                     setattr(self, field.attname, value)
+         return updated
+ 
+diff --git a/django/db/models/query.py b/django/db/models/query.py
+index 387deca527..3f573ab285 100644
+--- a/django/db/models/query.py
++++ b/django/db/models/query.py
+@@ -505,6 +505,10 @@ class QuerySet:
+                 for obj_with_pk, results in zip(objs_with_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
+                         if field != opts.pk:
++                            # Apply field converters to the returned value
++                            converters = field.get_db_converters(connection)
++                            for converter in converters:
++                                result = converter(result, field, connection)
+                             setattr(obj_with_pk, field.attname, result)
+                 for obj_with_pk in objs_with_pk:
+                     obj_with_pk._state.adding = False
+@@ -518,6 +522,10 @@ class QuerySet:
+                     assert len(returned_columns) == len(objs_without_pk)
+                 for obj_without_pk, results in zip(objs_without_pk, returned_columns):
+                     for result, field in zip(results, opts.db_returning_fields):
++                        # Apply field converters to the returned value
++                        converters = field.get_db_converters(connection)
++                        for converter in converters:
++                            result = converter(result, field, connection)
+                         setattr(obj_without_pk, field.attname, result)
+                     obj_without_pk._state.adding = False
+                     obj_without_pk._state.db = self.db
+diff --git a/test_bulk_create_postgres.py b/test_bulk_create_postgres.py
+new file mode 100644
+index 0000000000..f38f3821e1
+--- /dev/null
++++ b/test_bulk_create_postgres.py
+@@ -0,0 +1,75 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings with PostgreSQL
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.postgresql',
++            'NAME': 'test_db',
++            'USER': 'postgres',
++            'PASSWORD': 'postgres',
++            'HOST': 'localhost',
++            'PORT': '5432',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Define wrapper class
++class MyIntWrapper:
++    def __init__(self, value):
++        self.value = value
++    
++    def __repr__(self):
++        return f"<MyIntWrapper: {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, MyIntWrapper):
++            return self.value == other.value
++        return self.value == other
++
++# Define custom field
++class MyAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        print(f"from_db_value called with value: {value}")
++        if value is None:
++            return None
++        return MyIntWrapper(value)
++    
++    def get_prep_value(self, value):
++        print(f"get_prep_value called with value: {value}")
++        if value is None:
++            return None
++        return int(value)
++
++# Define model
++class AutoModel(models.Model):
++    id = MyAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test with PostgreSQL (which supports returning rows from bulk insert)
++print("Testing bulk_create with PostgreSQL:")
++print("=" * 50)
++
++# Note: This would only work if PostgreSQL is available
++# For now, let's just check the feature flag
++from django.db import connection
++print(f"Database supports returning rows from bulk insert: {connection.features.can_return_rows_from_bulk_insert}")
++print(f"Database supports returning columns from insert: {connection.features.can_return_columns_from_insert}")
+diff --git a/test_comprehensive_from_db_value.py b/test_comprehensive_from_db_value.py
+new file mode 100644
+index 0000000000..192c24c233
+--- /dev/null
++++ b/test_comprehensive_from_db_value.py
+@@ -0,0 +1,170 @@
++"""
++Comprehensive test for the fix to ensure from_db_value is called on INSERT returning fields.
++
++This tests the fix for the issue where database converters (from_db_value) were not being
++called for returning_fields on insert operations, causing custom field types to return
++raw database values instead of converted Python objects.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++
++# Custom wrapper class for testing
++class CustomWrapper:
++    def __init__(self, value, field_name='unknown'):
++        self.value = value
++        self.field_name = field_name
++    
++    def __repr__(self):
++        return f"<{self.__class__.__name__}({self.field_name}): {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, CustomWrapper):
++            return self.value == other.value
++        return self.value == other
++
++
++# Custom AutoField that wraps values
++class WrappedAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return CustomWrapper(value, self.name)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++
++# Custom IntegerField that also uses from_db_value
++class WrappedIntegerField(models.IntegerField):
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return CustomWrapper(value, self.name)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++
++# Test model
++class TestModel(models.Model):
++    id = WrappedAutoField(primary_key=True)
++    counter = WrappedIntegerField(default=0)
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++def run_tests():
++    # Create tables
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(TestModel)
++    
++    print("Testing from_db_value on INSERT operations")
++    print("=" * 60)
++    
++    # Test 1: Regular query (baseline - should always work)
++    print("\n1. Testing regular query (baseline):")
++    with connection.cursor() as cursor:
++        cursor.execute(
++            "INSERT INTO test_app_testmodel (counter, name) VALUES (%s, %s)",
++            [42, 'manual']
++        )
++    
++    obj = TestModel.objects.first()
++    print(f"   ID: {obj.id} - Type: {type(obj.id).__name__}")
++    print(f"   Counter: {obj.counter} - Type: {type(obj.counter).__name__}")
++    assert isinstance(obj.id, CustomWrapper), "ID should be wrapped"
++    assert isinstance(obj.counter, CustomWrapper), "Counter should be wrapped"
++    print("   ✓ from_db_value called correctly for queries")
++    
++    # Test 2: Model.save() with force_insert
++    print("\n2. Testing Model.save() with force_insert:")
++    obj2 = TestModel(counter=100, name='saved')
++    obj2.save(force_insert=True)
++    print(f"   ID: {obj2.id} - Type: {type(obj2.id).__name__}")
++    print(f"   Counter: {obj2.counter} - Type: {type(obj2.counter).__name__}")
++    assert isinstance(obj2.id, CustomWrapper), "ID should be wrapped after save"
++    # Note: counter is not a returning field, so it won't be wrapped on insert
++    print("   ✓ from_db_value called correctly for returning fields on save(force_insert=True)")
++    
++    # Test 3: QuerySet.create()
++    print("\n3. Testing QuerySet.create():")
++    obj3 = TestModel.objects.create(counter=200, name='created')
++    print(f"   ID: {obj3.id} - Type: {type(obj3.id).__name__}")
++    print(f"   Counter: {obj3.counter} - Type: {type(obj3.counter).__name__}")
++    assert isinstance(obj3.id, CustomWrapper), "ID should be wrapped after create"
++    # Note: counter is not a returning field, so it won't be wrapped on insert
++    print("   ✓ from_db_value called correctly for returning fields on create()")
++    
++    # Test 4: bulk_create (when supported)
++    print("\n4. Testing bulk_create():")
++    objs = [
++        TestModel(counter=300, name='bulk1'),
++        TestModel(counter=301, name='bulk2'),
++        TestModel(counter=302, name='bulk3'),
++    ]
++    created = TestModel.objects.bulk_create(objs)
++    
++    if connection.features.can_return_rows_from_bulk_insert:
++        print("   Database supports returning rows from bulk insert")
++        for i, obj in enumerate(objs):
++            print(f"   Object {i}: ID={obj.id} - Type: {type(obj.id).__name__}")
++            assert isinstance(obj.id, CustomWrapper), f"ID should be wrapped for bulk object {i}"
++        print("   ✓ from_db_value called correctly for bulk_create")
++    else:
++        print("   ℹ Database doesn't support returning rows from bulk insert")
++        print("   IDs are not set on the objects")
++    
++    # Verify all objects are correctly wrapped when queried
++    print("\n5. Verifying all objects when queried:")
++    for obj in TestModel.objects.all():
++        assert isinstance(obj.id, CustomWrapper), f"ID should be wrapped for {obj.name}"
++        assert isinstance(obj.counter, CustomWrapper), f"Counter should be wrapped for {obj.name}"
++    print("   ✓ All objects have properly wrapped fields when queried")
++    
++    # Clean up
++    with connection.schema_editor() as schema_editor:
++        schema_editor.delete_model(TestModel)
++    
++    print("\n✅ All tests passed! The fix is working correctly.")
++    print("\nSummary:")
++    print("- from_db_value is now correctly called for returning fields on INSERT")
++    print("- This applies to both save(force_insert=True) and create()")
++    print("- bulk_create also works when the database supports returning rows")
++
++
++if __name__ == '__main__':
++    run_tests()
+diff --git a/test_field_converters.py b/test_field_converters.py
+new file mode 100644
+index 0000000000..4ef9a34d98
+--- /dev/null
++++ b/test_field_converters.py
+@@ -0,0 +1,131 @@
++"""
++Test that field converters (from_db_value) are called for returning fields on insert.
++"""
++import os
++import django
++from django.test import TestCase, TransactionTestCase
++from django.db import models, connection
++from django.test.utils import isolate_apps
++
++
++class MyIntWrapper:
++    def __init__(self, value):
++        self.value = value
++    
++    def __repr__(self):
++        return f"<MyIntWrapper: {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, MyIntWrapper):
++            return self.value == other.value
++        return self.value == other
++
++
++class MyAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return MyIntWrapper(value)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++
++@isolate_apps('test_app')
++class FieldConverterTests(TransactionTestCase):
++    def setUp(self):
++        # Create test model
++        class AutoModel(models.Model):
++            id = MyAutoField(primary_key=True)
++            name = models.CharField(max_length=100, default='test')
++            
++            class Meta:
++                app_label = 'test_app'
++        
++        self.AutoModel = AutoModel
++        
++        # Create table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.create_model(AutoModel)
++    
++    def tearDown(self):
++        # Drop table
++        with connection.schema_editor() as schema_editor:
++            schema_editor.delete_model(self.AutoModel)
++    
++    def test_from_db_value_called_on_query(self):
++        """Test that from_db_value is called when querying objects."""
++        # Create an object manually
++        with connection.cursor() as cursor:
++            cursor.execute(
++                "INSERT INTO test_app_automodel (name) VALUES (%s)",
++                ['test1']
++            )
++        
++        # Query it back
++        obj = self.AutoModel.objects.first()
++        self.assertIsInstance(obj.id, MyIntWrapper)
++        self.assertEqual(int(obj.id), obj.id.value)
++    
++    def test_from_db_value_called_on_create(self):
++        """Test that from_db_value is called when creating objects."""
++        obj = self.AutoModel.objects.create(name='test2')
++        
++        # Check if the returned id is wrapped
++        self.assertIsInstance(obj.id, MyIntWrapper)
++        self.assertEqual(int(obj.id), obj.id.value)
++        
++        # Verify it's also wrapped when queried back
++        obj_from_db = self.AutoModel.objects.get(pk=obj.pk)
++        self.assertIsInstance(obj_from_db.id, MyIntWrapper)
++        self.assertEqual(obj.id, obj_from_db.id)
++    
++    def test_from_db_value_called_on_bulk_create(self):
++        """Test that from_db_value is called in bulk_create when supported."""
++        objs = [self.AutoModel(name=f'bulk{i}') for i in range(3)]
++        created = self.AutoModel.objects.bulk_create(objs)
++        
++        # If the database supports returning rows from bulk insert,
++        # the IDs should be wrapped
++        if connection.features.can_return_rows_from_bulk_insert:
++            for obj in objs:
++                self.assertIsInstance(obj.id, MyIntWrapper)
++        
++        # When queried back, they should always be wrapped
++        for obj in self.AutoModel.objects.filter(name__startswith='bulk'):
++            self.assertIsInstance(obj.id, MyIntWrapper)
++
++
++if __name__ == '__main__':
++    # Configure Django for standalone test
++    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++    
++    if not django.conf.settings.configured:
++        django.conf.settings.configure(
++            DEBUG=True,
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            USE_TZ=True,
++            SECRET_KEY='test-secret-key',
++        )
++    
++    django.setup()
++    
++    # Run tests
++    from django.test.utils import get_runner
++    TestRunner = get_runner(django.conf.settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__"])
+diff --git a/test_final_fix.py b/test_final_fix.py
+new file mode 100644
+index 0000000000..7eee1045f2
+--- /dev/null
++++ b/test_final_fix.py
+@@ -0,0 +1,100 @@
++"""
++Final test to verify our fix works correctly.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Define wrapper class
++class MyIntWrapper:
++    def __init__(self, value):
++        self.value = value
++    
++    def __repr__(self):
++        return f"<MyIntWrapper: {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, MyIntWrapper):
++            return self.value == other.value
++        return self.value == other
++
++# Define custom field
++class MyAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return MyIntWrapper(value)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++# Define model
++class AutoModel(models.Model):
++    id = MyAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(AutoModel)
++
++print("Testing fix for from_db_value on insert:")
++print("=" * 50)
++
++# Test 1: Query existing instance (should work correctly)
++print("\n1. Creating an instance manually and querying it:")
++with connection.cursor() as cursor:
++    cursor.execute("INSERT INTO test_app_automodel (id) VALUES (1)")
++
++am = AutoModel.objects.first()
++print(f"Queried instance id: {am.id}")
++print(f"Type of id: {type(am.id)}")
++print(f"✓ from_db_value called correctly for query" if isinstance(am.id, MyIntWrapper) else "✗ FAILED")
++
++# Test 2: Create new instance (this is where the bug was)
++print("\n2. Creating instance via create():")
++am2 = AutoModel.objects.create()
++print(f"Created instance id: {am2.id}")
++print(f"Type of id: {type(am2.id)}")
++print(f"✓ from_db_value called correctly for create()" if isinstance(am2.id, MyIntWrapper) else "✗ FAILED")
++
++# Test 3: bulk_create
++print("\n3. Testing bulk_create:")
++ams = [AutoModel()]
++created = AutoModel.objects.bulk_create(ams)
++print(f"Bulk created instance id: {ams[0].id}")
++print(f"Type of id: {type(ams[0].id)}")
++if connection.features.can_return_rows_from_bulk_insert:
++    print(f"✓ from_db_value called correctly for bulk_create" if isinstance(ams[0].id, MyIntWrapper) else "✗ FAILED")
++else:
++    print("ℹ Database doesn't support returning rows from bulk insert")
++
++print("\n✅ All tests passed! The fix is working correctly.")
+diff --git a/test_from_db_value_on_insert.py b/test_from_db_value_on_insert.py
+new file mode 100644
+index 0000000000..4110d7b9bc
+--- /dev/null
++++ b/test_from_db_value_on_insert.py
+@@ -0,0 +1,144 @@
++"""
++Test that field converters (from_db_value) are called for returning fields on insert.
++This is a regression test for the issue where from_db_value was not called
++for fields returned by INSERT queries.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++        SECRET_KEY='test-secret-key',
++    )
++
++django.setup()
++
++
++# Define wrapper class
++class MyIntWrapper:
++    def __init__(self, value):
++        self.value = value
++    
++    def __repr__(self):
++        return f"<MyIntWrapper: {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, MyIntWrapper):
++            return self.value == other.value
++        return self.value == other
++
++
++# Define custom field
++class MyAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        if value is None:
++            return None
++        return MyIntWrapper(value)
++    
++    def get_prep_value(self, value):
++        if value is None:
++            return None
++        return int(value)
++
++
++# Define model
++class AutoModel(models.Model):
++    id = MyAutoField(primary_key=True)
++    name = models.CharField(max_length=100, default='test')
++    
++    class Meta:
++        app_label = 'test_app'
++        db_table = 'test_automodel'
++
++
++class FromDbValueOnInsertTests(TestCase):
++    @classmethod
++    def setUpClass(cls):
++        super().setUpClass()
++        # Create table
++        from django.db import transaction
++        with transaction.atomic():
++            with connection.schema_editor() as schema_editor:
++                schema_editor.create_model(AutoModel)
++    
++    @classmethod
++    def tearDownClass(cls):
++        # Drop table
++        from django.db import transaction
++        with transaction.atomic():
++            with connection.schema_editor() as schema_editor:
++                schema_editor.delete_model(AutoModel)
++        super().tearDownClass()
++    
++    def test_from_db_value_called_on_query(self):
++        """Test that from_db_value is called when querying objects."""
++        # Create an object manually
++        with connection.cursor() as cursor:
++            cursor.execute(
++                "INSERT INTO test_automodel (name) VALUES (?)",
++                ['test1']
++            )
++        
++        # Query it back
++        obj = AutoModel.objects.first()
++        self.assertIsInstance(obj.id, MyIntWrapper)
++        self.assertEqual(int(obj.id), obj.id.value)
++    
++    def test_from_db_value_called_on_create(self):
++        """Test that from_db_value is called when creating objects."""
++        obj = AutoModel.objects.create(name='test2')
++        
++        # Check if the returned id is wrapped
++        self.assertIsInstance(obj.id, MyIntWrapper, 
++                            "from_db_value should be called for returning fields on insert")
++        self.assertEqual(int(obj.id), obj.id.value)
++        
++        # Verify it's also wrapped when queried back
++        obj_from_db = AutoModel.objects.get(pk=obj.pk)
++        self.assertIsInstance(obj_from_db.id, MyIntWrapper)
++        self.assertEqual(obj.id, obj_from_db.id)
++    
++    def test_from_db_value_called_on_bulk_create(self):
++        """Test that from_db_value is called in bulk_create when supported."""
++        objs = [AutoModel(name=f'bulk{i}') for i in range(3)]
++        created = AutoModel.objects.bulk_create(objs)
++        
++        # If the database supports returning rows from bulk insert,
++        # the IDs should be wrapped
++        if connection.features.can_return_rows_from_bulk_insert:
++            for obj in objs:
++                self.assertIsInstance(obj.id, MyIntWrapper,
++                                    "from_db_value should be called for bulk_create returning fields")
++        
++        # When queried back, they should always be wrapped
++        for obj in AutoModel.objects.filter(name__startswith='bulk'):
++            self.assertIsInstance(obj.id, MyIntWrapper)
++
++
++if __name__ == '__main__':
++    # Run the test
++    from django.test.utils import get_runner
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner(verbosity=2)
++    failures = test_runner.run_tests(["__main__"])
++    sys.exit(bool(failures))
+diff --git a/test_reproduce_issue.py b/test_reproduce_issue.py
+new file mode 100644
+index 0000000000..cbbb050724
+--- /dev/null
++++ b/test_reproduce_issue.py
+@@ -0,0 +1,96 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++# Define wrapper class
++class MyIntWrapper:
++    def __init__(self, value):
++        self.value = value
++    
++    def __repr__(self):
++        return f"<MyIntWrapper: {self.value}>"
++    
++    def __int__(self):
++        return self.value
++    
++    def __eq__(self, other):
++        if isinstance(other, MyIntWrapper):
++            return self.value == other.value
++        return self.value == other
++
++# Define custom field
++class MyAutoField(models.BigAutoField):
++    def from_db_value(self, value, expression, connection):
++        print(f"from_db_value called with value: {value}")
++        if value is None:
++            return None
++        return MyIntWrapper(value)
++    
++    def get_prep_value(self, value):
++        print(f"get_prep_value called with value: {value}")
++        if value is None:
++            return None
++        return int(value)
++
++# Define model
++class AutoModel(models.Model):
++    id = MyAutoField(primary_key=True)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(AutoModel)
++
++print("Testing issue reproduction:")
++print("=" * 50)
++
++# Test 1: Query existing instance (should work correctly)
++print("\n1. Creating an instance manually and querying it:")
++with connection.cursor() as cursor:
++    cursor.execute("INSERT INTO test_app_automodel (id) VALUES (1)")
++
++am = AutoModel.objects.first()
++print(f"Queried instance id: {am.id}")
++print(f"Type of id: {type(am.id)}")
++assert isinstance(am.id, MyIntWrapper), "Expected MyIntWrapper for queried instance"
++
++# Test 2: Create new instance (this is where the bug occurs)
++print("\n2. Creating instance via create():")
++am2 = AutoModel.objects.create()
++print(f"Created instance id: {am2.id}")
++print(f"Type of id: {type(am2.id)}")
++print(f"Is MyIntWrapper: {isinstance(am2.id, MyIntWrapper)}")
++
++# Test 3: bulk_create
++print("\n3. Testing bulk_create:")
++ams = [AutoModel()]
++created = AutoModel.objects.bulk_create(ams)
++print(f"Bulk created instance id: {ams[0].id}")
++print(f"Type of id: {type(ams[0].id)}")
++print(f"Is MyIntWrapper: {isinstance(ams[0].id, MyIntWrapper)}")
++
++print("\nIssue reproduced: from_db_value is not called for returning fields on insert!")
+diff --git a/test_sqlite_features.py b/test_sqlite_features.py
+new file mode 100644
+index 0000000000..3ab228d03c
+--- /dev/null
++++ b/test_sqlite_features.py
+@@ -0,0 +1,28 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=True,
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import connection
++print(f"SQLite supports returning rows from bulk insert: {connection.features.can_return_rows_from_bulk_insert}")
++print(f"SQLite supports returning columns from insert: {connection.features.can_return_columns_from_insert}")

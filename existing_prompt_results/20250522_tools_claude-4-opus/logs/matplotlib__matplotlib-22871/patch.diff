@@ -1,0 +1,422 @@
+diff --git a/debug_cross_year.py b/debug_cross_year.py
+new file mode 100644
+index 0000000000..0c4866db3e
+--- /dev/null
++++ b/debug_cross_year.py
+@@ -0,0 +1,33 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime
++import numpy as np
++
++# Test case: November 2020 to March 2021 - years change
++d1 = datetime(2020, 11, 1)
++d2 = datetime(2021, 3, 1)
++
++fig, ax = plt.subplots()
++locator = mdates.AutoDateLocator()
++formatter = mdates.ConciseDateFormatter(locator)
++ax.xaxis.set_major_locator(locator)
++ax.xaxis.set_major_formatter(formatter)
++
++ax.plot([d1, d2], [0, 0])
++fig.canvas.draw()
++
++# Get tick values to understand what's happening
++values = ax.xaxis.get_ticklocs()
++tickdatetime = [mdates.num2date(value, tz=formatter._tz) for value in values]
++tickdate = np.array([tdt.timetuple()[:6] for tdt in tickdatetime])
++
++print(f"Tick dates: {[dt.strftime('%Y-%m-%d') for dt in tickdatetime]}")
++print(f"Offset: '{formatter.get_offset()}'")
++
++# Check what level would be determined
++for level in range(5, -1, -1):
++    unique_values = np.unique(tickdate[:, level])
++    print(f"Level {level} ({'years,months,days,hours,minutes,seconds'.split(',')[level]}): unique values = {unique_values}, count = {len(unique_values)}")
++    if len(unique_values) > 1:
++        print(f"Level determined: {level}")
++        break
+diff --git a/edge_case_test.py b/edge_case_test.py
+new file mode 100644
+index 0000000000..e2837fc9dd
+--- /dev/null
++++ b/edge_case_test.py
+@@ -0,0 +1,44 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime
++
++# Edge case 1: Only December of one year
++print("Edge case 1: Only December 2021")
++fig1, ax1 = plt.subplots()
++d1 = datetime(2021, 12, 1)
++d2 = datetime(2021, 12, 31)
++ax1.plot([d1, d2], [0, 0])
++locator1 = mdates.AutoDateLocator()
++formatter1 = mdates.ConciseDateFormatter(locator1)
++ax1.xaxis.set_major_locator(locator1)
++ax1.xaxis.set_major_formatter(formatter1)
++fig1.canvas.draw()
++print(f"Offset: '{formatter1.get_offset()}'")
++
++# Edge case 2: December to January (crossing year at day level)
++print("\nEdge case 2: Dec 2021 to Jan 2022")
++fig2, ax2 = plt.subplots()
++d1 = datetime(2021, 12, 15)
++d2 = datetime(2022, 1, 15)
++ax2.plot([d1, d2], [0, 0])
++locator2 = mdates.AutoDateLocator()
++formatter2 = mdates.ConciseDateFormatter(locator2)
++ax2.xaxis.set_major_locator(locator2)
++ax2.xaxis.set_major_formatter(formatter2)
++fig2.canvas.draw()
++print(f"Offset: '{formatter2.get_offset()}'")
++
++# Edge case 3: Single month that's not January
++print("\nEdge case 3: Only March 2021")
++fig3, ax3 = plt.subplots()
++d1 = datetime(2021, 3, 1)
++d2 = datetime(2021, 3, 31)
++ax3.plot([d1, d2], [0, 0])
++locator3 = mdates.AutoDateLocator()
++formatter3 = mdates.ConciseDateFormatter(locator3)
++ax3.xaxis.set_major_locator(locator3)
++ax3.xaxis.set_major_formatter(formatter3)
++fig3.canvas.draw()
++print(f"Offset: '{formatter3.get_offset()}'")
++
++plt.close('all')
+diff --git a/lib/matplotlib/dates.py b/lib/matplotlib/dates.py
+index 4d8ddf3ee5..7393dd5706 100644
+--- a/lib/matplotlib/dates.py
++++ b/lib/matplotlib/dates.py
+@@ -797,8 +797,19 @@ class ConciseDateFormatter(ticker.Formatter):
+         # 3: hours, 4: minutes, 5: seconds, 6: microseconds
+         for level in range(5, -1, -1):
+             if len(np.unique(tickdate[:, level])) > 1:
+-                if level < 2:
++                # Don't show offset for years level (0) as the year is in the labels
++                # For months level (1), only hide offset if the year is visible
++                # (i.e., if January is included or if years change)
++                if level == 0:
+                     show_offset = False
++                elif level == 1:
++                    # Check if year changes across the ticks
++                    years_change = len(np.unique(tickdate[:, 0])) > 1
++                    # Check if January is in the ticks (month == 1)
++                    has_january = np.any(tickdate[:, 1] == 1)
++                    # Only hide offset if year info is already visible
++                    if years_change or has_january:
++                        show_offset = False
+                 break
+             elif level == 0:
+                 # all tickdate are the same, so only micros might be different
+diff --git a/lib/matplotlib/tests/test_dates.py b/lib/matplotlib/tests/test_dates.py
+index a78c39c560..a00ca63399 100644
+--- a/lib/matplotlib/tests/test_dates.py
++++ b/lib/matplotlib/tests/test_dates.py
+@@ -635,6 +635,25 @@ def test_offset_changes():
+     assert formatter.get_offset() == ''
+ 
+ 
++def test_concise_formatter_year_offset_no_january():
++    """Test that year is shown in offset when plotting months without January."""
++    # Test case: February to September (no January) - should show year
++    d1 = datetime.datetime(2021, 2, 14)
++    d2 = datetime.datetime(2021, 9, 1)
++
++    fig, ax = plt.subplots()
++    locator = mdates.AutoDateLocator()
++    formatter = mdates.ConciseDateFormatter(locator)
++    ax.xaxis.set_major_locator(locator)
++    ax.xaxis.set_major_formatter(formatter)
++
++    ax.plot([d1, d2], [0, 0])
++    fig.canvas.draw()
++    
++    # The offset should show the year since January is not included
++    assert formatter.get_offset() == '2021'
++
++
+ @pytest.mark.parametrize('t_delta, expected', [
+     (datetime.timedelta(weeks=52 * 200),
+      range(1980, 2201, 20)),
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..81657e26f5
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,31 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime, timedelta
++
++# create time array
++initial = datetime(2021, 2, 14, 0, 0, 0)
++time_array = [initial + timedelta(days=x) for x in range(1, 200)]
++
++# create data array
++data = [-x**2/20000 for x in range(1, 200)]
++
++# plot data
++fig, ax = plt.subplots()
++ax.plot(time_array, data)
++
++locator = mdates.AutoDateLocator()
++formatter = mdates.ConciseDateFormatter(locator)
++
++ax.grid(True)
++ax.set_ylabel("Temperature ($\degree$C)")
++ax.xaxis.set_major_locator(locator)
++ax.xaxis.set_major_formatter(formatter)
++fig.autofmt_xdate()  # automatically makes the x-labels rotate
++
++# Save the figure to check if year is shown
++plt.savefig('/testbed/test_output.png')
++print("Figure saved to test_output.png")
++
++# Print some debug info
++print(f"Date range: {time_array[0]} to {time_array[-1]}")
++print(f"Formatter offset string: '{formatter.get_offset()}'")
+diff --git a/test_output.png b/test_output.png
+new file mode 100644
+index 0000000000..6a3961ea28
+Binary files /dev/null and b/test_output.png differ
+diff --git a/test_year_offset.py b/test_year_offset.py
+new file mode 100644
+index 0000000000..d9dc1fb6ea
+--- /dev/null
++++ b/test_year_offset.py
+@@ -0,0 +1,91 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime, timedelta
++
++# Test case 1: February to September (no January) - should show year
++d1 = datetime(2021, 2, 14)
++d2 = datetime(2021, 9, 1)
++
++fig, ax = plt.subplots()
++locator = mdates.AutoDateLocator()
++formatter = mdates.ConciseDateFormatter(locator)
++ax.xaxis.set_major_locator(locator)
++ax.xaxis.set_major_formatter(formatter)
++
++ax.plot([d1, d2], [0, 0])
++fig.canvas.draw()
++print(f"Test 1 (Feb-Sep 2021): offset = '{formatter.get_offset()}'")
++
++# Test case 2: January to June - year might not be needed since January shows year
++d1 = datetime(2021, 1, 1)
++d2 = datetime(2021, 6, 1)
++
++fig2, ax2 = plt.subplots()
++locator2 = mdates.AutoDateLocator()
++formatter2 = mdates.ConciseDateFormatter(locator2)
++ax2.xaxis.set_major_locator(locator2)
++ax2.xaxis.set_major_formatter(formatter2)
++
++ax2.plot([d1, d2], [0, 0])
++fig2.canvas.draw()
++print(f"Test 2 (Jan-Jun 2021): offset = '{formatter2.get_offset()}'")
++
++# Test case 3: December to next February (crosses year boundary)
++d1 = datetime(2020, 12, 1)
++d2 = datetime(2021, 2, 1)
++
++fig3, ax3 = plt.subplots()
++locator3 = mdates.AutoDateLocator()
++formatter3 = mdates.ConciseDateFormatter(locator3)
++ax3.xaxis.set_major_locator(locator3)
++ax3.xaxis.set_major_formatter(formatter3)
++
++ax3.plot([d1, d2], [0, 0])
++fig3.canvas.draw()
++print(f"Test 3 (Dec 2020 - Feb 2021): offset = '{formatter3.get_offset()}'")
++
++# Test case 4: Multiple years
++d1 = datetime(2020, 1, 1)
++d2 = datetime(2022, 1, 1)
++
++fig4, ax4 = plt.subplots()
++locator4 = mdates.AutoDateLocator()
++formatter4 = mdates.ConciseDateFormatter(locator4)
++ax4.xaxis.set_major_locator(locator4)
++ax4.xaxis.set_major_formatter(formatter4)
++
++ax4.plot([d1, d2], [0, 0])
++fig4.canvas.draw()
++print(f"Test 4 (2020-2022): offset = '{formatter4.get_offset()}'")
++
++# Let's also check what level is being used
++import numpy as np
++
++# Reproduce the issue case
++d1 = datetime(2021, 2, 14)
++d2 = datetime(2021, 9, 1)
++time_array = [d1 + timedelta(days=x) for x in range(200)]
++
++fig5, ax5 = plt.subplots()
++locator5 = mdates.AutoDateLocator()
++formatter5 = mdates.ConciseDateFormatter(locator5)
++ax5.xaxis.set_major_locator(locator5)
++ax5.xaxis.set_major_formatter(formatter5)
++
++ax5.plot(time_array, range(200))
++fig5.canvas.draw()
++
++# Get tick values to understand what's happening
++values = ax5.xaxis.get_ticklocs()
++tickdatetime = [mdates.num2date(value, tz=formatter5._tz) for value in values]
++tickdate = np.array([tdt.timetuple()[:6] for tdt in tickdatetime])
++
++print(f"\nTest 5 (reproduce issue):")
++print(f"Tick dates: {[dt.strftime('%Y-%m-%d') for dt in tickdatetime]}")
++print(f"Offset: '{formatter5.get_offset()}'")
++
++# Check what level would be determined
++for level in range(5, -1, -1):
++    if len(np.unique(tickdate[:, level])) > 1:
++        print(f"Level determined: {level} ({'years,months,days,hours,minutes,seconds'.split(',')[level]})")
++        break
+diff --git a/test_year_offset_bug.py b/test_year_offset_bug.py
+new file mode 100644
+index 0000000000..c0f54404e3
+--- /dev/null
++++ b/test_year_offset_bug.py
+@@ -0,0 +1,66 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime
++
++def test_concise_formatter_year_offset_no_january():
++    """Test that year is shown in offset when plotting months without January."""
++    # Test case: February to September (no January) - should show year
++    d1 = datetime(2021, 2, 14)
++    d2 = datetime(2021, 9, 1)
++
++    fig, ax = plt.subplots()
++    locator = mdates.AutoDateLocator()
++    formatter = mdates.ConciseDateFormatter(locator)
++    ax.xaxis.set_major_locator(locator)
++    ax.xaxis.set_major_formatter(formatter)
++
++    ax.plot([d1, d2], [0, 0])
++    fig.canvas.draw()
++    
++    # The offset should show the year since January is not included
++    assert formatter.get_offset() == '2021', f"Expected '2021', got '{formatter.get_offset()}'"
++    print("✓ Test passed: Year shown in offset when January not included")
++
++def test_concise_formatter_year_offset_with_january():
++    """Test that year is NOT shown in offset when January is included."""
++    # Test case: January to June - year should not be in offset
++    d1 = datetime(2021, 1, 1)
++    d2 = datetime(2021, 6, 1)
++
++    fig, ax = plt.subplots()
++    locator = mdates.AutoDateLocator()
++    formatter = mdates.ConciseDateFormatter(locator)
++    ax.xaxis.set_major_locator(locator)
++    ax.xaxis.set_major_formatter(formatter)
++
++    ax.plot([d1, d2], [0, 0])
++    fig.canvas.draw()
++    
++    # The offset should be empty since January (which shows year) is included
++    assert formatter.get_offset() == '', f"Expected '', got '{formatter.get_offset()}'"
++    print("✓ Test passed: No year in offset when January is included")
++
++def test_concise_formatter_year_offset_cross_year():
++    """Test offset when crossing year boundary at month level."""
++    # Test case: March 2020 to November 2021 - years change at month level
++    d1 = datetime(2020, 3, 1)
++    d2 = datetime(2021, 11, 1)
++
++    fig, ax = plt.subplots()
++    locator = mdates.AutoDateLocator()
++    formatter = mdates.ConciseDateFormatter(locator)
++    ax.xaxis.set_major_locator(locator)
++    ax.xaxis.set_major_formatter(formatter)
++
++    ax.plot([d1, d2], [0, 0])
++    fig.canvas.draw()
++    
++    # When years change at month level, the offset should be empty (year info in labels)
++    assert formatter.get_offset() == '', f"Expected '', got '{formatter.get_offset()}'"
++    print("✓ Test passed: No year in offset when years change at month level")
++
++if __name__ == "__main__":
++    test_concise_formatter_year_offset_no_january()
++    test_concise_formatter_year_offset_with_january()
++    test_concise_formatter_year_offset_cross_year()
++    print("\nAll tests passed!")
+diff --git a/visual_test.py b/visual_test.py
+new file mode 100644
+index 0000000000..c82fad7607
+--- /dev/null
++++ b/visual_test.py
+@@ -0,0 +1,58 @@
++import matplotlib.pyplot as plt
++import matplotlib.dates as mdates
++from datetime import datetime, timedelta
++
++# Create figure with subplots to show different scenarios
++fig, axes = plt.subplots(3, 1, figsize=(10, 8))
++
++# Scenario 1: February to September (no January) - should show year
++ax1 = axes[0]
++d1 = datetime(2021, 2, 14)
++time_array1 = [d1 + timedelta(days=x) for x in range(200)]
++data1 = [-x**2/20000 for x in range(200)]
++
++ax1.plot(time_array1, data1)
++locator1 = mdates.AutoDateLocator()
++formatter1 = mdates.ConciseDateFormatter(locator1)
++ax1.xaxis.set_major_locator(locator1)
++ax1.xaxis.set_major_formatter(formatter1)
++ax1.set_title("Feb-Sep 2021 (no January) - Year should appear in offset")
++ax1.grid(True)
++
++# Scenario 2: January to June - year should not be in offset
++ax2 = axes[1]
++d2 = datetime(2021, 1, 1)
++time_array2 = [d2 + timedelta(days=x) for x in range(180)]
++data2 = [-x**2/20000 for x in range(180)]
++
++ax2.plot(time_array2, data2)
++locator2 = mdates.AutoDateLocator()
++formatter2 = mdates.ConciseDateFormatter(locator2)
++ax2.xaxis.set_major_locator(locator2)
++ax2.xaxis.set_major_formatter(formatter2)
++ax2.set_title("Jan-Jun 2021 (includes January) - Year should NOT appear in offset")
++ax2.grid(True)
++
++# Scenario 3: Crossing years
++ax3 = axes[2]
++d3 = datetime(2020, 3, 1)
++time_array3 = [d3 + timedelta(days=x*30) for x in range(20)]
++data3 = [-x**2/20 for x in range(20)]
++
++ax3.plot(time_array3, data3)
++locator3 = mdates.AutoDateLocator()
++formatter3 = mdates.ConciseDateFormatter(locator3)
++ax3.xaxis.set_major_locator(locator3)
++ax3.xaxis.set_major_formatter(formatter3)
++ax3.set_title("Mar 2020 - Nov 2021 (crossing years) - Years in labels, no offset")
++ax3.grid(True)
++
++plt.tight_layout()
++plt.savefig('/testbed/visual_test_output.png', dpi=150)
++print("Visual test saved to visual_test_output.png")
++
++# Print offset strings
++print(f"\nOffset strings:")
++print(f"Scenario 1 (Feb-Sep, no Jan): '{formatter1.get_offset()}'")
++print(f"Scenario 2 (Jan-Jun): '{formatter2.get_offset()}'")
++print(f"Scenario 3 (crossing years): '{formatter3.get_offset()}'")
+diff --git a/visual_test_output.png b/visual_test_output.png
+new file mode 100644
+index 0000000000..78305f97d6
+Binary files /dev/null and b/visual_test_output.png differ

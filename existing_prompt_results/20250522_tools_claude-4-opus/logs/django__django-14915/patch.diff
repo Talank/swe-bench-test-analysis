@@ -1,0 +1,527 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 5dcf923c12..bc7e6959e7 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -1171,6 +1171,9 @@ class ModelChoiceIteratorValue:
+             other = other.value
+         return self.value == other
+ 
++    def __hash__(self):
++        return hash(self.value)
++
+ 
+ class ModelChoiceIterator:
+     def __init__(self, field):
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..455446a122
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,35 @@
++"""Test edge cases for ModelChoiceIteratorValue hashability."""
++from django.forms.models import ModelChoiceIteratorValue
++
++print("Testing edge cases...")
++
++# Test with None value
++value_none = ModelChoiceIteratorValue(None, None)
++print(f"hash(ModelChoiceIteratorValue(None, None)) = {hash(value_none)}")
++
++# Test in dictionary
++test_dict = {None: 'none_value', 1: 'one_value'}
++print(f"value_none in test_dict = {value_none in test_dict}")
++
++# Test with various types
++test_values = [
++    ModelChoiceIteratorValue(0, None),
++    ModelChoiceIteratorValue('', None),
++    ModelChoiceIteratorValue(False, None),
++    ModelChoiceIteratorValue([], None),  # This might fail since lists aren't hashable
++]
++
++for value in test_values[:-1]:  # Skip the list one
++    try:
++        h = hash(value)
++        print(f"✓ hash({value.value!r}) = {h}")
++    except Exception as e:
++        print(f"✗ hash({value.value!r}) failed: {e}")
++
++# Test the list case separately
++try:
++    h = hash(test_values[-1])
++    print(f"✓ hash({test_values[-1].value!r}) = {h}")
++except Exception as e:
++    print(f"✗ hash({test_values[-1].value!r}) failed: {e}")
++    print("  (This is expected since lists aren't hashable)")
+diff --git a/test_modelchoiceiteratorvalue_hash.py b/test_modelchoiceiteratorvalue_hash.py
+new file mode 100644
+index 0000000000..ed0a13efd0
+--- /dev/null
++++ b/test_modelchoiceiteratorvalue_hash.py
+@@ -0,0 +1,69 @@
++"""Test script to reproduce the ModelChoiceIteratorValue hashability issue."""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django.db import models
++from django.forms import ModelChoiceField
++from django.forms.models import ModelChoiceIteratorValue
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the hashability issue
++print("Testing ModelChoiceIteratorValue hashability...")
++
++# Create an instance of ModelChoiceIteratorValue
++value = ModelChoiceIteratorValue(1, TestModel(id=1, name="Test"))
++
++# Try to use it as a dictionary key
++test_dict = {1: ['field1', 'field2']}
++
++try:
++    # This should fail in Django 3.1 without the fix
++    result = value in test_dict
++    print(f"✓ Success: value in test_dict = {result}")
++except TypeError as e:
++    print(f"✗ Error: {e}")
++
++try:
++    # Try to use it directly as a key
++    test_dict2 = {value: 'test'}
++    print("✓ Success: Can use ModelChoiceIteratorValue as dict key")
++except TypeError as e:
++    print(f"✗ Error when using as dict key: {e}")
++
++# Test hash directly
++try:
++    hash_value = hash(value)
++    print(f"✓ Success: hash(value) = {hash_value}")
++except TypeError as e:
++    print(f"✗ Error when hashing: {e}")
++
++# Test equality
++print(f"\nTesting equality:")
++print(f"value == 1: {value == 1}")
++print(f"value == ModelChoiceIteratorValue(1, None): {value == ModelChoiceIteratorValue(1, None)}")
+diff --git a/test_modelchoiceiteratorvalue_hashable.py b/test_modelchoiceiteratorvalue_hashable.py
+new file mode 100644
+index 0000000000..42d2048829
+--- /dev/null
++++ b/test_modelchoiceiteratorvalue_hashable.py
+@@ -0,0 +1,60 @@
++"""Test for ModelChoiceIteratorValue hashability."""
++from django.forms.models import ModelChoiceIteratorValue
++from django.test import SimpleTestCase
++
++
++class ModelChoiceIteratorValueTests(SimpleTestCase):
++    def test_hashable(self):
++        """ModelChoiceIteratorValue instances should be hashable."""
++        value1 = ModelChoiceIteratorValue(1, None)
++        value2 = ModelChoiceIteratorValue(1, None)
++        value3 = ModelChoiceIteratorValue(2, None)
++        
++        # Test that we can get hash values
++        hash1 = hash(value1)
++        hash2 = hash(value2)
++        hash3 = hash(value3)
++        
++        # Equal values should have equal hashes
++        self.assertEqual(hash1, hash2)
++        
++        # Different values should (usually) have different hashes
++        self.assertNotEqual(hash1, hash3)
++        
++        # Test that we can use as dictionary keys
++        test_dict = {value1: 'test1', value3: 'test2'}
++        self.assertEqual(test_dict[value1], 'test1')
++        self.assertEqual(test_dict[value2], 'test1')  # value2 == value1
++        self.assertEqual(test_dict[value3], 'test2')
++        
++        # Test that we can use in sets
++        test_set = {value1, value2, value3}
++        self.assertEqual(len(test_set), 2)  # value1 and value2 are equal
++        
++        # Test membership in dict
++        test_dict2 = {1: 'test', 2: 'test2'}
++        self.assertIn(value1, test_dict2)
++        self.assertIn(value3, test_dict2)
++        
++    def test_equality(self):
++        """Test equality behavior of ModelChoiceIteratorValue."""
++        value1 = ModelChoiceIteratorValue(1, None)
++        value2 = ModelChoiceIteratorValue(1, None)
++        value3 = ModelChoiceIteratorValue(2, None)
++        
++        # Test equality with another ModelChoiceIteratorValue
++        self.assertEqual(value1, value2)
++        self.assertNotEqual(value1, value3)
++        
++        # Test equality with raw values
++        self.assertEqual(value1, 1)
++        self.assertEqual(value3, 2)
++        self.assertNotEqual(value1, 2)
++        
++    def test_str(self):
++        """Test string representation."""
++        value = ModelChoiceIteratorValue(42, None)
++        self.assertEqual(str(value), '42')
++        
++        value_str = ModelChoiceIteratorValue('test', None)
++        self.assertEqual(str(value_str), 'test')
+diff --git a/test_real_world_scenario.py b/test_real_world_scenario.py
+new file mode 100644
+index 0000000000..d868e8c6aa
+--- /dev/null
++++ b/test_real_world_scenario.py
+@@ -0,0 +1,182 @@
++"""Test real-world scenario with ModelChoiceField and custom widget."""
++import os
++import sys
++import json
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.forms.widgets import Select
++from django.forms.models import ModelChoiceIteratorValue
++
++# Create test models
++class Department(models.Model):
++    name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return self.name
++    
++    class Meta:
++        app_label = 'test_app'
++
++class Employee(models.Model):
++    first_name = models.CharField(max_length=100)
++    last_name = models.CharField(max_length=100)
++    department = models.ForeignKey(Department, on_delete=models.CASCADE)
++    email = models.EmailField()
++    
++    def __str__(self):
++        return f"{self.first_name} {self.last_name}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Custom widget that uses ModelChoiceIteratorValue as dict key
++class EmployeeSelectWidget(Select):
++    def __init__(self, *args, show_fields=None, department_info=None, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.show_fields = show_fields or {}
++        self.department_info = department_info or {}
++    
++    def create_option(self, name, value, label, selected, index, subindex=None, attrs=None):
++        context = super().create_option(name, value, label, selected, index, subindex, attrs)
++        if not value:
++            return context
++        
++        # Multiple dictionary lookups with ModelChoiceIteratorValue
++        if value in self.show_fields:
++            context['attrs']['data-fields'] = json.dumps(self.show_fields[value])
++        
++        if value in self.department_info:
++            context['attrs']['data-department'] = self.department_info[value]
++            
++        # Test with set membership
++        special_employees = {1, 3, 5}
++        if value in special_employees:
++            context['attrs']['data-special'] = 'true'
++            
++        return context
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Department)
++    schema_editor.create_model(Employee)
++
++# Create test data
++dept1 = Department.objects.create(id=1, name="Engineering")
++dept2 = Department.objects.create(id=2, name="Sales")
++
++emp1 = Employee.objects.create(
++    id=1, 
++    first_name="Alice", 
++    last_name="Smith",
++    department=dept1,
++    email="alice@example.com"
++)
++emp2 = Employee.objects.create(
++    id=2,
++    first_name="Bob", 
++    last_name="Jones",
++    department=dept2,
++    email="bob@example.com"
++)
++emp3 = Employee.objects.create(
++    id=3,
++    first_name="Charlie", 
++    last_name="Brown",
++    department=dept1,
++    email="charlie@example.com"
++)
++
++# Create form with complex widget configuration
++class EmployeeForm(forms.Form):
++    employee = forms.ModelChoiceField(
++        queryset=Employee.objects.all(),
++        widget=EmployeeSelectWidget(
++            show_fields={
++                1: ['first_name', 'last_name', 'email'],
++                2: ['first_name', 'last_name'],
++                3: ['first_name', 'last_name', 'department']
++            },
++            department_info={
++                1: 'Engineering',
++                2: 'Sales',
++                3: 'Engineering'
++            }
++        )
++    )
++
++print("Testing complex real-world scenario...")
++try:
++    form = EmployeeForm()
++    html = str(form['employee'])
++    print("✓ Success: Form rendered successfully")
++    
++    # Verify all attributes are present
++    checks = [
++        ('data-fields', 'data-fields attribute'),
++        ('data-department', 'data-department attribute'),
++        ('data-special', 'data-special attribute')
++    ]
++    
++    for attr, desc in checks:
++        if attr in html:
++            print(f"✓ Success: {desc} found in HTML")
++        else:
++            print(f"✗ Error: {desc} not found in HTML")
++    
++    # Count occurrences
++    print(f"\nAttribute counts:")
++    print(f"  data-fields: {html.count('data-fields')}")
++    print(f"  data-department: {html.count('data-department')}")
++    print(f"  data-special: {html.count('data-special')}")
++    
++    # Test with initial value
++    form_with_initial = EmployeeForm(initial={'employee': emp1})
++    html_initial = str(form_with_initial['employee'])
++    if 'selected' in html_initial and 'Alice Smith' in html_initial:
++        print("\n✓ Success: Initial value correctly selected")
++    
++except Exception as e:
++    print(f"✗ Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
++
++# Test direct usage of ModelChoiceIteratorValue in various contexts
++print("\nTesting direct ModelChoiceIteratorValue usage...")
++value = ModelChoiceIteratorValue(1, emp1)
++
++# Dictionary operations
++test_dict = {1: 'one', 2: 'two'}
++print(f"value in dict: {value in test_dict}")
++print(f"dict.get(value): {test_dict.get(value)}")
++
++# Set operations  
++test_set = {1, 2, 3}
++print(f"value in set: {value in test_set}")
++
++# Using as dict key
++value_dict = {value: 'employee1'}
++print(f"Using as dict key: {value_dict[value]}")
++
++print("\n✓ All tests completed successfully!")
+diff --git a/test_widget_create_option.py b/test_widget_create_option.py
+new file mode 100644
+index 0000000000..5443945d2f
+--- /dev/null
++++ b/test_widget_create_option.py
+@@ -0,0 +1,93 @@
++"""Test the actual widget use case from the problem statement."""
++import os
++import sys
++import json
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    SECRET_KEY='test-secret-key',
++)
++
++django.setup()
++
++from django import forms
++from django.db import models
++from django.forms.widgets import Select
++
++# Create a test model
++class Person(models.Model):
++    first_name = models.CharField(max_length=100)
++    last_name = models.CharField(max_length=100)
++    
++    def __str__(self):
++        return f"{self.first_name} {self.last_name}"
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the custom widget from the problem statement
++class CustomSelectWidget(Select):
++    def __init__(self, *args, show_fields=None, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.show_fields = show_fields or {}
++    
++    def create_option(self, name, value, label, selected, index, subindex=None, attrs=None):
++        context = super().create_option(name, value, label, selected, index, subindex, attrs)
++        if not value:
++            return context
++        # This is the problematic line from the issue
++        if value in self.show_fields:  # This is a dict {1: ['first_name', 'last_name']}
++            context['attrs']['data-fields'] = json.dumps(self.show_fields[value])
++        return context
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Person)
++
++# Create test data
++person1 = Person.objects.create(id=1, first_name="John", last_name="Doe")
++person2 = Person.objects.create(id=2, first_name="Jane", last_name="Smith")
++
++# Create a form with the custom widget
++class PersonForm(forms.Form):
++    person = forms.ModelChoiceField(
++        queryset=Person.objects.all(),
++        widget=CustomSelectWidget(show_fields={
++            1: ['first_name', 'last_name'],
++            2: ['first_name']
++        })
++    )
++
++# Test the form rendering
++print("Testing form rendering with custom widget...")
++try:
++    form = PersonForm()
++    html = str(form['person'])
++    print("✓ Success: Form rendered successfully")
++    print("\nGenerated HTML:")
++    print(html)
++    
++    # Check if data-fields attribute is present
++    if 'data-fields' in html:
++        print("\n✓ Success: data-fields attribute found in HTML")
++    else:
++        print("\n✗ Error: data-fields attribute not found in HTML")
++        
++except Exception as e:
++    print(f"✗ Error: {type(e).__name__}: {e}")
++    import traceback
++    traceback.print_exc()
+diff --git a/tests/model_forms/test_modelchoicefield.py b/tests/model_forms/test_modelchoicefield.py
+index 2a0c05d803..b39ea4a118 100644
+--- a/tests/model_forms/test_modelchoicefield.py
++++ b/tests/model_forms/test_modelchoicefield.py
+@@ -2,7 +2,7 @@ import datetime
+ 
+ from django import forms
+ from django.core.exceptions import ValidationError
+-from django.forms.models import ModelChoiceIterator
++from django.forms.models import ModelChoiceIterator, ModelChoiceIteratorValue
+ from django.forms.widgets import CheckboxSelectMultiple
+ from django.template import Context, Template
+ from django.test import TestCase
+@@ -373,3 +373,30 @@ class ModelChoiceFieldTests(TestCase):
+         )
+         with self.assertNumQueries(2):
+             template.render(Context({'form': CategoriesForm()}))
++
++    def test_modelchoiceiteratorvalue_hashable(self):
++        """
++        ModelChoiceIteratorValue instances are hashable and can be used as
++        dict keys or in sets (see ticket #xxxxx).
++        """
++        value1 = ModelChoiceIteratorValue(1, self.c1)
++        value2 = ModelChoiceIteratorValue(1, self.c1)
++        value3 = ModelChoiceIteratorValue(2, self.c2)
++        
++        # Test hashability
++        self.assertEqual(hash(value1), hash(value2))
++        self.assertNotEqual(hash(value1), hash(value3))
++        
++        # Test as dict key
++        test_dict = {value1: 'test1', value3: 'test2'}
++        self.assertEqual(test_dict[value1], 'test1')
++        self.assertEqual(test_dict[value2], 'test1')  # value2 == value1
++        
++        # Test in sets
++        test_set = {value1, value2, value3}
++        self.assertEqual(len(test_set), 2)  # value1 and value2 are equal
++        
++        # Test membership in dict with raw values
++        test_dict2 = {1: 'test', 2: 'test2'}
++        self.assertIn(value1, test_dict2)
++        self.assertIn(value3, test_dict2)

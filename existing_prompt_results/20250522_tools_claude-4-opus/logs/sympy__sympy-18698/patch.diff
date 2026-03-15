@@ -1,0 +1,391 @@
+diff --git a/debug_sqf.py b/debug_sqf.py
+new file mode 100644
+index 0000000000..b68687aaf1
+--- /dev/null
++++ b/debug_sqf.py
+@@ -0,0 +1,21 @@
++from sympy import symbols, Mul
++from sympy.polys.polytools import _symbolic_factor_list
++from sympy.polys.polyoptions import build_options
++
++x = symbols('x')
++
++# Test case from the issue
++poly_expr = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++
++print("Expression type:", type(poly_expr))
++print("Expression args:", poly_expr.args if hasattr(poly_expr, 'args') else 'N/A')
++print("Expression:", poly_expr)
++
++# Build options
++opt = build_options([x], {})
++print("\nCalling _symbolic_factor_list with method='sqf'")
++coeff, factors = _symbolic_factor_list(poly_expr, opt, 'sqf')
++print(f"Coefficient: {coeff}")
++print("Factors:")
++for f, k in factors:
++    print(f"  {f} with multiplicity {k}")
+diff --git a/final_test.py b/final_test.py
+new file mode 100644
+index 0000000000..8443bf176a
+--- /dev/null
++++ b/final_test.py
+@@ -0,0 +1,47 @@
++from sympy import symbols, sqf_list, sqf
++from sympy.abc import x, y
++
++print("=== Testing the reported issue ===")
++# The exact case from the issue
++poly = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++result = sqf_list(poly)
++print(f"sqf_list({poly})")
++print(f"Result: {result}")
++print(f"Expected: (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])")
++print(f"Correct: {result == (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])}")
++print()
++
++# The second example from the issue (should still work)
++poly2 = x**5 - 2*x**4 - 2*x**3 + 4*x**2 + x - 2
++result2 = sqf_list(poly2)
++print(f"sqf_list({poly2})")
++print(f"Result: {result2}")
++print(f"Expected: (1, [(x - 2, 1), (x**2 - 1, 2)])")
++print(f"Correct: {result2 == (1, [(x - 2, 1), (x**2 - 1, 2)])}")
++print()
++
++print("=== Testing edge cases ===")
++# Test with rational expressions (should not break)
++f = x**5 - x**3 - x**2 + 1
++d = x**2 + y**2
++print(f"sqf(({f})/({d}))")
++result_rat = sqf(f/d)
++expected_rat = (x - 1)**2*(x**3 + 2*x**2 + 2*x + 1)/(x**2 + y**2)
++print(f"Result: {result_rat}")
++print(f"Expected: {expected_rat}")
++print(f"Correct: {result_rat == expected_rat}")
++print()
++
++# Test with already factored expression that shouldn't be combined
++poly3 = (x - 1)**2 * (x + 1)**3
++result3 = sqf_list(poly3)
++print(f"sqf_list((x - 1)**2 * (x + 1)**3)")
++print(f"Result: {result3}")
++print(f"Should not combine these factors")
++print()
++
++print("All tests completed successfully!" if all([
++    result == (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)]),
++    result2 == (1, [(x - 2, 1), (x**2 - 1, 2)]),
++    result_rat == expected_rat
++]) else "Some tests failed!")
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..189e710095
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,34 @@
++from sympy import symbols
++from sympy.polys import sqf_list
++
++x = symbols('x')
++
++# Test case 1: The problematic case from the issue
++f1 = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++print("Test case 1:")
++print(f"Input: {f1}")
++result1 = sqf_list(f1)
++print(f"Result: {result1}")
++print(f"Expected: (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])")
++print()
++
++# Test case 2: The working case from the issue
++f2 = x**5 - 2*x**4 - 2*x**3 + 4*x**2 + x - 2
++print("Test case 2:")
++print(f"Input: {f2}")
++result2 = sqf_list(f2)
++print(f"Result: {result2}")
++print(f"Expected: (1, [(x - 2, 1), (x**2 - 1, 2)])")
++print()
++
++# Let's expand the first polynomial to see what it looks like
++print("Expanded form of test case 1:")
++f1_expanded = f1.expand()
++print(f1_expanded)
++print()
++
++# Let's also check what the square-free factorization should be
++# (x - 2)^3 * (x - 3)^3 = ((x - 2)(x - 3))^3 = (x^2 - 5x + 6)^3
++print("Manual verification:")
++print("(x - 2) * (x - 3) =", (x - 2) * (x - 3))
++print("((x - 2) * (x - 3))^3 =", ((x - 2) * (x - 3))**3)
+diff --git a/sympy/polys/polytools.py b/sympy/polys/polytools.py
+index c9e77a901f..d16db92aec 100644
+--- a/sympy/polys/polytools.py
++++ b/sympy/polys/polytools.py
+@@ -5899,6 +5899,18 @@ def _symbolic_factor_list(expr, opt, method):
+     """Helper function for :func:`_symbolic_factor`. """
+     coeff, factors = S.One, []
+ 
++    # Special handling for sqf method - we need to process the entire expression
++    # as a single polynomial to properly combine factors with the same multiplicity
++    # But only if the expression doesn't contain any denominators
++    if method == 'sqf' and not any(arg.is_Pow and arg.exp.is_negative for arg in Mul.make_args(expr)):
++        try:
++            poly, _ = _poly_from_expr(expr, opt)
++            _coeff, _factors = poly.sqf_list()
++            return _coeff, _factors
++        except (PolificationFailed, AttributeError):
++            # Fall back to the regular processing if conversion fails
++            pass
++
+     args = [i._eval_factor() if hasattr(i, '_eval_factor') else i
+         for i in Mul.make_args(expr)]
+     for arg in args:
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..eef0c98a40
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,50 @@
++from sympy import symbols, sqf_list, sqf
++from sympy.abc import x, y
++
++print("Testing sqf_list with the issue case:")
++# Test case 1: The problematic case from the issue
++f1 = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++result1 = sqf_list(f1)
++print(f"Input: {f1}")
++print(f"Result: {result1}")
++print(f"Expected: (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])")
++print(f"Correct: {result1 == (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])}")
++print()
++
++# Test case 2: The working case from the issue
++f2 = x**5 - 2*x**4 - 2*x**3 + 4*x**2 + x - 2
++result2 = sqf_list(f2)
++print(f"Input: {f2}")
++print(f"Result: {result2}")
++print(f"Expected: (1, [(x - 2, 1), (x**2 - 1, 2)])")
++print(f"Correct: {result2 == (1, [(x - 2, 1), (x**2 - 1, 2)])}")
++print()
++
++# Test case 3: Rational expression (should still work)
++print("Testing sqf with rational expressions:")
++f = x**5 - x**3 - x**2 + 1
++g = x**3 + 2*x**2 + 2*x + 1
++h = x - 1
++d = x**2 + y**2
++
++print(f"sqf(f) = {sqf(f)}")
++print(f"g*h**2 = {g*h**2}")
++print(f"sqf(f) == g*h**2: {sqf(f) == g*h**2}")
++
++print(f"\nsqf(f/d) = {sqf(f/d)}")
++print(f"(g*h**2)/d = {(g*h**2)/d}")
++print(f"sqf(f/d) == (g*h**2)/d: {sqf(f/d) == (g*h**2)/d}")
++print()
++
++# Test case 4: Another case with multiple factors of same multiplicity
++print("Testing another case with multiple factors of same multiplicity:")
++f3 = (x - 1)**2 * (x - 2)**2 * (x - 3)**3 * (x - 4)**3 * (x - 5)**3
++result3 = sqf_list(f3)
++print(f"Input: (x - 1)^2 * (x - 2)^2 * (x - 3)^3 * (x - 4)^3 * (x - 5)^3")
++print(f"Result: {result3}")
++# Should combine (x-1)^2 and (x-2)^2 into (x^2 - 3x + 2)^2
++# Should combine (x-3)^3, (x-4)^3 and (x-5)^3 into (x^3 - 12x^2 + 47x - 60)^3
++expected_f2 = (x - 1) * (x - 2)  # = x^2 - 3x + 2
++expected_f3 = (x - 3) * (x - 4) * (x - 5)  # = x^3 - 12x^2 + 47x - 60
++print(f"Expected factors with multiplicity 2: {expected_f2.expand()}")
++print(f"Expected factors with multiplicity 3: {expected_f3.expand()}")
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..7fb5219e2e
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,28 @@
++from sympy import symbols, expand
++from sympy.polys.polytools import _poly_from_expr, sqf_list
++from sympy.polys.polyoptions import build_options
++
++x = symbols('x')
++
++# Test case from the issue
++poly_expr = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++
++# Build options
++opt = build_options([x], {})
++
++# Convert the entire expression to a polynomial first
++print("Converting entire expression to polynomial:")
++poly, _ = _poly_from_expr(poly_expr.expand(), opt)
++print(f"Polynomial: {poly}")
++
++# Now call sqf_list on the polynomial
++print("\nCalling sqf_list on the polynomial:")
++coeff, factors = poly.sqf_list()
++print(f"Coefficient: {coeff}")
++print("Factors:")
++for f, k in factors:
++    print(f"  {f} with multiplicity {k}")
++
++# This is what we want the high-level sqf_list to do
++print("\nExpected behavior - sqf_list should return:")
++print("(1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])")
+diff --git a/test_rational_type.py b/test_rational_type.py
+new file mode 100644
+index 0000000000..d2a5449536
+--- /dev/null
++++ b/test_rational_type.py
+@@ -0,0 +1,12 @@
++from sympy import symbols
++from sympy.abc import x, y
++
++f = x**5 - x**3 - x**2 + 1
++d = x**2 + y**2
++expr = f/d
++
++print(f"Type of f/d: {type(expr)}")
++print(f"Is it Mul? {expr.is_Mul}")
++print(f"Args: {expr.args}")
++print(f"Numerator: {expr.as_numer_denom()[0]}")
++print(f"Denominator: {expr.as_numer_denom()[1]}")
+diff --git a/test_sqf_issue.py b/test_sqf_issue.py
+new file mode 100644
+index 0000000000..a1ee3757f9
+--- /dev/null
++++ b/test_sqf_issue.py
+@@ -0,0 +1,26 @@
++from sympy import symbols
++from sympy.polys import ring, ZZ
++from sympy.polys.sqfreetools import dup_sqf_list
++
++x = symbols('x')
++R, X = ring("x", ZZ)
++
++# Test the low-level function directly
++# (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++# Expanded: x**10 - 17*x**9 + 125*x**8 - 523*x**7 + 1385*x**6 - 2467*x**5 + 3115*x**4 - 2933*x**3 + 2070*x**2 - 972*x + 216
++f = X**10 - 17*X**9 + 125*X**8 - 523*X**7 + 1385*X**6 - 2467*X**5 + 3115*X**4 - 2933*X**3 + 2070*X**2 - 972*X + 216
++f_dup = f.rep.rep  # Get the dense univariate polynomial representation
++
++print("Testing dup_sqf_list directly:")
++coeff, factors = R.dup_sqf_list(f)
++print(f"Coefficient: {coeff}")
++print("Factors:")
++for factor, mult in factors:
++    print(f"  {factor} with multiplicity {mult}")
++
++# Now let's test the high-level sqf_list function
++from sympy.polys import sqf_list as high_level_sqf_list
++print("\nTesting high-level sqf_list:")
++poly_expr = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++result = high_level_sqf_list(poly_expr)
++print(f"Result: {result}")
+diff --git a/test_sqf_issue2.py b/test_sqf_issue2.py
+new file mode 100644
+index 0000000000..d8c1821634
+--- /dev/null
++++ b/test_sqf_issue2.py
+@@ -0,0 +1,29 @@
++from sympy import symbols, expand
++from sympy.polys import ring, ZZ, sqf_list, Poly
++
++x = symbols('x')
++
++# Test case from the issue
++poly_expr = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++
++print("High-level sqf_list test:")
++print(f"Input: {poly_expr}")
++result = sqf_list(poly_expr)
++print(f"Result: {result}")
++print(f"Expected: (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])")
++
++# Let's test with a Poly object
++print("\nTesting with Poly object:")
++p = Poly(poly_expr.expand(), x)
++result2 = sqf_list(p)
++print(f"Result: {result2}")
++
++# Let's test the ring version
++print("\nTesting ring version:")
++R, X = ring("x", ZZ)
++f = (X**2 + 1) * (X - 1)**2 * (X - 2)**3 * (X - 3)**3
++coeff, factors = R.dup_sqf_list(f)
++print(f"Coefficient: {coeff}")
++print("Factors:")
++for factor, mult in factors:
++    print(f"  {factor} with multiplicity {mult}")
+diff --git a/test_sqf_list_combine.py b/test_sqf_list_combine.py
+new file mode 100644
+index 0000000000..8eb3b4ab4b
+--- /dev/null
++++ b/test_sqf_list_combine.py
+@@ -0,0 +1,40 @@
++"""Test that sqf_list properly combines factors with the same multiplicity"""
++from sympy import symbols, sqf_list
++from sympy.polys import ring, ZZ
++
++def test_sqf_list_combine_same_multiplicity():
++    """Test that factors with the same multiplicity are combined in sqf_list"""
++    x = symbols('x')
++    
++    # Test case 1: Two factors with multiplicity 3
++    f1 = (x**2 + 1) * (x - 1)**2 * (x - 2)**3 * (x - 3)**3
++    result1 = sqf_list(f1)
++    # (x - 2)^3 * (x - 3)^3 should be combined into (x^2 - 5x + 6)^3
++    assert result1 == (1, [(x**2 + 1, 1), (x - 1, 2), (x**2 - 5*x + 6, 3)])
++    
++    # Test case 2: Three factors with multiplicity 3
++    f2 = (x - 1)**2 * (x - 2)**2 * (x - 3)**3 * (x - 4)**3 * (x - 5)**3
++    result2 = sqf_list(f2)
++    # (x - 1)^2 * (x - 2)^2 should be combined into (x^2 - 3x + 2)^2
++    # (x - 3)^3 * (x - 4)^3 * (x - 5)^3 should be combined into (x^3 - 12x^2 + 47x - 60)^3
++    assert result2 == (1, [(x**2 - 3*x + 2, 2), (x**3 - 12*x**2 + 47*x - 60, 3)])
++    
++    # Test case 3: Already expanded polynomial (should give same result)
++    f3 = f1.expand()
++    result3 = sqf_list(f3)
++    assert result3 == result1
++    
++    # Test case 4: Ring version should also work
++    R, X = ring("x", ZZ)
++    f4 = (X**2 + 1) * (X - 1)**2 * (X - 2)**3 * (X - 3)**3
++    coeff, factors = R.dup_sqf_list(f4)
++    assert coeff == 1
++    assert len(factors) == 3
++    assert (X**2 + 1, 1) in factors
++    assert (X - 1, 2) in factors
++    assert (X**2 - 5*X + 6, 3) in factors
++    
++    print("All tests passed!")
++
++if __name__ == "__main__":
++    test_sqf_list_combine_same_multiplicity()
+diff --git a/test_sqf_rational.py b/test_sqf_rational.py
+new file mode 100644
+index 0000000000..1a1b095662
+--- /dev/null
++++ b/test_sqf_rational.py
+@@ -0,0 +1,21 @@
++from sympy import symbols, sqf
++from sympy.abc import x, y
++
++f = x**5 - x**3 - x**2 + 1
++g = x**3 + 2*x**2 + 2*x + 1
++h = x - 1
++d = x**2 + y**2
++
++print(f"f = {f}")
++print(f"g = {g}")
++print(f"h = {h}")
++print(f"d = {d}")
++print(f"f/d = {f/d}")
++
++print(f"\nsqf(f) = {sqf(f)}")
++print(f"g*h**2 = {g*h**2}")
++print(f"sqf(f) == g*h**2: {sqf(f) == g*h**2}")
++
++print(f"\nsqf(f/d) = {sqf(f/d)}")
++print(f"(g*h**2)/d = {(g*h**2)/d}")
++print(f"sqf(f/d) == (g*h**2)/d: {sqf(f/d) == (g*h**2)/d}")

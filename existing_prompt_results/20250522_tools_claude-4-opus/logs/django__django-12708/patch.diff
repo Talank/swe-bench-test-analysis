@@ -1,0 +1,632 @@
+diff --git a/django/db/backends/base/schema.py b/django/db/backends/base/schema.py
+index 61f88401ab..1f521cfc5c 100644
+--- a/django/db/backends/base/schema.py
++++ b/django/db/backends/base/schema.py
+@@ -393,7 +393,7 @@ class BaseDatabaseSchemaEditor:
+         news = {tuple(fields) for fields in new_index_together}
+         # Deleted indexes
+         for fields in olds.difference(news):
+-            self._delete_composed_index(model, fields, {'index': True}, self.sql_delete_index)
++            self._delete_composed_index(model, fields, {'index': True, 'unique': False}, self.sql_delete_index)
+         # Created indexes
+         for field_names in news.difference(olds):
+             fields = [model._meta.get_field(field) for field in field_names]
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..fdbfb33481
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,87 @@
++"""
++Test script to verify the fix for deleting index_together when unique_together exists on same fields.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create a test app and model
++class TestModel(models.Model):
++    field1 = models.CharField(max_length=100)
++    field2 = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Test the schema editor directly
++with connection.schema_editor() as editor:
++    # Create the table
++    editor.create_model(TestModel)
++    
++    # Add unique_together
++    editor.alter_unique_together(TestModel, [], [['field1', 'field2']])
++    
++    # Add index_together
++    editor.alter_index_together(TestModel, [], [['field1', 'field2']])
++    
++    # Check constraints
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++        print("Constraints after adding unique_together and index_together:")
++        for name, info in constraints.items():
++            if info.get('unique') or info.get('index'):
++                print(f"  {name}: unique={info.get('unique', False)}, index={info.get('index', False)}, columns={info.get('columns', [])}")
++    
++    # Test what _constraint_names returns with different parameters
++    columns = ['field1', 'field2']
++    
++    # Check with index=True
++    constraint_names = editor._constraint_names(
++        TestModel, columns, index=True
++    )
++    print(f"\nConstraints found with index=True: {constraint_names}")
++    
++    # Check with index=True, unique=False
++    constraint_names = editor._constraint_names(
++        TestModel, columns, index=True, unique=False
++    )
++    print(f"Constraints found with index=True, unique=False: {constraint_names}")
++    
++    # Now try to remove index_together
++    print("\nRemoving index_together...")
++    try:
++        editor.alter_index_together(TestModel, [['field1', 'field2']], [])
++        print("Successfully removed index_together!")
++        
++        # Check constraints after removal
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++            print("\nConstraints after removing index_together:")
++            for name, info in constraints.items():
++                if info.get('unique') or info.get('index'):
++                    print(f"  {name}: unique={info.get('unique', False)}, index={info.get('index', False)}, columns={info.get('columns', [])}")
++    except Exception as e:
++        print(f"Error: {e}")
+diff --git a/test_index_unique_together.py b/test_index_unique_together.py
+new file mode 100644
+index 0000000000..92a94b1433
+--- /dev/null
++++ b/test_index_unique_together.py
+@@ -0,0 +1,178 @@
++"""
++Test to ensure that removing index_together works when unique_together exists on the same fields.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Test models
++class TestModel(models.Model):
++    field1 = models.CharField(max_length=100)
++    field2 = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++
++class TestModelWithBoth(models.Model):
++    field1 = models.CharField(max_length=100)
++    field2 = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        unique_together = [['field1', 'field2']]
++        index_together = [['field1', 'field2']]
++
++def test_remove_index_together_with_unique_together():
++    """Test that we can remove index_together when unique_together exists on same fields."""
++    with connection.schema_editor() as editor:
++        # Create the table
++        editor.create_model(TestModel)
++        
++        # Add both unique_together and index_together
++        editor.alter_unique_together(TestModel, [], [['field1', 'field2']])
++        editor.alter_index_together(TestModel, [], [['field1', 'field2']])
++        
++        # Verify both constraints exist
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++            unique_constraints = [name for name, info in constraints.items() 
++                                if info.get('unique') and info.get('columns') == ['field1', 'field2']]
++            index_constraints = [name for name, info in constraints.items() 
++                               if info.get('index') and not info.get('unique') 
++                               and info.get('columns') == ['field1', 'field2']]
++            
++            assert len(unique_constraints) == 1, f"Expected 1 unique constraint, found {len(unique_constraints)}"
++            assert len(index_constraints) == 1, f"Expected 1 index constraint, found {len(index_constraints)}"
++        
++        # Remove index_together - this should work without error
++        editor.alter_index_together(TestModel, [['field1', 'field2']], [])
++        
++        # Verify unique constraint still exists but index is gone
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++            unique_constraints = [name for name, info in constraints.items() 
++                                if info.get('unique') and info.get('columns') == ['field1', 'field2']]
++            index_constraints = [name for name, info in constraints.items() 
++                               if info.get('index') and not info.get('unique') 
++                               and info.get('columns') == ['field1', 'field2']]
++            
++            assert len(unique_constraints) == 1, f"Expected 1 unique constraint after removal, found {len(unique_constraints)}"
++            assert len(index_constraints) == 0, f"Expected 0 index constraints after removal, found {len(index_constraints)}"
++        
++        print("SUCCESS: Successfully removed index_together while keeping unique_together")
++
++def test_remove_unique_together_with_index_together():
++    """Test that we can remove unique_together when index_together exists on same fields."""
++    with connection.schema_editor() as editor:
++        # Create a fresh table without constraints first
++        class TempModel(models.Model):
++            field1 = models.CharField(max_length=100)
++            field2 = models.CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'test_app'
++                db_table = 'test_app_tempmodel'
++        
++        editor.create_model(TempModel)
++        
++        # Add both constraints
++        editor.alter_unique_together(TempModel, [], [['field1', 'field2']])
++        editor.alter_index_together(TempModel, [], [['field1', 'field2']])
++        
++        # Remove unique_together - this should work without error
++        editor.alter_unique_together(TempModel, [['field1', 'field2']], [])
++        
++        # Verify index still exists but unique is gone
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_app_tempmodel')
++            unique_constraints = [name for name, info in constraints.items() 
++                                if info.get('unique') and info.get('columns') == ['field1', 'field2']]
++            index_constraints = [name for name, info in constraints.items() 
++                               if info.get('index') and not info.get('unique') 
++                               and info.get('columns') == ['field1', 'field2']]
++            
++            assert len(unique_constraints) == 0, f"Expected 0 unique constraints after removal, found {len(unique_constraints)}"
++            assert len(index_constraints) == 1, f"Expected 1 index constraint after removal, found {len(index_constraints)}"
++        
++        print("SUCCESS: Successfully removed unique_together while keeping index_together")
++
++def test_migrations_work():
++    """Test that migrations work correctly with both constraints."""
++    # Create initial migration
++    initial_migration = Migration('0001_initial', 'test_app')
++    initial_migration.operations = [
++        operations.CreateModel(
++            name='MigrationTestModel',
++            fields=[
++                ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++                ('field1', models.CharField(max_length=100)),
++                ('field2', models.CharField(max_length=100)),
++            ],
++            options={
++                'unique_together': {('field1', 'field2')},
++                'index_together': {('field1', 'field2')},
++            },
++        ),
++    ]
++    
++    # Create migration to remove index_together
++    remove_index_migration = Migration('0002_remove_index', 'test_app')
++    remove_index_migration.dependencies = [('test_app', '0001_initial')]
++    remove_index_migration.operations = [
++        operations.AlterIndexTogether(
++            name='migrationtestmodel',
++            index_together=set(),
++        ),
++    ]
++    
++    # Apply migrations
++    from django.db.migrations.state import ProjectState
++    
++    with connection.schema_editor() as schema_editor:
++        # Apply initial migration
++        project_state = ProjectState()
++        new_state = initial_migration.apply(project_state, schema_editor)
++        
++        # Check constraints after initial migration
++        with connection.cursor() as cursor:
++            constraints = connection.introspection.get_constraints(cursor, 'test_app_migrationtestmodel')
++            print("\nConstraints after initial migration:")
++            for name, info in constraints.items():
++                if info.get('unique') or info.get('index'):
++                    print(f"  {name}: unique={info.get('unique', False)}, index={info.get('index', False)}, columns={info.get('columns', [])}")
++        
++        # Apply remove index migration - this should work without error
++        newer_state = remove_index_migration.apply(new_state, schema_editor)
++        
++        print("SUCCESS: Migrations applied successfully")
++
++if __name__ == '__main__':
++    print("Testing index_together and unique_together interaction...")
++    test_remove_index_together_with_unique_together()
++    test_remove_unique_together_with_index_together()
++    test_migrations_work()
++    print("\nAll tests passed!")
+diff --git a/test_issue_reproduction.py b/test_issue_reproduction.py
+new file mode 100644
+index 0000000000..9ac75246f1
+--- /dev/null
++++ b/test_issue_reproduction.py
+@@ -0,0 +1,120 @@
++"""
++Test script to reproduce the issue with deleting index_together when unique_together exists on same fields.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.migrations.executor import MigrationExecutor
++from django.db.migrations.migration import Migration
++from django.db.migrations import operations
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++    ],
++    USE_TZ=False,
++)
++
++django.setup()
++
++# Create a test app and model
++class TestModel(models.Model):
++    field1 = models.CharField(max_length=100)
++    field2 = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        unique_together = [['field1', 'field2']]
++        index_together = [['field1', 'field2']]
++
++# Create the initial migration
++initial_migration = Migration('0001_initial', 'test_app')
++initial_migration.operations = [
++    operations.CreateModel(
++        name='TestModel',
++        fields=[
++            ('id', models.AutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
++            ('field1', models.CharField(max_length=100)),
++            ('field2', models.CharField(max_length=100)),
++        ],
++        options={
++            'unique_together': {('field1', 'field2')},
++            'index_together': {('field1', 'field2')},
++        },
++    ),
++]
++
++# Create migration to remove index_together
++remove_index_migration = Migration('0002_remove_index', 'test_app')
++remove_index_migration.dependencies = [('test_app', '0001_initial')]
++remove_index_migration.operations = [
++    operations.AlterIndexTogether(
++        name='testmodel',
++        index_together=set(),
++    ),
++]
++
++# Apply migrations
++from django.db import connection
++from django.db.migrations.state import ProjectState
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    # Create initial state
++    project_state = ProjectState()
++    
++    # Apply initial migration
++    new_state = initial_migration.apply(project_state, schema_editor)
++    
++    print("Initial migration applied successfully")
++    
++    # Check constraints
++    with connection.cursor() as cursor:
++        constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++        print("\nConstraints after initial migration:")
++        for name, info in constraints.items():
++            if info.get('unique') or info.get('index'):
++                print(f"  {name}: unique={info.get('unique', False)}, index={info.get('index', False)}, columns={info.get('columns', [])}")
++    
++    # Try to apply the remove index migration
++    try:
++        newer_state = remove_index_migration.apply(new_state, schema_editor)
++        print("\nRemove index migration applied successfully")
++    except ValueError as e:
++        print(f"\nError occurred as expected: {e}")
++
++# Let's see what constraints are found
++with connection.cursor() as cursor:
++    all_constraints = connection.introspection.get_constraints(cursor, 'test_app_testmodel')
++    print("\nAll constraints in the table:")
++    for name, info in all_constraints.items():
++        if info.get('unique') or info.get('index'):
++            print(f"  {name}: unique={info.get('unique', False)}, index={info.get('index', False)}, columns={info.get('columns', [])}")
++
++# Check what _constraint_names returns
++from django.db.backends.base.schema import BaseDatabaseSchemaEditor
++with connection.schema_editor() as editor:
++    columns = ['field1', 'field2']
++    
++    # Check what _constraint_names returns for index=True
++    constraint_names = editor._constraint_names(
++        TestModel, columns, index=True
++    )
++    print(f"\nConstraints found with index=True: {constraint_names}")
++    
++    # Check what _constraint_names returns for unique=True
++    constraint_names = editor._constraint_names(
++        TestModel, columns, unique=True
++    )
++    print(f"Constraints found with unique=True: {constraint_names}")
+diff --git a/test_patch.py b/test_patch.py
+new file mode 100644
+index 0000000000..6f703ef5a6
+--- /dev/null
++++ b/test_patch.py
+@@ -0,0 +1,142 @@
++"""
++Test to verify the patch for removing index_together when unique_together exists on the same fields.
++This test should be added to the Django test suite.
++"""
++from django.db import models, connection
++from django.test import TestCase, TransactionTestCase
++
++
++class IndexUniqueTogetherTests(TransactionTestCase):
++    """Tests for index_together and unique_together interaction."""
++    
++    available_apps = []
++    
++    def test_remove_index_together_with_unique_together(self):
++        """Removing index_together should work when unique_together exists on same fields."""
++        
++        class TestModel(models.Model):
++            field1 = models.CharField(max_length=100)
++            field2 = models.CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'schema'
++                db_table = 'test_remove_idx_with_uniq'
++        
++        with connection.schema_editor() as editor:
++            # Create the table
++            editor.create_model(TestModel)
++            
++            # Add both unique_together and index_together
++            editor.alter_unique_together(TestModel, [], [['field1', 'field2']])
++            editor.alter_index_together(TestModel, [], [['field1', 'field2']])
++            
++            # Verify both constraints exist
++            constraints = self.get_constraints(TestModel._meta.db_table)
++            unique_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('unique') and info.get('columns') == ['field1', 'field2']
++            ]
++            index_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('index') and not info.get('unique') 
++                and info.get('columns') == ['field1', 'field2']
++            ]
++            
++            self.assertEqual(len(unique_constraints), 1)
++            self.assertEqual(len(index_constraints), 1)
++            
++            # Remove index_together - this should work without error
++            editor.alter_index_together(TestModel, [['field1', 'field2']], [])
++            
++            # Verify unique constraint still exists but index is gone
++            constraints = self.get_constraints(TestModel._meta.db_table)
++            unique_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('unique') and info.get('columns') == ['field1', 'field2']
++            ]
++            index_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('index') and not info.get('unique') 
++                and info.get('columns') == ['field1', 'field2']
++            ]
++            
++            self.assertEqual(len(unique_constraints), 1)
++            self.assertEqual(len(index_constraints), 0)
++            
++            # Clean up
++            editor.delete_model(TestModel)
++    
++    def test_remove_unique_together_with_index_together(self):
++        """Removing unique_together should work when index_together exists on same fields."""
++        
++        class TestModel(models.Model):
++            field1 = models.CharField(max_length=100)
++            field2 = models.CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'schema'
++                db_table = 'test_remove_uniq_with_idx'
++        
++        with connection.schema_editor() as editor:
++            # Create the table
++            editor.create_model(TestModel)
++            
++            # Add both unique_together and index_together
++            editor.alter_unique_together(TestModel, [], [['field1', 'field2']])
++            editor.alter_index_together(TestModel, [], [['field1', 'field2']])
++            
++            # Remove unique_together - this should work without error
++            editor.alter_unique_together(TestModel, [['field1', 'field2']], [])
++            
++            # Verify index still exists but unique is gone
++            constraints = self.get_constraints(TestModel._meta.db_table)
++            unique_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('unique') and info.get('columns') == ['field1', 'field2']
++            ]
++            index_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('index') and not info.get('unique') 
++                and info.get('columns') == ['field1', 'field2']
++            ]
++            
++            self.assertEqual(len(unique_constraints), 0)
++            self.assertEqual(len(index_constraints), 1)
++            
++            # Clean up
++            editor.delete_model(TestModel)
++    
++    def get_constraints(self, table_name):
++        """Helper to get constraints for a table."""
++        with connection.cursor() as cursor:
++            return connection.introspection.get_constraints(cursor, table_name)
++
++
++if __name__ == '__main__':
++    # Run the test
++    import django
++    from django.conf import settings
++    from django.test.utils import get_runner
++    
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++    
++    TestRunner = get_runner(settings)
++    test_runner = TestRunner()
++    failures = test_runner.run_tests(["__main__.IndexUniqueTogetherTests"])
++    if failures:
++        print(f"\nTests failed: {failures}")
++    else:
++        print("\nAll tests passed!")
+diff --git a/tests/schema/tests.py b/tests/schema/tests.py
+index 9aa1e239ac..974561827f 100644
+--- a/tests/schema/tests.py
++++ b/tests/schema/tests.py
+@@ -2245,6 +2245,63 @@ class SchemaTests(TransactionTestCase):
+             AuthorWithIndexedNameAndBirthday._meta.indexes = []
+             editor.remove_index(AuthorWithIndexedNameAndBirthday, index)
+ 
++    def test_remove_index_together_with_unique_together(self):
++        """
++        Removing index_together should work when unique_together exists on the same fields.
++        """
++        # Create a test model
++        class TestModel(Model):
++            field1 = CharField(max_length=100)
++            field2 = CharField(max_length=100)
++            
++            class Meta:
++                app_label = 'schema'
++                db_table = 'test_idx_uniq_together'
++        
++        with connection.schema_editor() as editor:
++            # Create the table
++            editor.create_model(TestModel)
++            
++            # Add both unique_together and index_together on the same fields
++            editor.alter_unique_together(TestModel, [], [['field1', 'field2']])
++            editor.alter_index_together(TestModel, [], [['field1', 'field2']])
++            
++            # Verify both constraints exist
++            constraints = self.get_constraints(TestModel._meta.db_table)
++            unique_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('unique') and info.get('columns') == ['field1', 'field2']
++            ]
++            index_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('index') and not info.get('unique') 
++                and info.get('columns') == ['field1', 'field2']
++            ]
++            
++            self.assertEqual(len(unique_constraints), 1)
++            self.assertEqual(len(index_constraints), 1)
++            
++            # Remove index_together - this should work without error
++            editor.alter_index_together(TestModel, [['field1', 'field2']], [])
++            
++            # Verify unique constraint still exists but index is gone
++            constraints = self.get_constraints(TestModel._meta.db_table)
++            unique_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('unique') and info.get('columns') == ['field1', 'field2']
++            ]
++            index_constraints = [
++                name for name, info in constraints.items() 
++                if info.get('index') and not info.get('unique') 
++                and info.get('columns') == ['field1', 'field2']
++            ]
++            
++            self.assertEqual(len(unique_constraints), 1)
++            self.assertEqual(len(index_constraints), 0)
++            
++            # Clean up
++            editor.delete_model(TestModel)
++
+     @isolate_apps('schema')
+     def test_db_table(self):
+         """

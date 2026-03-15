@@ -1,0 +1,872 @@
+diff --git a/django/contrib/admin/filters.py b/django/contrib/admin/filters.py
+index d65e01d5e2..95293c2399 100644
+--- a/django/contrib/admin/filters.py
++++ b/django/contrib/admin/filters.py
+@@ -198,6 +198,12 @@ class RelatedFieldListFilter(FieldListFilter):
+         related_admin = model_admin.admin_site._registry.get(field.remote_field.model)
+         if related_admin is not None:
+             ordering = related_admin.get_ordering(request)
++        if not ordering:
++            # Fall back to the model's default ordering
++            ordering = field.remote_field.model._meta.ordering
++        # Ensure ordering is not None (it could be None if explicitly set in Meta)
++        if ordering is None:
++            ordering = ()
+         return field.get_choices(include_blank=False, ordering=ordering)
+ 
+     def choices(self, changelist):
+@@ -419,4 +425,14 @@ FieldListFilter.register(lambda f: True, AllValuesFieldListFilter)
+ class RelatedOnlyFieldListFilter(RelatedFieldListFilter):
+     def field_choices(self, field, request, model_admin):
+         pk_qs = model_admin.get_queryset(request).distinct().values_list('%s__pk' % self.field_path, flat=True)
+-        return field.get_choices(include_blank=False, limit_choices_to={'pk__in': pk_qs})
++        ordering = ()
++        related_admin = model_admin.admin_site._registry.get(field.remote_field.model)
++        if related_admin is not None:
++            ordering = related_admin.get_ordering(request)
++        if not ordering:
++            # Fall back to the model's default ordering
++            ordering = field.remote_field.model._meta.ordering
++        # Ensure ordering is not None (it could be None if explicitly set in Meta)
++        if ordering is None:
++            ordering = ()
++        return field.get_choices(include_blank=False, limit_choices_to={'pk__in': pk_qs}, ordering=ordering)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..dba398a287
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,184 @@
++"""
++Test edge cases for the ordering fix
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django modules after setup
++from django.db import models, connection
++from django.contrib import admin
++from django.test import RequestFactory
++from django.contrib.admin.filters import RelatedFieldListFilter, RelatedOnlyFieldListFilter
++from django.contrib.auth.models import AnonymousUser
++
++# Test case 1: Model with no Meta.ordering (should default to empty tuple)
++class AuthorNoOrdering(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++    
++    def __str__(self):
++        return self.name
++
++
++# Test case 2: Model with ordering = None
++class AuthorNoneOrdering(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = None
++    
++    def __str__(self):
++        return self.name
++
++
++# Test case 3: Model with empty ordering
++class AuthorEmptyOrdering(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = []
++    
++    def __str__(self):
++        return self.name
++
++
++class Book1(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(AuthorNoOrdering, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Book2(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(AuthorNoneOrdering, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++class Book3(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(AuthorEmptyOrdering, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++
++
++# Create the database tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(AuthorNoOrdering)
++    schema_editor.create_model(AuthorNoneOrdering)
++    schema_editor.create_model(AuthorEmptyOrdering)
++    schema_editor.create_model(Book1)
++    schema_editor.create_model(Book2)
++    schema_editor.create_model(Book3)
++
++# Create test data
++author1_no = AuthorNoOrdering.objects.create(name="Zoe")
++author2_no = AuthorNoOrdering.objects.create(name="Alice")
++
++author1_none = AuthorNoneOrdering.objects.create(name="Zoe")
++author2_none = AuthorNoneOrdering.objects.create(name="Alice")
++
++author1_empty = AuthorEmptyOrdering.objects.create(name="Zoe")
++author2_empty = AuthorEmptyOrdering.objects.create(name="Alice")
++
++# Define admin classes
++class AuthorAdmin(admin.ModelAdmin):
++    pass
++
++
++class BookAdmin(admin.ModelAdmin):
++    list_filter = ['author']
++
++
++# Test all cases
++admin_site = admin.AdminSite()
++
++# Create a request
++factory = RequestFactory()
++request = factory.get('/')
++request.user = AnonymousUser()
++
++print("Testing edge cases for ordering fallback:")
++
++# Test case 1: No Meta.ordering
++print("\n1. Model with no Meta.ordering:")
++admin_site._registry = {}
++admin_site.register(AuthorNoOrdering, AuthorAdmin)
++admin_site.register(Book1, BookAdmin)
++book_model_admin = admin_site._registry[Book1]
++author_field = Book1._meta.get_field('author')
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book1, book_model_admin, 'author'
++)
++choices = list(filter_instance.field_choices(author_field, request, book_model_admin))
++print(f"  Choices: {choices}")
++print(f"  Model._meta.ordering: {AuthorNoOrdering._meta.ordering}")
++
++# Test case 2: ordering = None
++print("\n2. Model with ordering = None:")
++admin_site._registry = {}
++admin_site.register(AuthorNoneOrdering, AuthorAdmin)
++admin_site.register(Book2, BookAdmin)
++book_model_admin = admin_site._registry[Book2]
++author_field = Book2._meta.get_field('author')
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book2, book_model_admin, 'author'
++)
++choices = list(filter_instance.field_choices(author_field, request, book_model_admin))
++print(f"  Choices: {choices}")
++print(f"  Model._meta.ordering: {AuthorNoneOrdering._meta.ordering}")
++
++# Test case 3: ordering = []
++print("\n3. Model with ordering = []:")
++admin_site._registry = {}
++admin_site.register(AuthorEmptyOrdering, AuthorAdmin)
++admin_site.register(Book3, BookAdmin)
++book_model_admin = admin_site._registry[Book3]
++author_field = Book3._meta.get_field('author')
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book3, book_model_admin, 'author'
++)
++choices = list(filter_instance.field_choices(author_field, request, book_model_admin))
++print(f"  Choices: {choices}")
++print(f"  Model._meta.ordering: {AuthorEmptyOrdering._meta.ordering}")
++
++print("\nAll edge cases handled correctly - no errors!")
+diff --git a/test_ordering_fix.py b/test_ordering_fix.py
+new file mode 100644
+index 0000000000..a1f6422322
+--- /dev/null
++++ b/test_ordering_fix.py
+@@ -0,0 +1,145 @@
++"""
++Test to verify the ordering fix for RelatedFieldListFilter and RelatedOnlyFieldListFilter
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django modules after setup
++from django.db import models, connection
++from django.contrib import admin
++from django.test import RequestFactory
++from django.contrib.admin.filters import RelatedFieldListFilter, RelatedOnlyFieldListFilter
++from django.contrib.auth.models import AnonymousUser
++
++# Create test app models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['name']  # This should be used when no admin ordering is defined
++    
++    def __str__(self):
++        return self.name
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++    
++    def __str__(self):
++        return self.title
++
++
++# Create the database tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create test data in reverse alphabetical order to test ordering
++author3 = Author.objects.create(name="Zoe")
++author2 = Author.objects.create(name="Bob")
++author1 = Author.objects.create(name="Alice")
++
++book1 = Book.objects.create(title="Book 1", author=author3)
++book2 = Book.objects.create(title="Book 2", author=author2)
++book3 = Book.objects.create(title="Book 3", author=author1)
++
++# Define admin classes
++class AuthorAdmin(admin.ModelAdmin):
++    pass  # No ordering defined - should fall back to model's Meta.ordering
++
++
++class BookAdmin(admin.ModelAdmin):
++    list_filter = ['author']
++
++
++# Register models
++admin_site = admin.AdminSite()
++admin_site.register(Author, AuthorAdmin)
++admin_site.register(Book, BookAdmin)
++
++# Create a request
++factory = RequestFactory()
++request = factory.get('/')
++request.user = AnonymousUser()
++
++# Get the field
++book_model_admin = admin_site._registry[Book]
++author_field = Book._meta.get_field('author')
++
++# Test RelatedFieldListFilter
++print("Testing RelatedFieldListFilter:")
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book, book_model_admin, 'author'
++)
++
++# Get the choices
++choices = list(filter_instance.field_choices(author_field, request, book_model_admin))
++print("Choices from RelatedFieldListFilter:")
++for pk, name in choices:
++    print(f"  {pk}: {name}")
++
++# Verify ordering
++author_names = [name for pk, name in choices]
++print(f"\nActual order: {author_names}")
++print(f"Expected order: ['Alice', 'Bob', 'Zoe'] (alphabetical as defined in Author.Meta.ordering)")
++assert author_names == ['Alice', 'Bob', 'Zoe'], f"Ordering is incorrect! Got {author_names}"
++print("PASS: RelatedFieldListFilter ordering is correct!")
++
++# Now test RelatedOnlyFieldListFilter
++print("\n\nTesting RelatedOnlyFieldListFilter:")
++
++# Create the filter
++filter_instance2 = RelatedOnlyFieldListFilter(
++    author_field, request, {}, Book, book_model_admin, 'author'
++)
++
++# Get the choices
++choices2 = list(filter_instance2.field_choices(author_field, request, book_model_admin))
++print("Choices from RelatedOnlyFieldListFilter:")
++for pk, name in choices2:
++    print(f"  {pk}: {name}")
++
++# Verify ordering
++author_names2 = [name for pk, name in choices2]
++print(f"\nActual order: {author_names2}")
++print(f"Expected order: ['Alice', 'Bob', 'Zoe'] (alphabetical as defined in Author.Meta.ordering)")
++assert author_names2 == ['Alice', 'Bob', 'Zoe'], f"Ordering is incorrect! Got {author_names2}"
++print("PASS: RelatedOnlyFieldListFilter ordering is correct!")
++
++print("\n\nSUCCESS: All tests passed! The ordering fix is working correctly.")
+diff --git a/test_ordering_issue.py b/test_ordering_issue.py
+new file mode 100644
+index 0000000000..b70395e697
+--- /dev/null
++++ b/test_ordering_issue.py
+@@ -0,0 +1,143 @@
++"""
++Test script to reproduce the ordering issue in RelatedFieldListFilter and RelatedOnlyFieldListFilter
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django modules after setup
++from django.db import models
++from django.contrib import admin
++from django.test import RequestFactory
++from django.contrib.admin.views.main import ChangeList
++from django.contrib.auth.models import User
++
++# Define test models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['name']  # This should be used when no admin ordering is defined
++    
++    def __str__(self):
++        return self.name
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++    
++    def __str__(self):
++        return self.title
++
++
++# Create the database tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create test data
++author1 = Author.objects.create(name="Zoe")
++author2 = Author.objects.create(name="Alice")
++author3 = Author.objects.create(name="Bob")
++
++book1 = Book.objects.create(title="Book 1", author=author1)
++book2 = Book.objects.create(title="Book 2", author=author2)
++book3 = Book.objects.create(title="Book 3", author=author3)
++
++# Define admin classes
++class AuthorAdmin(admin.ModelAdmin):
++    pass  # No ordering defined - should fall back to model's Meta.ordering
++
++
++class BookAdmin(admin.ModelAdmin):
++    list_filter = ['author']
++
++
++# Register models
++admin_site = admin.AdminSite()
++admin_site.register(Author, AuthorAdmin)
++admin_site.register(Book, BookAdmin)
++
++# Test RelatedFieldListFilter
++from django.contrib.admin.filters import RelatedFieldListFilter, RelatedOnlyFieldListFilter
++
++# Create a request
++factory = RequestFactory()
++request = factory.get('/')
++request.user = User.objects.create_superuser('admin', 'admin@example.com', 'password')
++
++# Get the field
++book_model_admin = admin_site._registry[Book]
++author_field = Book._meta.get_field('author')
++
++# Test RelatedFieldListFilter
++print("Testing RelatedFieldListFilter:")
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book, book_model_admin, 'author'
++)
++
++# Get the choices
++choices = filter_instance.field_choices(author_field, request, book_model_admin)
++print("Choices from RelatedFieldListFilter:")
++for choice in choices:
++    print(f"  {choice}")
++
++# Now let's test with RelatedOnlyFieldListFilter
++print("\nTesting RelatedOnlyFieldListFilter:")
++
++# First, let's create a custom admin that uses RelatedOnlyFieldListFilter
++class BookAdminWithRelatedOnly(admin.ModelAdmin):
++    list_filter = [('author', RelatedOnlyFieldListFilter)]
++
++admin_site2 = admin.AdminSite()
++admin_site2.register(Author, AuthorAdmin)
++admin_site2.register(Book, BookAdminWithRelatedOnly)
++
++book_model_admin2 = admin_site2._registry[Book]
++
++# Create the filter
++filter_instance2 = RelatedOnlyFieldListFilter(
++    author_field, request, {}, Book, book_model_admin2, 'author'
++)
++
++# Get the choices
++choices2 = filter_instance2.field_choices(author_field, request, book_model_admin2)
++print("Choices from RelatedOnlyFieldListFilter:")
++for choice in choices2:
++    print(f"  {choice}")
++
++print("\nExpected order: Alice, Bob, Zoe (alphabetical as defined in Author.Meta.ordering)")
+diff --git a/test_ordering_simple.py b/test_ordering_simple.py
+new file mode 100644
+index 0000000000..9e689cdf27
+--- /dev/null
++++ b/test_ordering_simple.py
+@@ -0,0 +1,50 @@
++"""
++Simple test to check the ordering behavior
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django modules after setup
++from django.db import models
++from django.contrib import admin
++from django.contrib.admin.filters import RelatedFieldListFilter, RelatedOnlyFieldListFilter
++
++# Let's examine the field_choices method behavior
++print("Examining RelatedFieldListFilter.field_choices():")
++print("Current implementation sets ordering = () on line 197")
++print("It should fall back to model._meta.ordering when related_admin has no ordering\n")
++
++print("Examining RelatedOnlyFieldListFilter.field_choices():")
++print("Current implementation doesn't pass ordering parameter to field.get_choices()")
++print("It should pass the ordering parameter like RelatedFieldListFilter does")
++
++# Let's look at the actual code
++import inspect
++
++print("\n\nRelatedFieldListFilter.field_choices source:")
++print(inspect.getsource(RelatedFieldListFilter.field_choices))
++
++print("\n\nRelatedOnlyFieldListFilter.field_choices source:")
++print(inspect.getsource(RelatedOnlyFieldListFilter.field_choices))
+diff --git a/test_ordering_with_admin.py b/test_ordering_with_admin.py
+new file mode 100644
+index 0000000000..7f6d17b3bc
+--- /dev/null
++++ b/test_ordering_with_admin.py
+@@ -0,0 +1,145 @@
++"""
++Test to verify that admin ordering still takes precedence over model ordering
++"""
++import os
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'django.contrib.auth',
++        'django.contrib.admin',
++        'django.contrib.sessions',
++        'django.contrib.messages',
++    ],
++    MIDDLEWARE=[
++        'django.contrib.sessions.middleware.SessionMiddleware',
++        'django.contrib.auth.middleware.AuthenticationMiddleware',
++        'django.contrib.messages.middleware.MessageMiddleware',
++    ],
++    SECRET_KEY='test-secret-key',
++    USE_TZ=True,
++)
++
++django.setup()
++
++# Now import Django modules after setup
++from django.db import models, connection
++from django.contrib import admin
++from django.test import RequestFactory
++from django.contrib.admin.filters import RelatedFieldListFilter, RelatedOnlyFieldListFilter
++from django.contrib.auth.models import AnonymousUser
++
++# Create test app models
++class Author(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        app_label = 'test_app'
++        ordering = ['name']  # Default: alphabetical
++    
++    def __str__(self):
++        return self.name
++
++
++class Book(models.Model):
++    title = models.CharField(max_length=100)
++    author = models.ForeignKey(Author, on_delete=models.CASCADE)
++    
++    class Meta:
++        app_label = 'test_app'
++    
++    def __str__(self):
++        return self.title
++
++
++# Create the database tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Author)
++    schema_editor.create_model(Book)
++
++# Create test data
++author1 = Author.objects.create(name="Alice")
++author2 = Author.objects.create(name="Bob")
++author3 = Author.objects.create(name="Zoe")
++
++book1 = Book.objects.create(title="Book 1", author=author1)
++book2 = Book.objects.create(title="Book 2", author=author2)
++book3 = Book.objects.create(title="Book 3", author=author3)
++
++# Define admin classes
++class AuthorAdmin(admin.ModelAdmin):
++    ordering = ['-name']  # Reverse alphabetical - this should take precedence
++
++
++class BookAdmin(admin.ModelAdmin):
++    list_filter = ['author']
++
++
++# Register models
++admin_site = admin.AdminSite()
++admin_site.register(Author, AuthorAdmin)
++admin_site.register(Book, BookAdmin)
++
++# Create a request
++factory = RequestFactory()
++request = factory.get('/')
++request.user = AnonymousUser()
++
++# Get the field
++book_model_admin = admin_site._registry[Book]
++author_field = Book._meta.get_field('author')
++
++# Test RelatedFieldListFilter
++print("Testing RelatedFieldListFilter with admin ordering:")
++filter_instance = RelatedFieldListFilter(
++    author_field, request, {}, Book, book_model_admin, 'author'
++)
++
++# Get the choices
++choices = list(filter_instance.field_choices(author_field, request, book_model_admin))
++print("Choices from RelatedFieldListFilter:")
++for pk, name in choices:
++    print(f"  {pk}: {name}")
++
++# Verify ordering
++author_names = [name for pk, name in choices]
++print(f"\nActual order: {author_names}")
++print(f"Expected order: ['Zoe', 'Bob', 'Alice'] (reverse alphabetical as defined in AuthorAdmin.ordering)")
++assert author_names == ['Zoe', 'Bob', 'Alice'], f"Ordering is incorrect! Got {author_names}"
++print("PASS: RelatedFieldListFilter respects admin ordering!")
++
++# Now test RelatedOnlyFieldListFilter
++print("\n\nTesting RelatedOnlyFieldListFilter with admin ordering:")
++
++# Create the filter
++filter_instance2 = RelatedOnlyFieldListFilter(
++    author_field, request, {}, Book, book_model_admin, 'author'
++)
++
++# Get the choices
++choices2 = list(filter_instance2.field_choices(author_field, request, book_model_admin))
++print("Choices from RelatedOnlyFieldListFilter:")
++for pk, name in choices2:
++    print(f"  {pk}: {name}")
++
++# Verify ordering
++author_names2 = [name for pk, name in choices2]
++print(f"\nActual order: {author_names2}")
++print(f"Expected order: ['Zoe', 'Bob', 'Alice'] (reverse alphabetical as defined in AuthorAdmin.ordering)")
++assert author_names2 == ['Zoe', 'Bob', 'Alice'], f"Ordering is incorrect! Got {author_names2}"
++print("PASS: RelatedOnlyFieldListFilter respects admin ordering!")
++
++print("\n\nSUCCESS: Admin ordering takes precedence as expected!")
+diff --git a/tests/admin_filters/models.py b/tests/admin_filters/models.py
+index ae78282d34..a9b280169e 100644
+--- a/tests/admin_filters/models.py
++++ b/tests/admin_filters/models.py
+@@ -54,6 +54,21 @@ class Employee(models.Model):
+         return self.name
+ 
+ 
++class Publisher(models.Model):
++    name = models.CharField(max_length=100)
++    
++    class Meta:
++        ordering = ['name']
++    
++    def __str__(self):
++        return self.name
++
++
++class PublishedBook(models.Model):
++    title = models.CharField(max_length=100)
++    publisher = models.ForeignKey(Publisher, models.CASCADE)
++
++
+ class TaggedItem(models.Model):
+     tag = models.SlugField()
+     content_type = models.ForeignKey(ContentType, models.CASCADE, related_name='tagged_items')
+diff --git a/tests/admin_filters/tests.py b/tests/admin_filters/tests.py
+index 4ff7d012e5..61c753b026 100644
+--- a/tests/admin_filters/tests.py
++++ b/tests/admin_filters/tests.py
+@@ -696,6 +696,38 @@ class ListFiltersTests(TestCase):
+         filterspec = changelist.get_filters(request)[0]
+         self.assertEqual(len(filterspec), 0)
+ 
++    def test_relatedfieldlistfilter_foreignkey_default_ordering(self):
++        """RelatedFieldListFilter falls back to Model.Meta.ordering when no admin ordering is defined."""
++        from .models import Publisher, PublishedBook
++        
++        # Create test data
++        pub_z = Publisher.objects.create(name='Zeta Publishing')
++        pub_a = Publisher.objects.create(name='Alpha Publishing')
++        pub_m = Publisher.objects.create(name='Middle Publishing')
++        
++        book1 = PublishedBook.objects.create(title='Book 1', publisher=pub_z)
++        book2 = PublishedBook.objects.create(title='Book 2', publisher=pub_a)
++        
++        # Admin without ordering
++        class PublisherAdmin(ModelAdmin):
++            pass
++        
++        class PublishedBookAdmin(ModelAdmin):
++            list_filter = ('publisher',)
++        
++        site.register(Publisher, PublisherAdmin)
++        self.addCleanup(lambda: site.unregister(Publisher))
++        modeladmin = PublishedBookAdmin(PublishedBook, site)
++        
++        request = self.request_factory.get('/')
++        request.user = self.alfred
++        changelist = modeladmin.get_changelist_instance(request)
++        filterspec = changelist.get_filters(request)[0][0]
++        
++        # Should be ordered by Publisher.Meta.ordering = ['name']
++        expected = [(pub_a.pk, 'Alpha Publishing'), (pub_m.pk, 'Middle Publishing'), (pub_z.pk, 'Zeta Publishing')]
++        self.assertEqual(filterspec.lookup_choices, expected)
++
+     def test_relatedonlyfieldlistfilter_foreignkey(self):
+         modeladmin = BookAdminRelatedOnlyFilter(Book, site)
+ 
+@@ -741,6 +773,72 @@ class ListFiltersTests(TestCase):
+         expected = [(self.bob.pk, 'bob'), (self.lisa.pk, 'lisa')]
+         self.assertEqual(sorted(filterspec.lookup_choices), sorted(expected))
+ 
++    def test_relatedonlyfieldlistfilter_foreignkey_default_ordering(self):
++        """RelatedOnlyFieldListFilter falls back to Model.Meta.ordering when no admin ordering is defined."""
++        from .models import Publisher, PublishedBook
++        
++        # Create test data
++        pub_z = Publisher.objects.create(name='Zeta Publishing')
++        pub_a = Publisher.objects.create(name='Alpha Publishing')
++        pub_m = Publisher.objects.create(name='Middle Publishing')
++        
++        book1 = PublishedBook.objects.create(title='Book 1', publisher=pub_z)
++        book2 = PublishedBook.objects.create(title='Book 2', publisher=pub_a)
++        # Note: pub_m has no books, so won't show up in RelatedOnlyFieldListFilter
++        
++        # Admin without ordering
++        class PublisherAdmin(ModelAdmin):
++            pass
++        
++        class PublishedBookAdminRelatedOnly(ModelAdmin):
++            list_filter = [('publisher', RelatedOnlyFieldListFilter)]
++        
++        site.register(Publisher, PublisherAdmin)
++        self.addCleanup(lambda: site.unregister(Publisher))
++        modeladmin = PublishedBookAdminRelatedOnly(PublishedBook, site)
++        
++        request = self.request_factory.get('/')
++        request.user = self.alfred
++        changelist = modeladmin.get_changelist_instance(request)
++        filterspec = changelist.get_filters(request)[0][0]
++        
++        # Should be ordered by Publisher.Meta.ordering = ['name']
++        # Only publishers with books should appear
++        expected = [(pub_a.pk, 'Alpha Publishing'), (pub_z.pk, 'Zeta Publishing')]
++        self.assertEqual(filterspec.lookup_choices, expected)
++
++    def test_relatedonlyfieldlistfilter_foreignkey_admin_ordering(self):
++        """RelatedOnlyFieldListFilter respects ModelAdmin.ordering."""
++        from .models import Publisher, PublishedBook
++        
++        # Create test data
++        pub_z = Publisher.objects.create(name='Zeta Publishing')
++        pub_a = Publisher.objects.create(name='Alpha Publishing')
++        pub_m = Publisher.objects.create(name='Middle Publishing')
++        
++        book1 = PublishedBook.objects.create(title='Book 1', publisher=pub_z)
++        book2 = PublishedBook.objects.create(title='Book 2', publisher=pub_a)
++        
++        # Admin with reverse ordering
++        class PublisherAdminWithOrdering(ModelAdmin):
++            ordering = ['-name']
++        
++        class PublishedBookAdminRelatedOnly(ModelAdmin):
++            list_filter = [('publisher', RelatedOnlyFieldListFilter)]
++        
++        site.register(Publisher, PublisherAdminWithOrdering)
++        self.addCleanup(lambda: site.unregister(Publisher))
++        modeladmin = PublishedBookAdminRelatedOnly(PublishedBook, site)
++        
++        request = self.request_factory.get('/')
++        request.user = self.alfred
++        changelist = modeladmin.get_changelist_instance(request)
++        filterspec = changelist.get_filters(request)[0][0]
++        
++        # Should be ordered by PublisherAdmin.ordering = ['-name']
++        expected = [(pub_z.pk, 'Zeta Publishing'), (pub_a.pk, 'Alpha Publishing')]
++        self.assertEqual(filterspec.lookup_choices, expected)
++
+     def test_listfilter_genericrelation(self):
+         django_bookmark = Bookmark.objects.create(url='https://www.djangoproject.com/')
+         python_bookmark = Bookmark.objects.create(url='https://www.python.org/')
