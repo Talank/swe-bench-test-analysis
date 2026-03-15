@@ -24,3 +24,7 @@ If the `extra_blocks_added` is more than 0, then the generated patch is augmente
 
 @ToDo:
 1. Run the script on the whole dataset. Find the ones that has tests in intermediate steps. Analyze the generated patches. Basically we are interested in finding the cases where `extra_blocks_added` is more than 0.
+
+Run the below command for the batch run, it will also generate a csv with results for the extra blocks (instances_with_extra_blocks.csv):
+
+python3 patch_batch.py --csv ../swebench_lite_test.csv --patch-root ../existing_prompt_results/20250522_tools_claude-4-opus/logs --traj-root ../existing_prompt_results/20250522_tools_claude-4-opus/trajs -v
