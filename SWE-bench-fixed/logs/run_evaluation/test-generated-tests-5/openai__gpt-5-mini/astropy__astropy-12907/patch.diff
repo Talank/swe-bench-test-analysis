@@ -1,0 +1,120 @@
+diff --git a/astropy/modeling/tests/test_separable_regression.py b/astropy/modeling/tests/test_separable_regression.py
+new file mode 100644
+index 000000000..b3fc1a485
+--- /dev/null
++++ b/astropy/modeling/tests/test_separable_regression.py
+@@ -0,0 +1,114 @@
++# Regression test for nested CompoundModel separability matrix bug
++import importlib.util
++import sys
++import types
++import numpy as np
++from numpy.testing import assert_array_equal
++
++# Prepare a fake astropy.modeling.core module with minimal Model and CompoundModel
++core = types.ModuleType('astropy.modeling.core')
++
++class ModelDefinitionError(Exception):
++    pass
++
++class Model:
++    def __init__(self, n_inputs=1, n_outputs=1, separable=True):
++        self.n_inputs = n_inputs
++        self.n_outputs = n_outputs
++        self.separable = separable
++        # provide a default hook
++        self._calculate_separability_matrix = lambda : NotImplemented
++
++    def __and__(self, other):
++        return CompoundModel(self, other, '&')
++
++    def __or__(self, other):
++        return CompoundModel(self, other, '|')
++
++class CompoundModel(Model):
++    def __init__(self, left, right, op):
++        # n_inputs and n_outputs depend on operator
++        if op == '&':
++            n_inputs = left.n_inputs + right.n_inputs
++            n_outputs = left.n_outputs + right.n_outputs
++        elif op == '|':
++            # for simplicity, assume dot composition outputs = right.outputs
++            n_inputs = left.n_inputs
++            n_outputs = right.n_outputs
++        else:
++            n_inputs = 1
++            n_outputs = 1
++        super().__init__(n_inputs=n_inputs, n_outputs=n_outputs, separable=False)
++        self.left = left
++        self.right = right
++        self.op = op
++
++core.Model = Model
++core.CompoundModel = CompoundModel
++core.ModelDefinitionError = ModelDefinitionError
++
++# Prepare a fake astropy.modeling.mappings module with Mapping
++mappings = types.ModuleType('astropy.modeling.mappings')
++class Mapping(core.Model):
++    def __init__(self, mapping):
++        # Mapping maps input axes to outputs; for our purposes make it
++        # a simple Model subclass so operator overloading works.
++        mapping = tuple(mapping)
++        n_inputs = len(set(mapping)) if mapping else 0
++        n_outputs = len(mapping)
++        super().__init__(n_inputs=n_inputs, n_outputs=n_outputs, separable=True)
++        self.mapping = mapping
++
++mappings.Mapping = Mapping
++
++# Inject into sys.modules so separable can import them via relative imports
++sys.modules['astropy'] = types.ModuleType('astropy')
++sys.modules['astropy.modeling'] = types.ModuleType('astropy.modeling')
++sys.modules['astropy.modeling.core'] = core
++sys.modules['astropy.modeling.mappings'] = mappings
++
++# Load the separable module from the source file
++spec = importlib.util.spec_from_file_location('astropy.modeling.separable',
++                                              'astropy/modeling/separable.py')
++separable = importlib.util.module_from_spec(spec)
++sys.modules['astropy.modeling.separable'] = separable
++spec.loader.exec_module(separable)
++
++# Create simple model classes to mimic Linear1D
++class Linear1D(core.Model):
++    def __init__(self, slope):
++        super().__init__(n_inputs=1, n_outputs=1, separable=True)
++        self.slope = slope
++
++# Expose a fake models namespace
++models = types.SimpleNamespace(Linear1D=Linear1D, Mapping=mappings.Mapping)
++
++
++def test_nested_compound_separability():
++    """
++    Ensure separability_matrix returns the correct correlation matrix for
++    nested CompoundModels. This reproduces the bug described where a '&'
++    operation whose right argument is itself a CompoundModel produced
++    duplicated blocks in the separability matrix.
++    """
++    separability_matrix = separable.separability_matrix
++
++    # simple compound on the right
++    cm = models.Linear1D(10) & models.Linear1D(5)
++    expect_cm = np.array([[True, False], [False, True]])
++    assert_array_equal(separability_matrix(cm), expect_cm)
++
++    # non-nested: Mapping & Linear1D & Linear1D
++    non_nested = models.Mapping((0, 1)) & models.Linear1D(10) & models.Linear1D(5)
++    # nested: Mapping & (Linear1D & Linear1D)
++    nested = models.Mapping((0, 1)) & cm
++
++    # For both cases the separability matrix should be a 4x4 identity
++    expect = np.eye(4, dtype=bool)
++    assert_array_equal(separability_matrix(non_nested), expect)
++    # This is the regression: nested should produce the same result
++    assert_array_equal(separability_matrix(nested), expect)
++
++if __name__ == '__main__':
++    test_nested_compound_separability()
++    print('OK')
