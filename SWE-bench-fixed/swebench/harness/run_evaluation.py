@@ -5,6 +5,7 @@ import json
 import platform
 import threading
 import traceback
+import re
 
 if platform.system() == "Linux":
     import resource
@@ -67,6 +68,34 @@ GIT_APPLY_CMDS = [
     "patch --batch --fuzz=5 -p1 -i",
 ]
 
+# def extract_marked_block(text: str, start_marker: str, end_marker: str) -> str | None:
+#     pattern = re.escape(start_marker) + r"\n(.*?)\n" + re.escape(end_marker)
+#     m = re.search(pattern, text, flags=re.DOTALL)
+#     return m.group(1).strip() if m else None
+
+def extract_marked_block(text: str, start_marker: str, end_marker: str) -> str | None:
+    start = text.find(start_marker)
+    if start == -1:
+        return None
+    start += len(start_marker)
+    end = text.find(end_marker, start)
+    if end == -1:
+        return None
+    return text[start:end].strip()
+
+def safe_load_json_block(raw_text):
+    if not raw_text:
+        return None
+
+    raw_text = raw_text.strip()
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+
+    if start == -1 or end == -1 or end < start:
+        return None
+
+    return json.loads(raw_text[start:end + 1])
 
 def run_instance(
     test_spec: TestSpec,
@@ -203,6 +232,23 @@ def run_instance(
         copy_to_container(container, eval_file, PurePosixPath("/eval.sh"))
 
         # Run eval script, write output to logs
+        # test_output, timed_out, total_runtime = exec_run_with_timeout(
+        #     container, "/bin/bash /eval.sh", timeout
+        # )
+        # test_output_path = log_dir / LOG_TEST_OUTPUT
+        # logger.info(f"Test runtime: {total_runtime:_.2f} seconds")
+        # with open(test_output_path, "w") as f:
+        #     f.write(test_output)
+        #     logger.info(f"Test output for {instance_id} written to {test_output_path}")
+        #     if timed_out:
+        #         f.write(f"\n\nTimeout error: {timeout} seconds exceeded.")
+        #         raise EvaluationError(
+        #             instance_id,
+        #             f"Test timed out after {timeout} seconds.",
+        #             logger,
+        #         )
+
+        # Run eval script, write output to logs
         test_output, timed_out, total_runtime = exec_run_with_timeout(
             container, "/bin/bash /eval.sh", timeout
         )
@@ -218,6 +264,33 @@ def run_instance(
                     f"Test timed out after {timeout} seconds.",
                     logger,
                 )
+
+        before_cov_json = extract_marked_block(
+            test_output,
+            "=== BEFORE_COVERAGE_JSON_START ===",
+            "=== BEFORE_COVERAGE_JSON_END ===",
+        )
+        after_cov_json = extract_marked_block(
+            test_output,
+            "=== AFTER_COVERAGE_JSON_START ===",
+            "=== AFTER_COVERAGE_JSON_END ===",
+        )
+
+        logger.info("RAW before_cov_json START:\n%s\nRAW before_cov_json END", before_cov_json[:2000] if before_cov_json else "NONE")
+        logger.info("RAW after_cov_json START:\n%s\nRAW after_cov_json END", after_cov_json[:2000] if after_cov_json else "NONE")
+        
+        # coverage_metrics = {
+        #     "before_fix_coverage_json": json.loads(before_cov_json) if before_cov_json else None,
+        #     "after_fix_coverage_json": json.loads(after_cov_json) if after_cov_json else None,
+        # }
+        coverage_metrics = {
+            "before_fix_coverage_json": safe_load_json_block(before_cov_json),
+            "after_fix_coverage_json": safe_load_json_block(after_cov_json),
+        }
+        coverage_metrics_path = log_dir / "coverage_metrics.json"
+        with open(coverage_metrics_path, "w") as f:
+            json.dump(coverage_metrics, f, indent=4)
+        logger.info(f"Coverage metrics for {instance_id} written to {coverage_metrics_path}")
 
         # Get git diff after running eval script (ignore permission changes)
         git_diff_output_after = (

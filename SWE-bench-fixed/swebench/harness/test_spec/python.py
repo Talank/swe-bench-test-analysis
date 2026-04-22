@@ -328,6 +328,7 @@ def make_env_script_list_py_from_conda(
         f"cat <<'{HEREDOC_DELIMITER}' > /root/environment.yml\n{cached_environment_yml}\n{HEREDOC_DELIMITER}",
         "conda env create -f /root/environment.yml",
         f"conda activate {env_name}",
+        "python -m pip install coverage",
     ]
     return reqs_commands
 
@@ -352,7 +353,7 @@ def make_env_script_list_py(instance, specs, env_name) -> list:
         # Create environment
         cmd = f"conda create -n {env_name} python={specs['python']} -y"
         reqs_commands.append(cmd)
-
+        
         # Install dependencies
         reqs = get_requirements(instance)
         path_to_reqs = "$HOME/requirements.txt"
@@ -362,6 +363,7 @@ def make_env_script_list_py(instance, specs, env_name) -> list:
         cmd = f"conda activate {env_name} && python -m pip install -r {path_to_reqs}"
         reqs_commands.append(cmd)
         reqs_commands.append(f"rm {path_to_reqs}")
+        reqs_commands.append(f"conda activate {env_name} && python -m pip install coverage")
     elif pkgs == "environment.yml":
         # Create environment from yml
         reqs = get_environment_yml(instance, env_name)
@@ -389,12 +391,14 @@ def make_env_script_list_py(instance, specs, env_name) -> list:
 
         # Remove environment.yml
         reqs_commands.append(f"rm {path_to_reqs}")
+        #reqs_commands.append(f"conda activate {env_name} && python -m pip install coverage")
     else:
         # Create environment + install dependencies
         cmd = f"conda create -n {env_name} python={specs['python']} {pkgs} -y"
         reqs_commands.append(cmd)
 
     reqs_commands.append(f"conda activate {env_name}")
+    reqs_commands.append("python -m pip install coverage")
 
     # Install additional packages if specified
     if "pip_packages" in specs:
@@ -486,11 +490,20 @@ def make_eval_script_list_py(
     The AI-generated test patch is already applied by run_evaluation.py.
     """
     HEREDOC_DELIMITER = "EOF_114329324912"
-
+    
     test_directives = get_test_directives(instance, prediction_patch)
     test_command = " ".join(
         [
             MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"],
+            *test_directives,
+        ]
+    )
+
+    base_test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]
+
+    pytest_test_command = " ".join(
+        [
+            "python -m pytest -q",
             *test_directives,
         ]
     )
@@ -522,7 +535,30 @@ def make_eval_script_list_py(
     if "install" in specs:
         eval_commands.append(specs["install"])
 
+    # eval_commands += [
+    #     "echo '=== BEFORE_FIX ==='",
+    #     "BEFORE_STATUS=0",
+    #     f": '{START_TEST_OUTPUT}'",
+    #     f"{test_command} || BEFORE_STATUS=$?",
+    #     f": '{END_TEST_OUTPUT}'",
+    #     "echo BEFORE_STATUS=$BEFORE_STATUS",
+
+    #     "echo '=== APPLY_GOLD_PATCH ==='",
+    #     apply_gold_patch_command,
+
+    #     "echo '=== AFTER_FIX ==='",
+    #     "AFTER_STATUS=0",
+    #     f": '{START_TEST_OUTPUT}'",
+    #     f"{test_command} || AFTER_STATUS=$?",
+    #     f": '{END_TEST_OUTPUT}'",
+    #     "echo AFTER_STATUS=$AFTER_STATUS",
+    # ]
+
     eval_commands += [
+
+        f'echo "BASE TEST CMD: {repr(base_test_cmd)}"',
+        f'echo "FINAL TEST CMD: {repr(test_command)}"',
+        
         "echo '=== BEFORE_FIX ==='",
         "BEFORE_STATUS=0",
         f": '{START_TEST_OUTPUT}'",
@@ -530,15 +566,85 @@ def make_eval_script_list_py(
         f": '{END_TEST_OUTPUT}'",
         "echo BEFORE_STATUS=$BEFORE_STATUS",
 
-        "echo '=== APPLY_GOLD_PATCH ==='",
+    "echo '=== BEFORE_COVERAGE ==='",
+        "python -m coverage erase || true",
+        f"BEFORE_COV_STATUS=0",
+        "set +x",
+        f"{pytest_test_command} >/tmp/before_cov_run.log 2>&1 || BEFORE_COV_STATUS=$?",
+        "set -x",
+        f"python -m coverage run -m pytest -q {' '.join(test_directives)} >/tmp/before_cov_pytest.log 2>&1 || true",
+        "set +x",
+        "python -m coverage json -o /tmp/before_coverage.json || true",
+        "set -x",
+        "echo BEFORE_COV_STATUS=$BEFORE_COV_STATUS",
+        "echo '=== BEFORE_COVERAGE_JSON_START ==='",
+        "set +x",
+        "cat /tmp/before_coverage.json 2>/dev/null || true",
+        "set -x",
+        "echo",
+        "echo '=== BEFORE_COVERAGE_JSON_END ==='",
+
+    "echo '=== APPLY_GOLD_PATCH ==='",
         apply_gold_patch_command,
 
-        "echo '=== AFTER_FIX ==='",
+    
+    "echo '=== AFTER_FIX ==='",
         "AFTER_STATUS=0",
-        f": '{START_TEST_OUTPUT}'",
-        f"{test_command} || AFTER_STATUS=$?",
-        f": '{END_TEST_OUTPUT}'",
-        "echo AFTER_STATUS=$AFTER_STATUS",
-    ]
 
+        f'echo "AFTER FIX BASE TEST CMD: {repr(base_test_cmd)}"',
+        f'echo "AFTER FIX FINAL TEST CMD: {repr(test_command)}"',
+
+        f"echo '{START_TEST_OUTPUT}'",
+        "set +x",
+        f"{test_command} >/tmp/after_test_output.log 2>&1 || AFTER_STATUS=$?",
+        "set -x",
+        "echo '=== AFTER_PYTEST_LOG_START ==='",
+        "set +x",
+        "cat /tmp/after_test_output.log 2>/dev/null || true",
+        "set -x",
+        "echo '=== AFTER_PYTEST_LOG_END ==='",
+        f"echo '{END_TEST_OUTPUT}'",
+        "echo AFTER_STATUS=$AFTER_STATUS",
+
+    "echo '=== AFTER_COVERAGE ==='",
+        "python -m coverage erase || true",
+        "AFTER_COV_STATUS=0",
+        "set +x",
+        f"{pytest_test_command} >/tmp/after_cov_run.log 2>&1 || AFTER_COV_STATUS=$?",
+        "set -x",
+        f"python -m coverage run -m pytest -q {' '.join(test_directives)} >/tmp/after_cov_pytest.log 2>&1 || true",
+        "set +x",
+        "python -m coverage json -o /tmp/after_coverage.json || true",
+        "set -x",
+        "echo AFTER_COV_STATUS=$AFTER_COV_STATUS",
+        "echo '=== AFTER_COVERAGE_JSON_START ==='",
+        "set +x",
+        "cat /tmp/after_coverage.json 2>/dev/null || true",
+        "set -x",
+        "echo",
+        "echo '=== AFTER_COVERAGE_JSON_END ==='",
+    ]
+    # "echo '=== AFTER_FIX ==='",
+    #     "AFTER_STATUS=0",
+
+    #     f'echo "AFTER FIX BASE TEST CMD: {repr(base_test_cmd)}"',
+    #     f'echo "AFTER FIX FINAL TEST CMD: {repr(test_command)}"',
+       
+    #     f": '{START_TEST_OUTPUT}'",
+    #     f"{test_command} || AFTER_STATUS=$?",
+    #     f": '{END_TEST_OUTPUT}'",
+    #     "echo AFTER_STATUS=$AFTER_STATUS",
+
+    # "echo '=== AFTER_COVERAGE ==='",
+    #     "python -m coverage erase || true",
+    #     f"AFTER_COV_STATUS=0",
+    #     f"{pytest_test_command} >/tmp/after_cov_run.log 2>&1 || AFTER_COV_STATUS=$?",
+    #     f"python -m coverage run -m pytest -q {' '.join(test_directives)} >/tmp/after_cov_pytest.log 2>&1 || true",
+    #     "python -m coverage json -o /tmp/after_coverage.json || true",
+    #     "echo AFTER_COV_STATUS=$AFTER_COV_STATUS",
+    #     "echo '=== AFTER_COVERAGE_JSON_START ==='",
+    #     "cat /tmp/after_coverage.json 2>/dev/null || true",
+    #     "echo",
+    #     "echo '=== AFTER_COVERAGE_JSON_END ==='",
+    # ]
     return eval_commands
