@@ -567,6 +567,8 @@ def make_eval_script_list_py(
         "echo BEFORE_STATUS=$BEFORE_STATUS",
 
     "echo '=== BEFORE_COVERAGE ==='",
+        "python -m pip install coverage || true",
+        "python -m coverage --version || true",
         "python -m coverage erase || true",
         f"BEFORE_COV_STATUS=0",
         "set +x",
@@ -607,6 +609,8 @@ def make_eval_script_list_py(
         "echo AFTER_STATUS=$AFTER_STATUS",
 
     "echo '=== AFTER_COVERAGE ==='",
+        "python -m pip install coverage || true",
+        "python -m coverage --version || true",
         "python -m coverage erase || true",
         "AFTER_COV_STATUS=0",
         "set +x",
