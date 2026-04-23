@@ -12,6 +12,6 @@
 
 3. Insidde SWE-bench, run the below command to evaluate and get coverage of the developer given test on developer fixed version:
 
-`python -m swebench.harness.run_evaluation --predictions_path gold --max_workers 1 --instance_ids astropy__astropy-12907  --run_id validate-gold-covg`
+`python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path gold --max_workers 1 --instance_ids astropy__astropy-12907  --run_id validate-gold-astropy__astropy-12907`
 
 (Look inside SWE-bench/logs/validate-gold-covg for results. 'test_output.txt' has log and coverage_metrics.json has coverage info.)
