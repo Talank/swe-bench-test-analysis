@@ -7,6 +7,11 @@ import threading
 import traceback
 import re
 
+import subprocess
+import tempfile
+import os
+import json
+
 if platform.system() == "Linux":
     import resource
 
@@ -68,34 +73,49 @@ GIT_APPLY_CMDS = [
     "patch --batch --fuzz=5 -p1 -i",
 ]
 
+
+def docker_cp_file(container_id: str, src_path: str, dst_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "cp", f"{container_id}:{src_path}", dst_path],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and os.path.exists(dst_path)
+    except Exception:
+        return False
+
+
+def load_json_file_if_exists(path: str):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+    
+
 # def extract_marked_block(text: str, start_marker: str, end_marker: str) -> str | None:
-#     pattern = re.escape(start_marker) + r"\n(.*?)\n" + re.escape(end_marker)
-#     m = re.search(pattern, text, flags=re.DOTALL)
-#     return m.group(1).strip() if m else None
+#     start = text.find(start_marker)
+#     if start == -1:
+#         return None
+#     start += len(start_marker)
+#     end = text.find(end_marker, start)
+#     if end == -1:
+#         return None
+#     return text[start:end].strip()
 
-def extract_marked_block(text: str, start_marker: str, end_marker: str) -> str | None:
-    start = text.find(start_marker)
-    if start == -1:
-        return None
-    start += len(start_marker)
-    end = text.find(end_marker, start)
-    if end == -1:
-        return None
-    return text[start:end].strip()
+# def safe_load_json_block(raw_text):
+#     if not raw_text:
+#         return None
 
-def safe_load_json_block(raw_text):
-    if not raw_text:
-        return None
+#     raw_text = raw_text.strip()
 
-    raw_text = raw_text.strip()
+#     start = raw_text.find("{")
+#     end = raw_text.rfind("}")
 
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
+#     if start == -1 or end == -1 or end < start:
+#         return None
 
-    if start == -1 or end == -1 or end < start:
-        return None
-
-    return json.loads(raw_text[start:end + 1])
+#     return json.loads(raw_text[start:end + 1])
 
 def run_instance(
     test_spec: TestSpec,
@@ -265,28 +285,43 @@ def run_instance(
                     logger,
                 )
 
-        before_cov_json = extract_marked_block(
-            test_output,
-            "=== BEFORE_COVERAGE_JSON_START ===",
-            "=== BEFORE_COVERAGE_JSON_END ===",
-        )
-        after_cov_json = extract_marked_block(
-            test_output,
-            "=== AFTER_COVERAGE_JSON_START ===",
-            "=== AFTER_COVERAGE_JSON_END ===",
-        )
+        # before_cov_json = extract_marked_block(
+        #     test_output,
+        #     "=== BEFORE_COVERAGE_JSON_START ===",
+        #     "=== BEFORE_COVERAGE_JSON_END ===",
+        # )
+        # after_cov_json = extract_marked_block(
+        #     test_output,
+        #     "=== AFTER_COVERAGE_JSON_START ===",
+        #     "=== AFTER_COVERAGE_JSON_END ===",
+        # )
 
-        logger.info("RAW before_cov_json START:\n%s\nRAW before_cov_json END", before_cov_json[:2000] if before_cov_json else "NONE")
-        logger.info("RAW after_cov_json START:\n%s\nRAW after_cov_json END", after_cov_json[:2000] if after_cov_json else "NONE")
+        # logger.info("RAW before_cov_json START:\n%s\nRAW before_cov_json END", before_cov_json[:2000] if before_cov_json else "NONE")
+        # logger.info("RAW after_cov_json START:\n%s\nRAW after_cov_json END", after_cov_json[:2000] if after_cov_json else "NONE")
         
+        # # coverage_metrics = {
+        # #     "before_fix_coverage_json": json.loads(before_cov_json) if before_cov_json else None,
+        # #     "after_fix_coverage_json": json.loads(after_cov_json) if after_cov_json else None,
+        # # }
         # coverage_metrics = {
-        #     "before_fix_coverage_json": json.loads(before_cov_json) if before_cov_json else None,
-        #     "after_fix_coverage_json": json.loads(after_cov_json) if after_cov_json else None,
+        #     "before_fix_coverage_json": safe_load_json_block(before_cov_json),
+        #     "after_fix_coverage_json": safe_load_json_block(after_cov_json),
         # }
+
+        before_cov_host_path = os.path.join(log_dir, "before_coverage.json")
+        after_cov_host_path = os.path.join(log_dir, "after_coverage.json")
+
+        before_cov_ok = docker_cp_file(container.id, "/tmp/before_coverage.json", before_cov_host_path)
+        after_cov_ok = docker_cp_file(container.id, "/tmp/after_coverage.json", after_cov_host_path)
+
+        before_fix_coverage_json = load_json_file_if_exists(before_cov_host_path) if before_cov_ok else None
+        after_fix_coverage_json = load_json_file_if_exists(after_cov_host_path) if after_cov_ok else None
+
         coverage_metrics = {
-            "before_fix_coverage_json": safe_load_json_block(before_cov_json),
-            "after_fix_coverage_json": safe_load_json_block(after_cov_json),
-        }
+            "before_fix_coverage_json": before_fix_coverage_json,
+            "after_fix_coverage_json": after_fix_coverage_json,
+        } 
+
         coverage_metrics_path = log_dir / "coverage_metrics.json"
         with open(coverage_metrics_path, "w") as f:
             json.dump(coverage_metrics, f, indent=4)

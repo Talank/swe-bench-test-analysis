@@ -6,6 +6,11 @@ import platform
 import threading
 import traceback
 
+import subprocess
+import tempfile
+import os
+import json
+
 if platform.system() == "Linux":
     import resource
 
@@ -68,32 +73,56 @@ GIT_APPLY_CMDS = [
 ]
 
 
-def extract_block(text: str, start_marker: str, end_marker: str) -> str | None:
-    if not text:
-        return None
-    start = text.find(start_marker)
-    if start == -1:
-        return None
-    start += len(start_marker)
-    end = text.find(end_marker, start)
-    if end == -1:
-        return None
-    return text[start:end].strip()
+import subprocess
+import tempfile
+import os
+import json
 
 
-def safe_load_json_block(raw_text: str | None):
-    if not raw_text:
+def docker_cp_file(container_id: str, src_path: str, dst_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "cp", f"{container_id}:{src_path}", dst_path],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and os.path.exists(dst_path)
+    except Exception:
+        return False
+
+
+def load_json_file_if_exists(path: str):
+    if not os.path.exists(path):
         return None
+    with open(path, "r") as f:
+        return json.load(f)
+    
+# def extract_block(text: str, start_marker: str, end_marker: str) -> str | None:
+#     if not text:
+#         return None
+#     start = text.find(start_marker)
+#     if start == -1:
+#         return None
+#     start += len(start_marker)
+#     end = text.find(end_marker, start)
+#     if end == -1:
+#         return None
+#     return text[start:end].strip()
 
-    raw_text = raw_text.strip()
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
 
-    if start == -1 or end == -1 or end < start:
-        return None
+# def safe_load_json_block(raw_text: str | None):
+#     if not raw_text:
+#         return None
 
-    candidate = raw_text[start : end + 1]
-    return json.loads(candidate)
+#     raw_text = raw_text.strip()
+#     start = raw_text.find("{")
+#     end = raw_text.rfind("}")
+
+#     if start == -1 or end == -1 or end < start:
+#         return None
+
+#     candidate = raw_text[start : end + 1]
+#     return json.loads(candidate)
 
 def run_instance(
     test_spec: TestSpec,
@@ -247,30 +276,43 @@ def run_instance(
                     logger,
                 )
 
-        before_cov_json = extract_block(
-            test_output,
-            "=== BEFORE_COVERAGE_JSON_START ===",
-            "=== BEFORE_COVERAGE_JSON_END ===",
-        )
-        after_cov_json = extract_block(
-            test_output,
-            "=== AFTER_COVERAGE_JSON_START ===",
-            "=== AFTER_COVERAGE_JSON_END ===",
-        )
+        # before_cov_json = extract_block(
+        #     test_output,
+        #     "=== BEFORE_COVERAGE_JSON_START ===",
+        #     "=== BEFORE_COVERAGE_JSON_END ===",
+        # )
+        # after_cov_json = extract_block(
+        #     test_output,
+        #     "=== AFTER_COVERAGE_JSON_START ===",
+        #     "=== AFTER_COVERAGE_JSON_END ===",
+        # )
 
-        logger.info(
-            "Found before coverage block: %s",
-            before_cov_json is not None,
-        )
-        logger.info(
-            "Found after coverage block: %s",
-            after_cov_json is not None,
-        )
+        # logger.info(
+        #     "Found before coverage block: %s",
+        #     before_cov_json is not None,
+        # )
+        # logger.info(
+        #     "Found after coverage block: %s",
+        #     after_cov_json is not None,
+        # )
+
+        # coverage_metrics = {
+        #     "before_fix_coverage_json": safe_load_json_block(before_cov_json),
+        #     "after_fix_coverage_json": safe_load_json_block(after_cov_json),
+        # }
+        before_cov_host_path = os.path.join(log_dir, "before_coverage.json")
+        after_cov_host_path = os.path.join(log_dir, "after_coverage.json")
+
+        before_cov_ok = docker_cp_file(container.id, "/tmp/before_coverage.json", before_cov_host_path)
+        after_cov_ok = docker_cp_file(container.id, "/tmp/after_coverage.json", after_cov_host_path)
+
+        before_fix_coverage_json = load_json_file_if_exists(before_cov_host_path) if before_cov_ok else None
+        after_fix_coverage_json = load_json_file_if_exists(after_cov_host_path) if after_cov_ok else None
 
         coverage_metrics = {
-            "before_fix_coverage_json": safe_load_json_block(before_cov_json),
-            "after_fix_coverage_json": safe_load_json_block(after_cov_json),
-        }
+            "before_fix_coverage_json": before_fix_coverage_json,
+            "after_fix_coverage_json": after_fix_coverage_json,
+        } 
 
         coverage_metrics_path = log_dir / "coverage_metrics.json"
         with open(coverage_metrics_path, "w") as f:
